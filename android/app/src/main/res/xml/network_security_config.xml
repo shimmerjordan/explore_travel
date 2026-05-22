@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 9+ blocks plain HTTP by default. This app needs cleartext for
+  user-owned servers on LAN / VPN / ZeroTier overlays (WebDAV like
+  AList / dav.sh, custom image hosts, etc.), so we permit it globally.
+
+  Note: Android's <domain> tag does NOT accept CIDR ranges — it only
+  matches hostnames/subdomains. The cleanest way to whitelist private
+  networks is `cleartextTrafficPermitted="true"` at base-config level
+  combined with `usesCleartextTraffic="true"` on the <application>.
+  Real HTTPS traffic to public sites is unaffected.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

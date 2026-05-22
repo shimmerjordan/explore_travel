@@ -1,0 +1,114 @@
+name: explore_journal
+description: "Travel exploration app with fog-of-war map, layered tracks, AI planning, and P2P sharing."
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.5.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+
+  # State management
+  flutter_riverpod: ^2.5.1
+  riverpod_annotation: ^2.3.5
+
+  # Routing
+  go_router: ^14.2.7
+
+  # Map (open-source, free, supports custom tiles for Amap/Google/satellite/hybrid)
+  flutter_map: ^7.0.2
+  latlong2: ^0.9.1
+  flutter_map_location_marker: ^9.1.1
+
+  # Location & background tracking
+  geolocator: ^13.0.1
+  permission_handler: ^11.3.1
+  flutter_foreground_task: ^8.10.0
+
+  # Database
+  drift: ^2.20.0
+  sqlite3_flutter_libs: ^0.5.24
+  path_provider: ^2.1.4
+  path: ^1.9.0
+
+  # WebDAV sync
+  webdav_client: ^1.2.2
+
+  # Media
+  image_picker: ^1.1.2
+  video_player: ^2.9.1
+  photo_view: ^0.15.0
+  flutter_quill: ^11.0.0
+  exif: ^3.3.0
+  xml: ^6.5.0
+  cryptography: ^2.7.0
+
+  # Audio (music + voice capture for PTT)
+  just_audio: ^0.9.40
+  audio_session: ^0.1.21
+  record: ^5.1.2
+
+  # Offline tile cache
+  cached_network_image: ^3.4.1
+
+  # Networking (AI + Music APIs)
+  dio: ^5.7.0
+
+  # Markdown rendering for AI trip recommendations (images + headings)
+  flutter_markdown: ^0.7.4
+
+  # AES-ECB block cipher for the netease direct backend (linuxapi flavor).
+  # `cryptography` (already present) doesn't expose raw ECB without forced
+  # padding, so we use `encrypt` which wraps pointycastle and gives clean
+  # block-level access.
+  encrypt: ^5.0.3
+
+  # WebView for in-app login flows that scrape the user's session cookie
+  # back into AppSettings.musicCredentials. Used by the music sources page.
+  webview_flutter: ^4.10.0
+
+  # P2P
+  multicast_dns: ^0.3.2+6
+  web_socket_channel: ^3.0.1
+  # WebRTC transport. Mobile-only in practice — on Linux/Web we expose a
+  # stub that refuses to start. flutter_webrtc 0.11 supports iOS, Android,
+  # macOS, Windows; Linux support is experimental.
+  flutter_webrtc: ^1.4.1
+  url_launcher: ^6.3.0
+  android_intent_plus: ^5.1.0
+
+  # Utilities
+  collection: ^1.18.0
+  intl: ^0.20.2
+  crypto: ^3.0.5
+  shared_preferences: ^2.3.2
+  uuid: ^4.5.0
+  archive: ^3.6.1
+  share_plus: ^10.0.0
+  file_picker: ^8.1.2
+  geocoding: ^3.0.0
+
+# record_linux 0.7.2 is broken against record_platform_interface 1.5.
+# We don't ship Linux desktop; force the older interface so deps resolve.
+dependency_overrides:
+  # record_linux 0.7.2 is broken against newer platform_interface; force a
+  # later record_linux that matches record_platform_interface 1.5.
+  record_linux: ^1.0.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  build_runner: ^2.4.13
+  drift_dev: ^2.20.2
+  riverpod_generator: ^2.4.3
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/boundaries/

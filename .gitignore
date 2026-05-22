@@ -1,0 +1,86 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# The .vscode folder contains launch configuration and tasks you configure in
+# VS Code which you may wish to be included in version control, so this line
+# is commented out by default.
+#.vscode/
+
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+/coverage/
+
+# Symbolication related
+app.*.symbols
+
+# Obfuscation related
+app.*.map.json
+
+# Android Studio will place build artifacts here
+/android/app/debug
+/android/app/profile
+/android/app/release
+
+# ─── Project-specific additions ─────────────────────────────────────────
+# Local Android signing material — never commit
+android/key.properties
+android/app/*.keystore
+android/app/*.jks
+*.keystore
+*.jks
+
+# iOS signing
+ios/Runner/GoogleService-Info.plist
+ios/*.mobileprovision
+
+# Generated Drift / Riverpod / build_runner output
+# (Kept in repo by default — leave them committed since this is an app, not
+# a library. Uncomment if you'd rather generate fresh in CI.)
+#**/*.g.dart
+#**/*.freezed.dart
+
+# Local-only IDE / editor
+.vscode/
+*.code-workspace
+.cursor/
+.aider*
+.zed/
+
+# Local-only env files / API keys
+.env
+.env.*
+local.env
+secrets.json
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Personal data dumps from manual testing
+/test_exports/
+/backup_dumps/
+*.tmp
