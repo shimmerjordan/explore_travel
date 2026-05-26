@@ -177,32 +177,45 @@ class FogEngine {
   /// in one go — otherwise you get a dotted constellation instead of a
   /// continuous trail.
   ///
-  /// Bresenham in global-pixel space; one bit per pixel along the path.
+  /// Sweep a disk of [radiusMeters] along the straight segment from
+  /// (lat0,lng0) to (lat1,lng1). This is the **ambient fog clear**, NOT
+  /// the visible trail — the visible trail is drawn as a real vector
+  /// polyline on top of the map. The disk-sweep just creates a wide,
+  /// soft corridor in the fog so the polyline rides inside cleared
+  /// territory instead of fighting raster aliasing along its edge.
+  ///
+  /// Caller must gate this on a freshness / max-gap check — see
+  /// [RecordingController]. We don't second-guess that here.
   Future<void> revealLine({
     required double lat0,
     required double lng0,
     required double lat1,
     required double lng1,
     required int layerId,
+    required double radiusMeters,
   }) async {
     final x0 = lngToGlobalX(lng0);
     final y0 = latToGlobalY(lat0);
     final x1 = lngToGlobalX(lng1);
     final y1 = latToGlobalY(lat1);
-    final dx = (x1 - x0).abs();
-    final dy = (y1 - y0).abs();
-    final sx = x0 < x1 ? 1 : -1;
-    final sy = y0 < y1 ? 1 : -1;
-    var err = dx - dy;
-    var x = x0;
-    var y = y0;
-    // Touch the same block at most once per write — accumulate sets per
-    // block, flush once at the end. Reuses the same pattern as
-    // [revealPoint].
+    final metersPerPixel = _metersPerPixelAt((lat0 + lat1) / 2);
+    final rPx = (radiusMeters / metersPerPixel).ceil().clamp(1, 1 << 20);
+    final segPx =
+        math.sqrt(math.pow(x1 - x0, 2) + math.pow(y1 - y0, 2)).toDouble();
+    // Step **per pixel** along the segment (not per half-radius). Each
+    // disk is small (rPx is often 3–10 px); half-radius stepping left
+    // visible scallops on diagonals where each disk's perimeter
+    // protrudes between centres. Per-pixel stepping means the corridor
+    // edge is a true Minkowski sum of disk + line, i.e. as smooth as
+    // raster gets at this resolution. Hard cap so a runaway long line
+    // (e.g. import bug producing a giant gap) can't queue 100k writes.
+    final steps = segPx.ceil().clamp(1, 8192);
+
     final touched = <String, _BlockEdit>{};
-    while (true) {
-      final decomX = decompose(x);
-      final decomY = decompose(y);
+    void addPixel(int gx, int gy) {
+      if (gx < 0 || gy < 0 || gx >= full || gy >= full) return;
+      final decomX = decompose(gx);
+      final decomY = decompose(gy);
       final key =
           '${decomX.tile}_${decomY.tile}_${decomX.block}_${decomY.block}';
       final edit = touched.putIfAbsent(
@@ -210,15 +223,23 @@ class FogEngine {
           () => _BlockEdit(
               decomX.tile, decomY.tile, decomX.block, decomY.block));
       edit.sets.add((decomX.pixel, decomY.pixel));
-      if (x == x1 && y == y1) break;
-      final e2 = err * 2;
-      if (e2 > -dy) {
-        err -= dy;
-        x += sx;
-      }
-      if (e2 < dx) {
-        err += dx;
-        y += sy;
+    }
+
+    final rSq = rPx * rPx;
+    for (int s = 0; s <= steps; s++) {
+      final t = s / steps;
+      final cx = (x0 + (x1 - x0) * t).round();
+      final cy = (y0 + (y1 - y0) * t).round();
+      final xMin = (cx - rPx).clamp(0, full - 1).toInt();
+      final xMax = (cx + rPx).clamp(0, full - 1).toInt();
+      final yMin = (cy - rPx).clamp(0, full - 1).toInt();
+      final yMax = (cy + rPx).clamp(0, full - 1).toInt();
+      for (int gy = yMin; gy <= yMax; gy++) {
+        final dyP = gy - cy;
+        for (int gx = xMin; gx <= xMax; gx++) {
+          final dxP = gx - cx;
+          if (dxP * dxP + dyP * dyP <= rSq) addPixel(gx, gy);
+        }
       }
     }
     for (final edit in touched.values) {

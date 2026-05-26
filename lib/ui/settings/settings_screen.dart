@@ -242,6 +242,15 @@ class SettingsScreen extends ConsumerWidget {
                 trailing: const Icon(Icons.chevron_right),
                 onTap: () => context.push('/group/setup'),
               ),
+              _SectionHeader('关于'),
+              ListTile(
+                leading: const Icon(Icons.info_outline_rounded),
+                title: const Text('关于 Explore Journal'),
+                subtitle:
+                    const Text('版本号 / 仓库 / 文档 / 贡献者 / 许可证'),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => context.push('/about'),
+              ),
               const SizedBox(height: 60),
             ]),
           ),

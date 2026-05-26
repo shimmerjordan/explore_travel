@@ -18,6 +18,8 @@ import '../services/imghost/upload_queue.dart';
 import '../services/backup/backup_service.dart';
 import '../services/geo/geocoding_service.dart';
 import '../services/geo/learned_regions.dart';
+import '../services/leaderboard/leaderboard_service.dart';
+import '../services/leaderboard/leaderboard_sync.dart';
 
 final prefsStoreProvider = Provider((_) => PrefsStore());
 
@@ -91,8 +93,10 @@ final uploadQueueProvider = Provider<UploadQueue>((ref) {
   return q;
 });
 
-final backupServiceProvider =
-    Provider<BackupService>((ref) => BackupService(ref.read(dbProvider)));
+final backupServiceProvider = Provider<BackupService>((ref) => BackupService(
+      ref.read(dbProvider),
+      leaderboard: ref.read(leaderboardServiceProvider),
+    ));
 
 final webdavServiceProvider = Provider<WebDavService>((ref) {
   final s = ref.watch(settingsProvider);
@@ -261,12 +265,22 @@ class GroupLifecycle {
     try {
       ref.read(groupSyncControllerProvider).attach(svc.messages);
     } catch (_) {}
+    // Wire leaderboard auto-merge over the same transport. Ed25519 keys
+    // and the local entry are bootstrapped on settings load via
+    // [leaderboardServiceProvider] — by the time the group is up, the
+    // service is already populated.
+    try {
+      ref.read(leaderboardSyncProvider).attach(svc);
+    } catch (_) {}
   }
 
   Future<void> stop() async {
     if (!_started) return;
     _started = false;
     ref.read(groupRunningProvider.notifier).state = false;
+    try {
+      ref.read(leaderboardSyncProvider).detach();
+    } catch (_) {}
     try {
       await _svc?.stop();
     } catch (_) {}
@@ -376,3 +390,38 @@ final fogRefreshProvider = StateProvider<int>((ref) => 0);
 /// instead of forcing a fresh GPS read.
 final currentDisplayPositionProvider =
     StateProvider<({double lat, double lng})?>((ref) => null);
+
+/// Singleton — loaded once on first read; subsequent reads share the same
+/// in-memory map of entries.
+final leaderboardServiceProvider = Provider<LeaderboardService>((ref) {
+  final svc = LeaderboardService();
+  // Fire load; UI listens via [leaderboardEntriesProvider].
+  unawaited(svc.load());
+  // Ensure the local device has a keypair. Generated lazily on first run
+  // so a fresh install gets one without needing user interaction.
+  Future.microtask(() async {
+    final s = ref.read(settingsProvider);
+    if (s.leaderboardPrivateKey.isEmpty || s.leaderboardPublicKey.isEmpty) {
+      final kp = await svc.generateKeyPair();
+      ref.read(settingsProvider.notifier).update((p) => p.copyWith(
+            leaderboardPrivateKey: kp.privateKey,
+            leaderboardPublicKey: kp.publicKey,
+          ));
+    }
+  });
+  return svc;
+});
+
+/// Bridges the LeaderboardService onto the active GroupService.
+final leaderboardSyncProvider = Provider<LeaderboardSync>((ref) {
+  final svc = ref.watch(leaderboardServiceProvider);
+  final sync = LeaderboardSync(svc);
+  ref.onDispose(sync.detach);
+  return sync;
+});
+
+/// Watchable stream of the merged leaderboard, for UI.
+final leaderboardEntriesProvider = StreamProvider((ref) {
+  final svc = ref.watch(leaderboardServiceProvider);
+  return svc.watch;
+});

@@ -8,6 +8,8 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../data/db/database.dart';
+import '../leaderboard/leaderboard_model.dart';
+import '../leaderboard/leaderboard_service.dart';
 
 /// Modular chunked zip backup. Schema v2.
 ///
@@ -34,7 +36,11 @@ import '../../data/db/database.dart';
 /// ```
 class BackupService {
   final AppDb db;
-  BackupService(this.db);
+  /// Optional — when set, the leaderboard module is auto-included on export
+  /// and auto-merged on import. The user cannot opt out (it's a contract
+  /// with the rest of the group sync system).
+  final LeaderboardService? leaderboard;
+  BackupService(this.db, {this.leaderboard});
 
   static const archiveVersion = 2;
 
@@ -51,7 +57,13 @@ class BackupService {
     'imghost_uploads',
     'geocode_cache',
     'learned_regions',
+    'leaderboard',
   ];
+
+  /// Modules that MUST be in every export — the UI checkbox is rendered
+  /// disabled so the user can see them but can't deselect. Required for
+  /// the decentralised leaderboard's gossip-via-backup story.
+  static const requiredModules = <String>{'leaderboard'};
 
   static const moduleLabels = <String, String>{
     'journal': '旅行手账',
@@ -65,12 +77,15 @@ class BackupService {
     'imghost_uploads': '图床上传记录',
     'geocode_cache': '地理编码缓存',
     'learned_regions': '学习到的行政区',
+    'leaderboard': '排行榜（自动包含）',
   };
 
   // ─── Export ─────────────────────────────────────────────────────────────
 
   /// Build the zip in memory and return its raw bytes.
-  Future<Uint8List> exportToArchive(Set<String> modules) async {
+  Future<Uint8List> exportToArchive(Set<String> selected) async {
+    // Force the required modules — caller can't opt out.
+    final modules = {...selected, ...requiredModules};
     final archive = Archive();
 
     void addJson(String path, Object obj) {
@@ -263,6 +278,16 @@ class BackupService {
       }
     }
 
+    if (modules.contains('leaderboard') && leaderboard != null) {
+      // One line per entry — same on-wire shape as the P2P gossip path,
+      // so importing a backup is just "merge a batch from your past self".
+      final list = leaderboard!.toExportList();
+      addText(
+        'leaderboard/entries.jsonl',
+        list.map(jsonEncode).join('\n'),
+      );
+    }
+
     // `encode` is `List<int>?` in recent archive versions; we know it's
     // non-null because we always added at least manifest.json.
     return Uint8List.fromList(ZipEncoder().encode(archive)!);
@@ -288,6 +313,7 @@ class BackupService {
     required Set<String> modules,
     bool clearBeforeImport = false,
   }) async {
+    modules = {...modules, ...requiredModules};
     final archive = ZipDecoder().decodeBytes(bytes);
     final summary = ImportSummary();
 
@@ -611,6 +637,23 @@ class BackupService {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString('learned_regions_v1', raw);
       summary.imported['learned_regions'] = 1;
+    });
+
+    await wrap('leaderboard', () async {
+      final raw = readText('leaderboard/entries.jsonl');
+      if (raw == null || leaderboard == null) return;
+      final incoming = <LeaderboardEntry>[];
+      for (final line in raw.split('\n')) {
+        if (line.trim().isEmpty) continue;
+        try {
+          incoming.add(LeaderboardEntry.fromJson(
+              jsonDecode(line) as Map<String, dynamic>));
+        } catch (_) {}
+      }
+      final changed = await leaderboard!.mergeBatch(incoming);
+      summary.imported['leaderboard'] = changed;
+      final skipped = incoming.length - changed;
+      if (skipped > 0) summary.skipped['leaderboard'] = skipped;
     });
 
     return summary;

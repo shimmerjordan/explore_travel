@@ -122,6 +122,31 @@ class AppSettings {
   /// viewer.
   final bool debugMode;
 
+  // ── Profile / avatar ──────────────────────────────────────────────────
+  /// Base64-encoded JPEG (256×256, ~10–20 KB). Empty = no avatar; UI
+  /// falls back to hue-from-peerId initials. Stored in prefs so it's
+  /// covered by the settings backup module and travels with the user.
+  final String avatarBase64;
+
+  // ── Leaderboard (decentralised, append-only LWW) ──────────────────────
+  /// Ed25519 keypair generated once per device. Each leaderboard entry the
+  /// user contributes is signed with [leaderboardPrivateKey]; peers verify
+  /// with [leaderboardPublicKey]. Both base64 (raw bytes).
+  final String leaderboardPrivateKey;
+  final String leaderboardPublicKey;
+  /// Optional: target repo for "贡献到社区榜单" PR flow. Owner/repo, branch,
+  /// PAT with `pull_requests:write` + `contents:write` on a fork.
+  final String? leaderboardRepoOwner;
+  final String? leaderboardRepoName;
+  final String leaderboardRepoBranch;
+  final String? leaderboardRepoPat;
+  /// Optional: centralised leaderboard server (REST). See
+  /// docs/leaderboard-server-api.md for the contract. Empty = disabled.
+  final String? leaderboardServerUrl;
+  final String? leaderboardServerToken;
+  /// Auto-sync to/from the configured server every N minutes (0 = manual).
+  final int leaderboardServerSyncMin;
+
   const AppSettings({
     this.mapProvider = MapProvider.amap,
     this.mapStyle = MapStyle.standard,
@@ -179,6 +204,16 @@ class AppSettings {
     this.importClearBeforeImport = false,
     this.backupSelectedModules = const [],
     this.debugMode = false,
+    this.avatarBase64 = '',
+    this.leaderboardPrivateKey = '',
+    this.leaderboardPublicKey = '',
+    this.leaderboardRepoOwner,
+    this.leaderboardRepoName,
+    this.leaderboardRepoBranch = 'main',
+    this.leaderboardRepoPat,
+    this.leaderboardServerUrl,
+    this.leaderboardServerToken,
+    this.leaderboardServerSyncMin = 0,
   });
 
   AppSettings copyWith({
@@ -237,6 +272,16 @@ class AppSettings {
     bool? importClearBeforeImport,
     List<String>? backupSelectedModules,
     bool? debugMode,
+    String? avatarBase64,
+    String? leaderboardPrivateKey,
+    String? leaderboardPublicKey,
+    String? leaderboardRepoOwner,
+    String? leaderboardRepoName,
+    String? leaderboardRepoBranch,
+    String? leaderboardRepoPat,
+    String? leaderboardServerUrl,
+    String? leaderboardServerToken,
+    int? leaderboardServerSyncMin,
   }) =>
       AppSettings(
         mapProvider: mapProvider ?? this.mapProvider,
@@ -302,6 +347,23 @@ class AppSettings {
         backupSelectedModules:
             backupSelectedModules ?? this.backupSelectedModules,
         debugMode: debugMode ?? this.debugMode,
+        avatarBase64: avatarBase64 ?? this.avatarBase64,
+        leaderboardPrivateKey:
+            leaderboardPrivateKey ?? this.leaderboardPrivateKey,
+        leaderboardPublicKey:
+            leaderboardPublicKey ?? this.leaderboardPublicKey,
+        leaderboardRepoOwner:
+            leaderboardRepoOwner ?? this.leaderboardRepoOwner,
+        leaderboardRepoName: leaderboardRepoName ?? this.leaderboardRepoName,
+        leaderboardRepoBranch:
+            leaderboardRepoBranch ?? this.leaderboardRepoBranch,
+        leaderboardRepoPat: leaderboardRepoPat ?? this.leaderboardRepoPat,
+        leaderboardServerUrl:
+            leaderboardServerUrl ?? this.leaderboardServerUrl,
+        leaderboardServerToken:
+            leaderboardServerToken ?? this.leaderboardServerToken,
+        leaderboardServerSyncMin:
+            leaderboardServerSyncMin ?? this.leaderboardServerSyncMin,
       );
 
   Map<String, dynamic> toJson() => {
@@ -360,6 +422,16 @@ class AppSettings {
         'importClearBeforeImport': importClearBeforeImport,
         'backupSelectedModules': backupSelectedModules,
         'debugMode': debugMode,
+        'avatarBase64': avatarBase64,
+        'leaderboardPrivateKey': leaderboardPrivateKey,
+        'leaderboardPublicKey': leaderboardPublicKey,
+        'leaderboardRepoOwner': leaderboardRepoOwner,
+        'leaderboardRepoName': leaderboardRepoName,
+        'leaderboardRepoBranch': leaderboardRepoBranch,
+        'leaderboardRepoPat': leaderboardRepoPat,
+        'leaderboardServerUrl': leaderboardServerUrl,
+        'leaderboardServerToken': leaderboardServerToken,
+        'leaderboardServerSyncMin': leaderboardServerSyncMin,
       };
 
   factory AppSettings.fromJson(Map<String, dynamic> j) => AppSettings(
@@ -368,7 +440,7 @@ class AppSettings {
         recordingMode: RecordingMode.values[j['recordingMode'] ?? 1],
         fogColor: j['fogColor'] ?? 0xFF101820,
         fogOpacity: (j['fogOpacity'] ?? 0.78).toDouble(),
-        fogPenRadius: (j['fogPenRadius'] ?? 80).toDouble(),
+        fogPenRadius: (j['fogPenRadius'] ?? 50).toDouble(),
         amapApiKey: j['amapApiKey'],
         googleMapKey: j['googleMapKey'],
         customOsmTileUrl: j['customOsmTileUrl'],
@@ -431,6 +503,20 @@ class AppSettings {
             (j['backupSelectedModules'] as List?)?.cast<String>() ??
                 const [],
         debugMode: j['debugMode'] ?? false,
+        avatarBase64: j['avatarBase64']?.toString() ?? '',
+        leaderboardPrivateKey:
+            j['leaderboardPrivateKey']?.toString() ?? '',
+        leaderboardPublicKey:
+            j['leaderboardPublicKey']?.toString() ?? '',
+        leaderboardRepoOwner: j['leaderboardRepoOwner']?.toString(),
+        leaderboardRepoName: j['leaderboardRepoName']?.toString(),
+        leaderboardRepoBranch:
+            j['leaderboardRepoBranch']?.toString() ?? 'main',
+        leaderboardRepoPat: j['leaderboardRepoPat']?.toString(),
+        leaderboardServerUrl: j['leaderboardServerUrl']?.toString(),
+        leaderboardServerToken: j['leaderboardServerToken']?.toString(),
+        leaderboardServerSyncMin:
+            (j['leaderboardServerSyncMin'] as num?)?.toInt() ?? 0,
       );
 }
 

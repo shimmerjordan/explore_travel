@@ -394,6 +394,15 @@ class WebRtcGroupService implements GroupService {
   Future<void> sendMusicStop() async =>
       _broadcast(_msg('music_stop', const {}));
 
+  @override
+  Future<void> broadcastCustom(String type, Map<String, dynamic> data) =>
+      _broadcast(_msg(type, data));
+
+  @override
+  Future<void> sendCustomTo(
+          String peerId, String type, Map<String, dynamic> data) =>
+      _sendOne(peerId, _msg(type, {...data, 'to': peerId}));
+
   Future<void> _sendOne(String peerId, GroupMessage msg) async {
     final payload = jsonEncode(msg.toJson());
     final line =

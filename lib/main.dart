@@ -21,6 +21,8 @@ import 'ui/backup/backup_screen.dart';
 import 'ui/imghost/imghost_settings_screen.dart';
 import 'ui/group_setup/group_setup_screen.dart';
 import 'ui/group_setup/group_diagnostics_screen.dart';
+import 'ui/leaderboard/leaderboard_screen.dart';
+import 'ui/about/about_screen.dart';
 import 'app/providers.dart' show groupLifecycleProvider;
 import 'services/debug/log_buffer.dart';
 import 'ui/debug/debug_screen.dart';
@@ -109,6 +111,10 @@ class ExploreJournalApp extends ConsumerWidget {
       GoRoute(
           path: '/group/diag',
           builder: (_, __) => const GroupDiagnosticsScreen()),
+      GoRoute(
+          path: '/leaderboard',
+          builder: (_, __) => const LeaderboardScreen()),
+      GoRoute(path: '/about', builder: (_, __) => const AboutScreen()),
     ],
   );
 
@@ -178,10 +184,29 @@ class ExploreJournalApp extends ConsumerWidget {
       elevation: 2,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
     ),
-    // Float SnackBars so they don't reflow the Scaffold and push the
-    // bottom nav / centered FAB upward.
     snackBarTheme: const SnackBarThemeData(
       behavior: SnackBarBehavior.floating,
+    ),
+    listTileTheme: const ListTileThemeData(
+      shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.all(Radius.circular(12))),
+      contentPadding: EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+    ),
+    chipTheme: ChipThemeData(
+      shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(10)),
+      side: BorderSide.none,
+    ),
+    filledButtonTheme: FilledButtonThemeData(
+      style: FilledButton.styleFrom(
+          shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12))),
+    ),
+    segmentedButtonTheme: SegmentedButtonThemeData(
+      style: ButtonStyle(
+        shape: WidgetStatePropertyAll(RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12))),
+      ),
     ),
   );
 
@@ -207,10 +232,29 @@ class ExploreJournalApp extends ConsumerWidget {
       elevation: 2,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
     ),
-    // Float SnackBars so they don't reflow the Scaffold and push the
-    // bottom nav / centered FAB upward.
     snackBarTheme: const SnackBarThemeData(
       behavior: SnackBarBehavior.floating,
+    ),
+    listTileTheme: const ListTileThemeData(
+      shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.all(Radius.circular(12))),
+      contentPadding: EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+    ),
+    chipTheme: ChipThemeData(
+      shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(10)),
+      side: BorderSide.none,
+    ),
+    filledButtonTheme: FilledButtonThemeData(
+      style: FilledButton.styleFrom(
+          shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12))),
+    ),
+    segmentedButtonTheme: SegmentedButtonThemeData(
+      style: ButtonStyle(
+        shape: WidgetStatePropertyAll(RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12))),
+      ),
     ),
   );
 }

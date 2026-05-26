@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
@@ -8,6 +9,7 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:go_router/go_router.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:latlong2/latlong.dart';
 import '../../app/providers.dart';
 import '../../core/prefs.dart' show PeerOverrideX;
@@ -351,9 +353,11 @@ class _MapScreenState extends ConsumerState<MapScreen> {
               if (visibleLayerIds.isNotEmpty)
                 FogLayer(
                   engine: ref.read(fogEngineProvider),
+                  db: ref.read(dbProvider),
                   layerIds: visibleLayerIds,
                   fogColor: Color(settings.fogColor),
                   fogOpacity: settings.fogOpacity,
+                  trailRadiusMeters: settings.fogPenRadius,
                   refreshKey: fogRefresh,
                   mapProvider: settings.mapProvider,
                 ),
@@ -445,10 +449,19 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                         overlayColor: Colors.white24,
                       ),
                       child: Slider(
+                        // Both the FOW bitmap reveal *and* the
+                        // on-screen smooth stroke use this. Bitmap
+                        // floor of 1 m rounds to ≥1 storage pixel
+                        // (~9.5 m); the stroke uses the value in
+                        // METERS via a screen-pixel conversion, so
+                        // values below the storage resolution are
+                        // still rendered correctly — the trail just
+                        // gets thinner on-screen as the user dials
+                        // it down.
                         value: settings.fogPenRadius,
-                        min: 5,
+                        min: 1,
                         max: 200,
-                        divisions: 39,
+                        divisions: 199,
                         onChanged: (v) => ref
                             .read(settingsProvider.notifier)
                             .update((p) => p.copyWith(fogPenRadius: v)),
@@ -755,7 +768,6 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     final tiles = await db.fogTilesForLayers(layerIds, FogEngine.tileZoom);
     final journalCount = (await db.recentJournal(limit: 1000)).length;
     if (!context.mounted) return;
-    final settings = ref.read(settingsProvider);
     showModalBottomSheet<void>(
       useRootNavigator: true,
       context: context,
@@ -764,94 +776,204 @@ class _MapScreenState extends ConsumerState<MapScreen> {
         borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
       builder: (_) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Center(
-                child: Container(
-                  width: 40,
-                  height: 4,
-                  decoration: BoxDecoration(
-                    color: Colors.white24,
-                    borderRadius: BorderRadius.circular(2),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 16),
-              Row(
-                children: [
-                  CircleAvatar(
-                    radius: 28,
-                    backgroundColor: const Color(0xFF26A69A),
-                    child: Text(
-                      settings.displayName.isEmpty
-                          ? '?'
-                          : settings.displayName[0],
-                      style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 22,
-                          fontWeight: FontWeight.bold),
+        // Wrap in Consumer so the avatar + name update live when the
+        // user taps "更换" inside this very sheet — without a rebuild
+        // it would only flip after the user closes & reopens.
+        child: Consumer(builder: (sheetCtx, sheetRef, _) {
+          final settings = sheetRef.watch(settingsProvider);
+          return Padding(
+            padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Center(
+                  child: Container(
+                    width: 40,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: Colors.white24,
+                      borderRadius: BorderRadius.circular(2),
                     ),
                   ),
-                  const SizedBox(width: 12),
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(settings.displayName,
-                          style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 18,
-                              fontWeight: FontWeight.w600)),
-                      Text(
-                        '等级 ${(pct * 100000).toInt().clamp(1, 999)}',
-                        style: const TextStyle(
-                            color: Colors.white60, fontSize: 12),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-              const SizedBox(height: 20),
-              const Text('已探索',
-                  style: TextStyle(color: Colors.white60, fontSize: 12)),
-              Text(
-                '${(pct * 100).toStringAsFixed(10)} %',
-                style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 28,
-                    fontWeight: FontWeight.w700),
-              ),
-              const SizedBox(height: 16),
-              Row(
-                children: [
-                  Expanded(
-                      child: _StatTile('${tiles.length}', '迷雾区块')),
-                  Expanded(child: _StatTile('$journalCount', '手账数')),
-                  Expanded(
-                      child: _StatTile('${layers.length}', '图层数')),
-                ],
-              ),
-              const SizedBox(height: 20),
-              FilledButton.icon(
-                icon: const Icon(Icons.public),
-                label: const Text('查看国家/行政区详情'),
-                onPressed: () {
-                  Navigator.pop(context);
-                  context.push('/explore');
-                },
-                style: FilledButton.styleFrom(
-                  minimumSize: const Size.fromHeight(44),
-                  backgroundColor: const Color(0xFF26A69A),
                 ),
-              ),
-            ],
-          ),
-        ),
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    GestureDetector(
+                      onTap: () => _pickAvatarOnMap(sheetCtx, sheetRef),
+                      child: Stack(
+                        alignment: Alignment.bottomRight,
+                        children: [
+                          _SelfAvatar(
+                            radius: 28,
+                            b64: settings.avatarBase64,
+                            seed: settings.selfPeerId ?? settings.displayName,
+                          ),
+                          // Tiny camera badge — same affordance pattern
+                          // as common chat apps. Tapping anywhere on the
+                          // avatar triggers the picker.
+                          Container(
+                            width: 20,
+                            height: 20,
+                            decoration: const BoxDecoration(
+                              color: Color(0xFF26A69A),
+                              shape: BoxShape.circle,
+                            ),
+                            child: const Icon(
+                              Icons.photo_camera_outlined,
+                              size: 12,
+                              color: Colors.white,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          GestureDetector(
+                            onTap: () =>
+                                _editDisplayName(sheetCtx, sheetRef),
+                            child: Row(
+                              children: [
+                                Flexible(
+                                  child: Text(settings.displayName,
+                                      style: const TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 18,
+                                          fontWeight: FontWeight.w600)),
+                                ),
+                                const SizedBox(width: 6),
+                                const Icon(Icons.edit_outlined,
+                                    color: Colors.white54, size: 14),
+                              ],
+                            ),
+                          ),
+                          Text(
+                            '等级 ${(pct * 100000).toInt().clamp(1, 999)}',
+                            style: const TextStyle(
+                                color: Colors.white60, fontSize: 12),
+                          ),
+                        ],
+                      ),
+                    ),
+                    if (settings.avatarBase64.isNotEmpty)
+                      IconButton(
+                        tooltip: '移除头像',
+                        icon: const Icon(Icons.delete_outline,
+                            color: Colors.white60),
+                        onPressed: () => sheetRef
+                            .read(settingsProvider.notifier)
+                            .update((p) => p.copyWith(avatarBase64: '')),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 20),
+                const Text('已探索',
+                    style: TextStyle(color: Colors.white60, fontSize: 12)),
+                Text(
+                  '${(pct * 100).toStringAsFixed(10)} %',
+                  style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 28,
+                      fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    Expanded(
+                        child: _StatTile('${tiles.length}', '迷雾区块')),
+                    Expanded(child: _StatTile('$journalCount', '手账数')),
+                    Expanded(
+                        child: _StatTile('${layers.length}', '图层数')),
+                  ],
+                ),
+                const SizedBox(height: 20),
+                FilledButton.icon(
+                  icon: const Icon(Icons.public),
+                  label: const Text('查看国家/行政区详情'),
+                  onPressed: () {
+                    Navigator.pop(context);
+                    context.push('/explore');
+                  },
+                  style: FilledButton.styleFrom(
+                    minimumSize: const Size.fromHeight(44),
+                    backgroundColor: const Color(0xFF26A69A),
+                  ),
+                ),
+              ],
+            ),
+          );
+        }),
       ),
     );
+  }
+
+  /// Pick an avatar from gallery, downscaled to 256×256 JPEG. Stored as
+  /// base64 in [AppSettings.avatarBase64] so it travels with the settings
+  /// backup module and inlines into leaderboard entries.
+  Future<void> _pickAvatarOnMap(BuildContext ctx, WidgetRef ref) async {
+    try {
+      final picked = await ImagePicker().pickImage(
+        source: ImageSource.gallery,
+        maxWidth: 256,
+        maxHeight: 256,
+        imageQuality: 70,
+      );
+      if (picked == null) return;
+      final bytes = await picked.readAsBytes();
+      final b64 = base64.encode(bytes);
+      // ~30 KB cap — anything bigger is going to bloat every leaderboard
+      // gossip frame, so refuse rather than chain-degrade everyone.
+      if (b64.length > 40000) {
+        if (ctx.mounted) {
+          ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(
+              content: Text('图片过大，请选择更小或更低质量的照片')));
+        }
+        return;
+      }
+      await ref
+          .read(settingsProvider.notifier)
+          .update((p) => p.copyWith(avatarBase64: b64));
+    } catch (e) {
+      if (ctx.mounted) {
+        ScaffoldMessenger.of(ctx)
+            .showSnackBar(SnackBar(content: Text('选择图片失败：$e')));
+      }
+    }
+  }
+
+  Future<void> _editDisplayName(BuildContext ctx, WidgetRef ref) async {
+    final ctrl = TextEditingController(
+        text: ref.read(settingsProvider).displayName);
+    final ok = await showDialog<bool>(
+      context: ctx,
+      builder: (dctx) => AlertDialog(
+        title: const Text('修改昵称'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          decoration: const InputDecoration(border: OutlineInputBorder()),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(dctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(dctx, true),
+              child: const Text('保存')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final name = ctrl.text.trim();
+    if (name.isEmpty) return;
+    await ref
+        .read(settingsProvider.notifier)
+        .update((p) => p.copyWith(displayName: name));
   }
 
   void _showPinHideMenu(db_t.JournalEntry j) {
@@ -1581,16 +1703,10 @@ class _ProfileCard extends ConsumerWidget {
               const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
           child: Row(
             children: [
-              CircleAvatar(
+              _SelfAvatar(
                 radius: 16,
-                backgroundColor: const Color(0xFF26A69A),
-                child: Text(
-                  s.displayName.isEmpty ? '?' : s.displayName[0],
-                  style: const TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 14),
-                ),
+                b64: s.avatarBase64,
+                seed: s.selfPeerId ?? s.displayName,
               ),
               const SizedBox(width: 8),
               Text(s.displayName,
@@ -1676,11 +1792,23 @@ class _PeerTrailsLayer extends ConsumerWidget {
         ));
       }
       if (p.lat != null && p.lng != null) {
+        // Look up the peer's avatar from the leaderboard — entries are
+        // signed snapshots that travel on the same mesh as locations, so
+        // by the time a peer is on the map their avatar (if they set
+        // one) is already in our local store. Self peers won't be here
+        // but they're not rendered as remote markers anyway.
+        final lbEntries = ref.read(leaderboardServiceProvider).current;
+        final entry = lbEntries.where((e) => e.peerId == p.id).firstOrNull;
         markers.add(Marker(
           point: toDisplay(p.lat!, p.lng!),
           width: 44,
           height: 44,
-          child: _PeerMarker(peer: p, color: color, name: name),
+          child: _PeerMarker(
+            peer: p,
+            color: color,
+            name: name,
+            avatarB64: entry?.avatarBase64 ?? '',
+          ),
         ));
       }
     }
@@ -1697,15 +1825,31 @@ class _PeerMarker extends StatelessWidget {
   final GroupPeer peer;
   final Color color;
   final String name;
+  final String avatarB64;
   const _PeerMarker(
-      {required this.peer, required this.color, required this.name});
+      {required this.peer,
+      required this.color,
+      required this.name,
+      this.avatarB64 = ''});
   @override
   Widget build(BuildContext context) {
-    final initial = name.isEmpty ? '?' : name[0];
+    final initial = name.isEmpty ? '?' : name.characters.first;
     final age = DateTime.now().difference(peer.lastSeen);
     final stale = age > const Duration(seconds: 30);
     final base = color;
     final shown = stale ? base.withValues(alpha: 0.45) : base;
+    // Decode the avatar lazily — bad base64 silently falls back to the
+    // coloured-initial bubble so a malformed peer entry can't crash the
+    // map render path.
+    DecorationImage? avatarImg;
+    if (avatarB64.isNotEmpty) {
+      try {
+        avatarImg = DecorationImage(
+          image: MemoryImage(base64.decode(avatarB64)),
+          fit: BoxFit.cover,
+        );
+      } catch (_) {}
+    }
     return Tooltip(
       message: stale ? '$name · ${age.inSeconds}s 未联系' : name,
       child: Stack(
@@ -1713,10 +1857,11 @@ class _PeerMarker extends StatelessWidget {
         children: [
           Container(
             decoration: BoxDecoration(
-              color: shown,
+              color: avatarImg == null ? shown : null,
+              image: avatarImg,
               shape: BoxShape.circle,
               border: Border.all(
-                  color: stale ? Colors.grey : Colors.white, width: 3),
+                  color: stale ? Colors.grey : shown, width: 3),
               boxShadow: [
                 BoxShadow(
                     color: Colors.black.withValues(alpha: 0.4),
@@ -1724,11 +1869,13 @@ class _PeerMarker extends StatelessWidget {
               ],
             ),
             alignment: Alignment.center,
-            child: Text(initial,
-                style: const TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 16)),
+            child: avatarImg != null
+                ? null
+                : Text(initial,
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 16)),
           ),
           if (!stale)
             Container(
@@ -2030,3 +2177,52 @@ class _ArrowPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _ArrowPainter old) => old.color != color;
 }
+
+/// Circular avatar used in the map's profile sheet. Same fallback logic
+/// the leaderboard + peer markers use, so the user looks identical
+/// everywhere.
+class _SelfAvatar extends StatelessWidget {
+  final double radius;
+  final String b64;
+  final String seed;
+  const _SelfAvatar(
+      {required this.radius, required this.b64, required this.seed});
+  @override
+  Widget build(BuildContext context) {
+    if (b64.isNotEmpty) {
+      try {
+        return CircleAvatar(
+          radius: radius,
+          backgroundImage: MemoryImage(base64.decode(b64)),
+        );
+      } catch (_) {}
+    }
+    final hue = (seed.hashCode % 360).abs().toDouble();
+    return CircleAvatar(
+      radius: radius,
+      backgroundColor: HSLColor.fromAHSL(1, hue, 0.55, 0.55).toColor(),
+      child: Text(
+        seed.isEmpty ? '?' : seed.characters.first.toUpperCase(),
+        style: TextStyle(
+            color: Colors.white,
+            fontSize: radius * 0.8,
+            fontWeight: FontWeight.w600),
+      ),
+    );
+  }
+}
+
+/// Vector polyline overlay for the user's own tracks. Reads track points
+/// for every visible layer, splits them into "sessions" on long temporal
+/// gaps (so today's points don't get joined to last week's), and emits
+/// one `Polyline` per session.
+///
+/// Why this exists: the FOW fog bitmap stores ~9.5 m / pixel which looks
+/// blocky and jagged at any zoom above the storage resolution. Drawing
+/// the real trail vector on top of it gives the smooth diagonal /
+/// curved trace the user wants, without changing the storage schema.
+///
+/// Re-queried whenever [refreshKey] changes — the recording controller
+/// bumps that counter (debounced to 250 ms) every time it writes new
+/// samples. The whole result is memoised on (layerIds, refreshKey) via a
+/// cached FutureBuilder so panning the map doesn't re-hit the DB.

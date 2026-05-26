@@ -1,25 +1,38 @@
-import 'dart:typed_data';
+import 'dart:math' as math;
 import 'dart:ui' as ui;
+import 'package:drift/drift.dart' show OrderingTerm;
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
+import '../../data/db/database.dart';
 import '../../models/models.dart';
 import '../fog/fog_engine.dart';
 import '../geo/coord_converter.dart';
 
 class FogLayer extends StatefulWidget {
+  /// Kept for API compatibility — callers still pass it, and stats /
+  /// import code references the engine through other paths. The live
+  /// renderer doesn't use it: the user-visible trail is drawn directly
+  /// from `track_points` as an anti-aliased canvas stroke.
   final FogEngine engine;
+  final AppDb db;
   final List<int> layerIds;
   final Color fogColor;
   final double fogOpacity;
+  /// Meters — sets the on-screen stroke width of the "swept disk" trail.
+  /// Same value as the recording pen radius so the user's slider tunes
+  /// both storage radius and visible corridor width.
+  final double trailRadiusMeters;
   final Object? refreshKey;
   final MapProvider mapProvider;
   const FogLayer({
     super.key,
     required this.engine,
+    required this.db,
     required this.layerIds,
     required this.fogColor,
     required this.fogOpacity,
+    required this.trailRadiusMeters,
     required this.mapProvider,
     this.refreshKey,
   });
@@ -29,39 +42,89 @@ class FogLayer extends StatefulWidget {
 }
 
 class _FogLayerState extends State<FogLayer> {
-  final _cache = <String, Uint8List?>{};
-  Object? _seenKey;
-  MapProvider? _seenProvider;
-  /// Bumped each time an async block load completes. We hand this into
-  /// [_FogPainter] so `shouldRepaint` has something concrete to compare —
-  /// without it, the painter sees the *same* Map<String,Uint8List?> reference
-  /// (just mutated in place) and decides not to repaint, so newly-loaded
-  /// tiles never appeared unless the camera coincidentally also moved.
-  /// THIS was the long-standing "no record points" bug.
-  int _loadRev = 0;
+  /// Per-session lists loaded from track_points.
+  /// We load once per (layerIds, refreshKey) change and cache; the
+  /// painter strokes through these to make the visible trail
+  /// sub-pixel-smooth even when the FOW bitmap underneath is blocky.
+  /// Each inner list is one continuous walk (no >10 min gap).
+  List<List<LatLng>> _trailSessions = const [];
+  String _trailKey = '';
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _maybeReloadTrail();
+  }
+
+  @override
+  void didUpdateWidget(covariant FogLayer old) {
+    super.didUpdateWidget(old);
+    _maybeReloadTrail();
+  }
+
+  void _maybeReloadTrail() {
+    final key = '${widget.layerIds.join(",")}|${widget.refreshKey}';
+    if (key == _trailKey) return;
+    _trailKey = key;
+    _loadTrail();
+  }
+
+  Future<void> _loadTrail() async {
+    final layerIds = widget.layerIds;
+    if (layerIds.isEmpty) return;
+    final sessions = <List<LatLng>>[];
+    // Mirror the recording controller's chain gate: connect two
+    // consecutive samples only when *both* tests pass:
+    //   * temporal: gap ≤ 30 s
+    //   * spatial:  distance ≤ max(5 × penR, 50 m)
+    // Either fails → start a fresh sub-path. This is what FOW does
+    // when GPS drops or the user teleports (subway, airplane) — no
+    // false straight line across the map. Long-term 10-min sessions
+    // still naturally fall out of the temporal rule.
+    final maxAge = const Duration(seconds: 30);
+    final maxMeters =
+        math.max(widget.trailRadiusMeters * 5.0, 50.0);
+    for (final lid in layerIds) {
+      final rows = await (widget.db.select(widget.db.trackPoints)
+            ..where((p) => p.layerId.equals(lid))
+            ..orderBy([(p) => OrderingTerm.asc(p.time)]))
+          .get();
+      var current = <LatLng>[];
+      DateTime? lastT;
+      double? lastLat, lastLng;
+      for (final p in rows) {
+        final breakHere = lastT != null &&
+            (p.time.difference(lastT) > maxAge ||
+                _haversineMeters(lastLat!, lastLng!, p.lat, p.lng) >
+                    maxMeters);
+        if (breakHere) {
+          if (current.isNotEmpty) sessions.add(current);
+          current = [];
+        }
+        current.add(LatLng(p.lat, p.lng));
+        lastT = p.time;
+        lastLat = p.lat;
+        lastLng = p.lng;
+      }
+      if (current.isNotEmpty) sessions.add(current);
+    }
+    if (!mounted) return;
+    setState(() => _trailSessions = sessions);
+  }
 
   @override
   Widget build(BuildContext context) {
-    if (_seenKey != widget.refreshKey || _seenProvider != widget.mapProvider) {
-      _cache.clear();
-      _seenKey = widget.refreshKey;
-      _seenProvider = widget.mapProvider;
-    }
     final camera = MapCamera.of(context);
     return IgnorePointer(
       child: CustomPaint(
         size: Size(camera.size.x, camera.size.y),
         painter: _FogPainter(
           camera: camera,
-          engine: widget.engine,
           layerIds: widget.layerIds,
           fogColor: widget.fogColor.withValues(alpha: widget.fogOpacity),
           mapProvider: widget.mapProvider,
-          cache: _cache,
-          loadRev: _loadRev,
-          onTileLoaded: () {
-            if (mounted) setState(() => _loadRev++);
-          },
+          trailSessions: _trailSessions,
+          trailRadiusMeters: widget.trailRadiusMeters,
         ),
       ),
     );
@@ -70,23 +133,19 @@ class _FogLayerState extends State<FogLayer> {
 
 class _FogPainter extends CustomPainter {
   final MapCamera camera;
-  final FogEngine engine;
-  final int loadRev;
   final List<int> layerIds;
   final Color fogColor;
   final MapProvider mapProvider;
-  final Map<String, Uint8List?> cache;
-  final VoidCallback onTileLoaded;
+  final List<List<LatLng>> trailSessions;
+  final double trailRadiusMeters;
 
   _FogPainter({
     required this.camera,
-    required this.engine,
     required this.layerIds,
     required this.fogColor,
     required this.mapProvider,
-    required this.cache,
-    required this.loadRev,
-    required this.onTileLoaded,
+    required this.trailSessions,
+    required this.trailRadiusMeters,
   });
 
   @override
@@ -98,149 +157,130 @@ class _FogPainter extends CustomPainter {
       return;
     }
 
-    final bounds = camera.visibleBounds;
     final needsGcj = CoordConverter.needsGcj02(mapProvider);
 
-    double wgsNorth = bounds.north, wgsWest = bounds.west;
-    double wgsSouth = bounds.south, wgsEast = bounds.east;
-    if (needsGcj) {
-      final nw = CoordConverter.gcj02ToWgs84(bounds.north, bounds.west);
-      final se = CoordConverter.gcj02ToWgs84(bounds.south, bounds.east);
-      wgsNorth = nw.lat;
-      wgsWest = nw.lng;
-      wgsSouth = se.lat;
-      wgsEast = se.lng;
-    }
-
-    final gxMin = FogEngine.lngToGlobalX(wgsWest);
-    final gxMax = FogEngine.lngToGlobalX(wgsEast);
-    final gyMin = FogEngine.latToGlobalY(wgsNorth);
-    final gyMax = FogEngine.latToGlobalY(wgsSouth);
-
-    final blockXMin = gxMin >> 6;
-    final blockXMax = gxMax >> 6;
-    final blockYMin = gyMin >> 6;
-    final blockYMax = gyMax >> 6;
-
-    final blockCount =
-        (blockXMax - blockXMin + 1) * (blockYMax - blockYMin + 1);
-    if (blockCount > 400) {
-      canvas.drawRect(rect, fogPaint);
-      return;
-    }
-
-    // Collect all bitmaps first; skip painting if any are still loading
-    final bitmaps = <(int, int), Uint8List>{};
-    for (int by = blockYMin; by <= blockYMax; by++) {
-      for (int bx = blockXMin; bx <= blockXMax; bx++) {
-        final tileX = bx >> 7;
-        final tileY = by >> 7;
-        final blockX = bx & 0x7F;
-        final blockY = by & 0x7F;
-        final dbX = tileX * FogEngine.tileWidth + blockX;
-        final dbY = tileY * FogEngine.tileWidth + blockY;
-
-        final key = '$dbX-$dbY-${layerIds.join(",")}';
-        if (cache.containsKey(key)) {
-          final b = cache[key];
-          if (b != null) bitmaps[(bx, by)] = b;
-        } else {
-          cache[key] = null;
-          engine.mergedBlockBitmap(dbX, dbY, layerIds).then((b) {
-            cache[key] = b;
-            onTileLoaded();
-          });
-        }
-      }
-    }
+    // The fog bitmap (`fog_tiles`) is no longer used for live rendering
+    // — it's still updated by the recording controller (so backups,
+    // cross-device sync, and exploration-% stats stay correct), but the
+    // user-visible trail is drawn as a single anti-aliased stroke along
+    // the actual GPS sample points. This is exactly how Fog of World
+    // does it: think "a Roomba sweeping sand" — the path is the
+    // Minkowski sum of a disk and the polyline through the samples,
+    // and Flutter's canvas stroke renders that shape natively with
+    // sub-pixel AA. The previous "row-of-capsules from bitmap rows"
+    // approach was fundamentally blocky on diagonals; no amount of
+    // post-blur ever quite fixed it.
 
     canvas.saveLayer(rect, Paint());
     canvas.drawRect(rect, fogPaint);
 
-    // Collect all revealed runs into a single Path of capsule (stadium)
-    // shapes — a length-1 run becomes a circle, longer runs become rounded
-    // pills. Drawing once with `BlendMode.clear` + `MaskFilter.blur` punches
-    // soft-edged "mist dissolving" holes through the fog.
-    final clearPath = ui.Path();
+    // Convert pen-radius (meters) → screen pixels at the current camera
+    // scale by measuring on-screen distance between two points
+    // separated by `trailRadiusMeters` of latitude near the camera
+    // centre. Two-point measurement keeps this robust to whatever
+    // projection flutter_map is currently using.
+    final centre = camera.center;
+    final dLat = trailRadiusMeters / 111320.0;
+    final p0 = camera.getOffsetFromOrigin(centre);
+    final p1 = camera.getOffsetFromOrigin(
+        LatLng(centre.latitude + dLat, centre.longitude));
+    final screenPxPerRadius = (p1 - p0).distance.abs().clamp(2.0, 400.0);
 
-    for (int by = blockYMin; by <= blockYMax; by++) {
-      for (int py = 0; py < 64; py++) {
-        final gy = by * 64 + py;
-        if (gy < gyMin || gy > gyMax) continue;
-
-        int? runStart;
-
-        for (int bx = blockXMin; bx <= blockXMax; bx++) {
-          final bitmap = bitmaps[(bx, by)];
-          for (int px = 0; px < 64; px++) {
-            final gx = bx * 64 + px;
-            if (gx < gxMin || gx > gxMax + 1) continue;
-
-            final set = bitmap != null && FogEngine.isSet(bitmap, px, py);
-            if (set && runStart == null) {
-              runStart = gx;
-            } else if (!set && runStart != null) {
-              _addRunToPath(clearPath, runStart, gx, gy, needsGcj);
-              runStart = null;
-            }
-          }
+    // ── Build paths from sample points ──────────────────────────────
+    // Multi-point sessions become an open lineTo polyline; isolated
+    // single-sample sessions become an inscribed circle the same
+    // diameter the stroke would render. Without the special case for
+    // 1-point sessions, Path.moveTo by itself draws nothing and
+    // isolated GPS recoveries would silently disappear.
+    final trailPath = ui.Path();
+    final dotsPath = ui.Path();
+    for (final session in trailSessions) {
+      if (session.isEmpty) continue;
+      if (session.length == 1) {
+        var lat = session.first.latitude;
+        var lng = session.first.longitude;
+        if (needsGcj) {
+          final g = CoordConverter.wgs84ToGcj02(lat, lng);
+          lat = g.lat;
+          lng = g.lng;
         }
-        if (runStart != null) {
-          final endGx = (blockXMax + 1) * 64;
-          _addRunToPath(clearPath, runStart, endGx, gy, needsGcj);
+        final o = camera.getOffsetFromOrigin(LatLng(lat, lng));
+        // Match the stroke half-width below (1.4 × R / 2 = 0.7 × R)
+        // so a single-sample blob looks identical to the cap of a
+        // multi-sample stroke — same blur sigma is applied, same
+        // size, same alpha.
+        dotsPath.addOval(Rect.fromCircle(
+            center: o, radius: screenPxPerRadius * 0.7));
+        continue;
+      }
+      bool started = false;
+      for (final pt in session) {
+        var lat = pt.latitude;
+        var lng = pt.longitude;
+        if (needsGcj) {
+          final g = CoordConverter.wgs84ToGcj02(lat, lng);
+          lat = g.lat;
+          lng = g.lng;
+        }
+        final o = camera.getOffsetFromOrigin(LatLng(lat, lng));
+        if (!started) {
+          trailPath.moveTo(o.dx, o.dy);
+          started = true;
+        } else {
+          trailPath.lineTo(o.dx, o.dy);
         }
       }
     }
 
-    // Restored original two-pass clear — outer soft halo + inner hard
-    // clear. Critical: at low/mid zoom each FOW pixel is sub-pixel on
-    // screen, and the blur is what makes tiny dstOut-erases actually
-    // visible. Removing the blur entirely (my earlier "no-halo" attempt)
-    // made small reveals invisible. The ghosting the user reported was
-    // from a separate 3-pass random-stipple I had added on top of this,
-    // not from the blur itself — that stipple is gone now, this is just
-    // the original known-good rendering.
-    final outerHalo = Paint()
-      ..blendMode = BlendMode.dstOut
-      ..color = const Color(0xB0FFFFFF) // ~70% punch
-      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3.5);
-    final innerClear = Paint()
-      ..blendMode = BlendMode.dstOut
-      ..color = const Color(0xFFFFFFFF)
-      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 1.3);
-    canvas.drawPath(clearPath, outerHalo);
-    canvas.drawPath(clearPath, innerClear);
-
-    canvas.restore();
-  }
-
-  /// Add a horizontal run from global pixel [x0] to [x1) at row [gy] to the
-  /// path as a capsule (stadium): a length-1 run becomes a circle, longer
-  /// runs become rounded pills with semicircular caps.
-  void _addRunToPath(
-      ui.Path path, int x0, int x1, int gy, bool needsGcj) {
-    double lng0 = FogEngine.globalXToLng(x0);
-    double lat0 = FogEngine.globalYToLat(gy);
-    double lng1 = FogEngine.globalXToLng(x1);
-    double lat1 = FogEngine.globalYToLat(gy + 1);
-
-    if (needsGcj) {
-      final gc0 = CoordConverter.wgs84ToGcj02(lat0, lng0);
-      final gc1 = CoordConverter.wgs84ToGcj02(lat1, lng1);
-      lng0 = gc0.lng;
-      lat0 = gc0.lat;
-      lng1 = gc1.lng;
-      lat1 = gc1.lat;
+    final empty = trailPath.getBounds().isEmpty && dotsPath.getBounds().isEmpty;
+    if (empty) {
+      canvas.restore();
+      return;
     }
 
-    final p0 = camera.getOffsetFromOrigin(LatLng(lat0, lng0));
-    final p1 = camera.getOffsetFromOrigin(LatLng(lat1, lng1));
+    // Single-pass feathered stroke — one paint, full alpha, with the
+    // blur sigma tuned so the gaussian convolution of the stroke
+    // *itself* is the gradient. This is the only way to get a truly
+    // continuous alpha-vs-distance curve: any second pass introduces
+    // a visible "where pass A ends, pass B begins" seam because
+    // dstOut composes multiplicatively, not linearly.
+    //
+    // Geometry of the resulting alpha profile, where R = stroke
+    // half-width and σ = blur sigma:
+    //
+    //   distance from path centre        alpha (= clearing)
+    //   ─────────────────────────────────────────────────
+    //   0  →  R − 2σ                     ≈ 100 % (solid clear)
+    //   R − 2σ  →  R + 2σ                gaussian falloff
+    //   beyond R + 2σ                    ≈ 0 % (fog intact)
+    //
+    // Picked W = 1.4 × penR, σ = 0.3 × penR so:
+    //   • centre is fully cleared (R/σ = 2.33 ✓)
+    //   • halo extends only ~ 1.3 × penR from the centre line —
+    //     significantly tighter than the previous 2-layer setup
+    //   • the transition is one smooth erf curve, no break point
+    final blurSigma = (screenPxPerRadius * 0.30).clamp(1.5, 16.0);
 
-    final rect = Rect.fromLTRB(p0.dx, p0.dy, p1.dx, p1.dy);
-    final radius = rect.shortestSide / 2;
-    path.addRRect(
-      RRect.fromRectAndRadius(rect, Radius.circular(radius)),
-    );
+    final stroke = Paint()
+      ..blendMode = BlendMode.dstOut
+      ..color = const Color(0xFFFFFFFF)
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round
+      ..strokeWidth = screenPxPerRadius * 1.4
+      ..maskFilter = MaskFilter.blur(BlurStyle.normal, blurSigma)
+      ..isAntiAlias = true;
+    final fill = Paint()
+      ..blendMode = BlendMode.dstOut
+      ..color = const Color(0xFFFFFFFF)
+      ..style = PaintingStyle.fill
+      ..maskFilter = MaskFilter.blur(BlurStyle.normal, blurSigma)
+      ..isAntiAlias = true;
+
+    if (!trailPath.getBounds().isEmpty) canvas.drawPath(trailPath, stroke);
+    if (!dotsPath.getBounds().isEmpty) canvas.drawPath(dotsPath, fill);
+
+    canvas.restore();
   }
 
   @override
@@ -249,6 +289,21 @@ class _FogPainter extends CustomPainter {
       old.layerIds != layerIds ||
       old.fogColor != fogColor ||
       old.mapProvider != mapProvider ||
-      old.loadRev != loadRev ||
-      !identical(old.cache, cache);
+      old.trailRadiusMeters != trailRadiusMeters ||
+      !identical(old.trailSessions, trailSessions);
+}
+
+/// Standard haversine — meters between two WGS-84 points. Inlined here so
+/// the renderer doesn't have to depend on a math util module just to
+/// decide whether to break a polyline at a GPS drop-out.
+double _haversineMeters(double lat1, double lng1, double lat2, double lng2) {
+  const r = 6371000.0;
+  final dLat = (lat2 - lat1) * math.pi / 180;
+  final dLng = (lng2 - lng1) * math.pi / 180;
+  final a = math.sin(dLat / 2) * math.sin(dLat / 2) +
+      math.cos(lat1 * math.pi / 180) *
+          math.cos(lat2 * math.pi / 180) *
+          math.sin(dLng / 2) *
+          math.sin(dLng / 2);
+  return 2 * r * math.atan2(math.sqrt(a), math.sqrt(1 - a));
 }

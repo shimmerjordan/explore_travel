@@ -58,6 +58,14 @@ abstract class GroupService {
   /// private ranges). Used by the setup screen to tell the user "your IP is
   /// X, give it to the other side". Empty when not yet started.
   List<String> get localIps => const [];
+
+  /// Escape hatch for higher layers (e.g. leaderboard sync) to flood an
+  /// arbitrary typed message. Receivers see it on [messages] and switch
+  /// on [GroupMessage.type].
+  Future<void> broadcastCustom(String type, Map<String, dynamic> data);
+  Future<void> sendCustomTo(
+      String peerId, String type, Map<String, dynamic> data);
+
   Future<void> sendMusicPlay({
     required String url,
     required String title,
@@ -729,6 +737,18 @@ class _LanGroupService implements GroupService {
   @override
   Future<void> sendMusicStop() async {
     await _broadcast(_msg('music_stop', {}));
+  }
+
+  @override
+  Future<void> broadcastCustom(
+      String type, Map<String, dynamic> data) async {
+    await _broadcast(_msg(type, data));
+  }
+
+  @override
+  Future<void> sendCustomTo(
+      String peerId, String type, Map<String, dynamic> data) async {
+    await _sendOne(peerId, _msg(type, {...data, 'to': peerId}));
   }
 
   Future<void> _sendOne(String peerId, GroupMessage msg) async {

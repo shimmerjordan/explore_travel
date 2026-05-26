@@ -34,6 +34,9 @@ abstract class GroupService {
     required int positionMs,
   });
   Future<void> sendMusicStop();
+  Future<void> broadcastCustom(String type, Map<String, dynamic> data);
+  Future<void> sendCustomTo(
+      String peerId, String type, Map<String, dynamic> data);
 
   static GroupService create({
     required int transport,
@@ -97,4 +100,10 @@ class _NoopGroupService implements GroupService {
   Future<int> scanNow({bool big = false}) async => 0;
   @override
   List<String> get localIps => const [];
+  @override
+  Future<void> broadcastCustom(
+      String type, Map<String, dynamic> data) async {}
+  @override
+  Future<void> sendCustomTo(
+      String peerId, String type, Map<String, dynamic> data) async {}
 }
