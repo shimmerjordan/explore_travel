@@ -1,20 +1,26 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Android 9+ blocks plain HTTP by default. This app needs cleartext for
-  user-owned servers on LAN / VPN / ZeroTier overlays (WebDAV like
-  AList / dav.sh, custom image hosts, etc.), so we permit it globally.
+  Production posture: HTTPS only by default. Cleartext HTTP is permitted
+  globally at the Android level because users plug in arbitrary LAN IPs
+  for WebDAV / image hosts that cannot be enumerated at build time. The
+  REAL protection is in the runtime HTTP client (see
+  `services/security/http_guard.dart`) which refuses cleartext to any
+  non-private destination.
 
-  Note: Android's <domain> tag does NOT accept CIDR ranges — it only
-  matches hostnames/subdomains. The cleanest way to whitelist private
-  networks is `cleartextTrafficPermitted="true"` at base-config level
-  combined with `usesCleartextTraffic="true"` on the <application>.
-  Real HTTPS traffic to public sites is unaffected.
+  Trust anchors: system CAs only — user-installed CAs are NOT trusted
+  in release builds, which is what stops a tampered phone or corporate
+  MITM proxy from intercepting our traffic.
 -->
 <network-security-config>
     <base-config cleartextTrafficPermitted="true">
         <trust-anchors>
             <certificates src="system" />
-            <certificates src="user" />
         </trust-anchors>
     </base-config>
+    <debug-overrides>
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </debug-overrides>
 </network-security-config>

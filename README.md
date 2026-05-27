@@ -18,7 +18,9 @@
 | Area | What you get |
 |------|--------------|
 | 🗺️ Maps | OSM / 高德 / Google · standard / satellite · live switching · GCJ-02 ↔ WGS-84 conversion · heading-aware location dot |
-| 🌫️ Fog of war | Fog of World–compatible 64×64 bitmap tiles · auto line-connect between samples ≤ 2.5× pen diameter · brush radius / color / opacity tunable · per-layer · soft-edge rim that scales with zoom |
+| 🌫️ Fog of war | Fog of World–compatible 64×64 bitmap tiles for storage / stats / sync · **vector swept-disk trail rendering**: anti-aliased canvas stroke through actual GPS samples → silky diagonals and curves with no raster aliasing · per-segment GPS-dropout split (no false straight lines across drops) · single-pass gaussian-feathered clear with continuous alpha gradient · brush radius / color / opacity tunable · per-layer |
+| 👤 Profile & avatar | Tap right-top chip → bottom sheet with base64 avatar editor (256×256 / ≤30 KB) · nickname inline edit · peerId copy · avatar inlined into leaderboard entries + peer markers · M3 ripple + scale animations on home tiles |
+| 🏆 Leaderboard | **Decentralised, append-only, signed** · Ed25519 keypair per device · LWW by `statsAt` per peerId · TOFU on publicKey · global km² + month-by-month tabs · auto-merge over the same P2P transport as chat/voice (`lb_hello / lb_pull / lb_batch`) · always-included in backup module · optional GitHub PR to a community registry repo · optional REST server backend ([API spec](docs/leaderboard-server-api.md)) |
 | 📍 Tracking | Android foreground service (`flutter_foreground_task`) · 3 power modes · per-row UUID for cross-device dedup · EXIF GPS auto-tagging |
 | 🗂️ Layers | Color-coded, taggable, per-layer visibility · in-map dropdown chip · auto-fallback when active layer is hidden/missing |
 | 🌐 Exploration | Real-area progress — revealed km² ÷ region km² (UN country areas) · 10-decimal precision · **smallest-bbox attribution** so a point in Shanghai doesn't double-count into Jiangsu/Zhejiang · global "incl. ocean" + per-country + per-province + learned-from-visits regions |
@@ -32,6 +34,7 @@
 | 🛰️ P2P | UDP multicast LAN discovery (`MulticastLock` on Android) + manual peer add · live route sharing · text chat · push-to-talk · music broadcast · **AES-GCM-256 end-to-end** via PBKDF2 · WebDAV mailbox for offline · WebRTC fallback transport |
 | 🐞 Debug mode | Hidden — tap version label on home 10× · log buffer (ring of 1000) with filter/share · fog & recording diagnostics · simulator panel in release builds · "fire test reveal" button |
 | 💾 Portability | Everything in one SQLite + a `media/` folder. Schema v4 with UUIDs. Standard zip backups. No vendor lock-in. |
+| 🔒 Security | Credentials (PATs, tokens, WebDAV password, p2p passphrase) live in **flutter_secure_storage** → Android Keystore / iOS Keychain · backup exports **strip secret fields** so leaked archives don't leak creds · runtime HTTP guard refuses **cleartext to non-private hosts** (LAN HTTP still works) · no analytics, no remote logging, no telemetry, no third-party SDK ad/analytics call |
 
 ---
 
@@ -328,6 +331,20 @@ Total: ~8 000 lines of Dart, organised so a single feature lives in one folder.
 - [ ] Offline tile cache for maps
 - [ ] Apple Watch / Wear OS companion
 - [ ] Real-time peer cursors on shared map
+
+---
+
+## Going to production
+
+Shipping a build to friends, putting it on a store, or running it under your own brand?
+Two docs are tailored for that journey:
+
+- **[docs/security-data-safety.md](docs/security-data-safety.md)** — threat model, what lives in
+  secure storage vs. SharedPreferences, what gets scrubbed from backups, the HTTPS-guard
+  runtime check, and the privacy-policy clauses you'll want to copy when you publish.
+- **[docs/publishing.md](docs/publishing.md)** — step-by-step for Google Play, Chinese Android
+  stores (Xiaomi / OPPO / vivo / Huawei / 应用宝), Apple App Store + TestFlight, plus signing,
+  ProGuard, version-bump checklist, and review-rejection playbook.
 
 ---
 

@@ -226,7 +226,15 @@ class BackupService {
       final prefs = await SharedPreferences.getInstance();
       final raw = prefs.getString('app_settings_v1');
       if (raw != null) {
-        addText('settings/app_settings.json', raw);
+        // Strip secrets from the exported settings — backup files
+        // routinely end up on cloud storage, shared with friends, or
+        // pulled apart by the user themselves. The user re-enters
+        // credentials on the receiving device. Anything stored in
+        // platform secure storage (SecureCredentials) is never written
+        // here in the first place; this guards the legacy-format
+        // fields that still live in app_settings_v1.
+        final scrubbed = _scrubSettings(raw);
+        addText('settings/app_settings.json', scrubbed);
       }
     }
 
@@ -657,6 +665,41 @@ class BackupService {
     });
 
     return summary;
+  }
+}
+
+/// List of `app_settings_v1` field names that must be stripped before
+/// any backup leaves the device. Kept here next to the backup logic so
+/// adding a new credential field is hard to forget — every reviewer of
+/// a settings change will see this list nearby.
+const _kSecretSettingsKeys = <String>{
+  'webdavPass',
+  'p2pPassphrase',
+  'aiApiKey',
+  'githubPat',
+  'githubPrivatePat',
+  'customAuthHeader',
+  'leaderboardRepoPat',
+  'leaderboardServerToken',
+  // Music cookies / OAuth tokens — also bearer-equivalents.
+  'musicCredentials',
+};
+
+/// Returns a copy of the settings JSON with all credentials replaced
+/// by `null`. Keeps everything else intact so the user's preferences
+/// (map style, fog colour, etc.) survive the round-trip.
+String _scrubSettings(String raw) {
+  try {
+    final j = jsonDecode(raw) as Map<String, dynamic>;
+    for (final k in _kSecretSettingsKeys) {
+      if (j.containsKey(k)) j[k] = null;
+    }
+    return jsonEncode(j);
+  } catch (_) {
+    // Don't ship a backup we can't reason about. Returning a manifest
+    // is better than no settings module at all, but actively
+    // dangerous if we can't strip secrets — so refuse to include.
+    return jsonEncode({'scrubFailed': true});
   }
 }
 

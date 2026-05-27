@@ -1,0 +1,205 @@
+# Explore Journal — Security & Data Safety
+
+> For app-store reviewers, privacy-policy authors, and anyone shipping
+> this codebase under their own brand. Tells you exactly what data the
+> app touches, where it lives, what crosses a network boundary, and
+> what an attacker with the device in their hands can see.
+
+## TL;DR
+
+| Data class                   | Where                                                                                                              | Encrypted at rest? | Leaves the device?                                |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------ | ------------------ | ------------------------------------------------- |
+| GPS samples / fog tiles      | SQLite (`fog_tiles`, `track_points`)                                                                               | No (app sandbox)   | Only if user enables WebDAV/local backup          |
+| Journal text + media         | SQLite + `media/` folder (or user's GitHub repo when image host is enabled)                                        | No                 | Only if user enables image host or backup         |
+| Chat messages                | SQLite (`chat_messages`)                                                                                           | No (app sandbox)   | E2E to peers (AES-GCM-256 / PBKDF2 from passphrase) |
+| Avatar (256×256 JPEG)        | base64 in SharedPreferences                                                                                        | No                 | Inlined into signed leaderboard entries shared with peers |
+| Display name, peerId         | SharedPreferences                                                                                                  | No                 | Yes — sent to peers in `hello` frames             |
+| WebDAV / GitHub / token creds | **flutter_secure_storage** → Android Keystore-backed EncryptedSharedPreferences / iOS Keychain                    | **Yes**            | Sent to the specific server the user configured   |
+| P2P shared passphrase        | **flutter_secure_storage**                                                                                         | **Yes**            | Never                                             |
+| Ed25519 leaderboard keypair  | SharedPreferences (private key is base64; public key not secret)                                                   | No \[1\]           | Public key embedded in every leaderboard entry; private key never leaves |
+| Geocoding cache              | SharedPreferences key `geocode_cell_cache_v1`                                                                      | No                 | No                                                |
+| Music platform cookies       | SharedPreferences `musicCredentials`                                                                               | No \[2\]           | Sent only to the platform's API on the user's behalf |
+
+\[1\] The Ed25519 *private* key probably should move to secure storage in
+a future revision. Today it's stamped at app first-run; rotating it
+breaks the TOFU pin on every peer who already knows you, so we'd
+need a migration UX for that.
+\[2\] These travel in `Cookie:` headers to public music APIs.
+Compromise = the same as a stolen browser session for that site.
+
+## Threat model
+
+**In scope:** lost / stolen phone (without user PIN); a backup zip leaking onto cloud storage; a misconfigured WebDAV server; an attacker on the same Wi-Fi.
+
+**Out of scope:** rooted device with active malware; a determined attacker who has the user's PIN; nation-state mounted on the supply chain.
+
+## Where credentials live
+
+### Secure storage (Keystore / Keychain)
+
+These call into `flutter_secure_storage`, which on Android is backed by
+`EncryptedSharedPreferences` + the system Keystore (hardware-backed
+where available), and on iOS by Keychain Services with
+`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`. Bytes are not readable
+without the device unlocked, even by root or `adb backup`:
+
+- GitHub PAT (public + private repos)
+- WebDAV password
+- AI provider API key
+- Custom image-host auth header
+- P2P shared passphrase
+- Leaderboard community-repo PAT
+- Leaderboard server bearer token
+
+Code: [`lib/services/security/secure_credentials.dart`](../lib/services/security/secure_credentials.dart).
+
+### SharedPreferences (cleartext, sandboxed)
+
+Everything in `AppSettings` that isn't on the list above — map style,
+fog color, layer overrides, geocoding cache, planner history,
+display name, peerId, avatar.
+
+App-sandbox protection is enough for these because losing one is at
+most "the attacker now knows your nickname" — not "the attacker can
+post to your GitHub". The cleartext is convenient for the backup
+module: settings backups remain importable on any device.
+
+## Backup safety
+
+Backup zips are generated by [`BackupService.exportToArchive`](../lib/services/backup/backup_service.dart).
+
+**Always-scrubbed fields** (replaced with `null` before the zip is
+written, even if the user clicked "settings" in the module checklist):
+
+```
+webdavPass, p2pPassphrase, aiApiKey,
+githubPat, githubPrivatePat, customAuthHeader,
+leaderboardRepoPat, leaderboardServerToken,
+musicCredentials
+```
+
+The user re-enters credentials on the receiving device. This protects
+the case where a user uploads a backup to a public file share, sends it
+in chat to a friend, or stores it on a WebDAV provider that gets
+compromised.
+
+**Always-included** in every backup (cannot be deselected): the
+**leaderboard** module. Each entry is signed with the device's
+Ed25519 key, so even if a malicious user edits the jsonl by hand and
+re-imports it elsewhere, signature verification will discard the
+forgery before it touches the local store.
+
+## Network policy
+
+### Cleartext HTTP
+
+Android's `network_security_config.xml` permits cleartext globally —
+otherwise users couldn't point WebDAV / image hosts at their own NAS
+boxes (which never have TLS). But the **runtime HTTP guard** in
+[`http_guard.dart`](../lib/services/security/http_guard.dart) attaches
+to every `Dio` instance and refuses cleartext requests to non-private
+hosts. Private = RFC1918, loopback, Tailscale CGN (100.64/10),
+link-local, and `.local`.
+
+Add the guard everywhere you create a fresh `Dio`:
+
+```dart
+final dio = Dio()..interceptors.add(HttpGuardInterceptor());
+```
+
+### TLS trust anchors
+
+System CAs only in release builds. User-installed CAs are NOT trusted,
+which defends against tampered phones / corporate MITM. The debug
+build inherits the loose policy via `<debug-overrides>` so devs can
+plug in mitmproxy when they need to.
+
+### No telemetry / analytics
+
+The app makes outbound calls only to:
+
+1. Map tile servers (provider chosen by user)
+2. The user's WebDAV server (if configured)
+3. The user's image host or GitHub (if configured)
+4. The user's AI provider (if configured)
+5. The user's music platform (if configured)
+6. Geocoding: Amap reverse API (only if 高德 key configured) + system geocoder
+7. Optional leaderboard community repo / server (only if configured)
+
+No third-party analytics SDK is included. No crash reporter calls out.
+There is no telemetry dial-home. Search the codebase for `http` /
+`https` to verify — every call site is listed above.
+
+## Permissions
+
+| Permission                                  | Why                                              | Optional? |
+| ------------------------------------------- | ------------------------------------------------ | --------- |
+| `ACCESS_FINE_LOCATION`                      | Core feature — GPS sampling for fog/trail        | Required  |
+| `ACCESS_BACKGROUND_LOCATION` (Android 10+)  | Foreground service keeps recording when screen locked | Recommended |
+| `FOREGROUND_SERVICE` + `FOREGROUND_SERVICE_LOCATION` | Persistent recording                          | Required for bg recording |
+| `INTERNET`                                  | Map tiles, WebDAV, image host, AI                 | Required  |
+| `ACCESS_NETWORK_STATE`                      | Detect online/offline (geocoding fallback)        | Required  |
+| `CHANGE_WIFI_MULTICAST_STATE`               | mDNS group discovery on Wi-Fi (Android only)      | Optional  |
+| `READ_MEDIA_IMAGES` / `READ_EXTERNAL_STORAGE` | Journal image picker                            | Optional  |
+| `RECORD_AUDIO`                              | Push-to-talk in group chat                        | Optional  |
+| `POST_NOTIFICATIONS` (Android 13+)          | Foreground-service notification visibility        | Recommended |
+
+Privacy-policy implication: only #1, #2, and #4 are "personal data"
+under GDPR / China's PIPL. The user controls everything else.
+
+## Privacy-policy boilerplate
+
+A minimum-viable privacy policy that covers what this app actually
+does:
+
+```
+"<App name>" stores all user data locally on your device by default.
+
+GPS coordinates are recorded ONLY while you have started a recording
+session and are used to draw your trail and clear the fog of war on
+the map. Data is held in a local SQLite database in the app sandbox.
+
+If you enable any of the following optional features, the listed data
+crosses a network boundary, sent ONLY to the destination you
+configured:
+  • WebDAV backup → your WebDAV server
+  • Image host → your GitHub repository or custom server
+  • AI trip planning → the AI provider you configured
+  • Group sharing → other devices in the same group, end-to-end
+    encrypted with a passphrase you set
+  • Leaderboard → other peers in your group, or the community
+    repository / server you configured
+
+We do not run any analytics, telemetry, advertising, or crash-
+reporting SDK. No data is sent to the app authors.
+
+Credentials (passwords, tokens, API keys) are stored in
+platform-encrypted storage (Android Keystore / iOS Keychain). They
+are never included in user-initiated backup files.
+```
+
+Adapt brand names + add contact / data-deletion procedure as your
+local regulator requires.
+
+## Operational checklist before publishing
+
+- [ ] Verified `flutter_secure_storage` writes succeed on a release
+      build (debug builds sometimes fall back to a less-strict store).
+- [ ] Stripped any AI/WebDAV/Imghost provider default credentials
+      from `prefs.dart` defaults — never ship a build with embedded
+      keys.
+- [ ] Confirmed `http_guard` is installed on every `Dio` used by the
+      app (AI service, image host, leaderboard, music).
+- [ ] Bumped `version:` in `pubspec.yaml` AND the `_kAppVersion`
+      constant in `lib/ui/about/about_screen.dart`.
+- [ ] Tested backup → import on a fresh install: verified credentials
+      are NOT restored, prefs are.
+- [ ] Tested with airplane mode: app launches cleanly, recording
+      starts, no hangs waiting on network.
+- [ ] Reviewed `AndroidManifest.xml` permissions — every permission
+      listed must map to a feature the store description mentions.
+- [ ] Reviewed iOS `Info.plist` `NS*UsageDescription` strings — each
+      one should be one sentence, plain English, no marketing.
+- [ ] If publishing in China: PIPL "personal information impact
+      assessment" filed; ICP filing / 备案 done for any optional
+      backend you ship (leaderboard server, custom image host).

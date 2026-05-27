@@ -180,43 +180,76 @@ class _VersionTapState extends ConsumerState<_VersionTap> {
   }
 }
 
-class _TileCard extends StatelessWidget {
+/// Press-scale animation on every home tile — taps feel responsive
+/// even before the route transition starts. 96 % scale + 80 ms ease
+/// matches the M3 motion guidance for "container response". The card
+/// also gains a soft glow border via the gradient end-colour, picked up
+/// in the BoxDecoration boxShadow.
+class _TileCard extends StatefulWidget {
   final _HomeTile tile;
   const _TileCard({required this.tile});
+  @override
+  State<_TileCard> createState() => _TileCardState();
+}
 
+class _TileCardState extends State<_TileCard> {
+  bool _pressed = false;
   @override
   Widget build(BuildContext context) {
-    return Material(
-      borderRadius: BorderRadius.circular(18),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: () => context.push(tile.route),
-        child: Ink(
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              colors: tile.gradient,
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
+    final tile = widget.tile;
+    return AnimatedScale(
+      duration: const Duration(milliseconds: 120),
+      curve: Curves.easeOut,
+      scale: _pressed ? 0.96 : 1.0,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(18),
+          boxShadow: [
+            BoxShadow(
+              color: tile.gradient.last.withValues(alpha: _pressed ? 0.45 : 0.25),
+              blurRadius: _pressed ? 18 : 12,
+              offset: const Offset(0, 6),
+              spreadRadius: -2,
             ),
-          ),
-          child: Padding(
-            padding: const EdgeInsets.all(12),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(tile.icon, size: 34, color: Colors.white),
-                const SizedBox(height: 10),
-                Text(
-                  tile.label,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    height: 1.2,
-                  ),
+          ],
+        ),
+        child: Material(
+          borderRadius: BorderRadius.circular(18),
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+            onTap: () => context.push(tile.route),
+            onTapDown: (_) => setState(() => _pressed = true),
+            onTapUp: (_) => setState(() => _pressed = false),
+            onTapCancel: () => setState(() => _pressed = false),
+            child: Ink(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: tile.gradient,
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
                 ),
-              ],
+              ),
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(tile.icon, size: 34, color: Colors.white),
+                    const SizedBox(height: 10),
+                    Text(
+                      tile.label,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        height: 1.2,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             ),
           ),
         ),

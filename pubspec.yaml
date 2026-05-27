@@ -82,6 +82,12 @@ dependencies:
   url_launcher: ^6.3.0
   android_intent_plus: ^5.1.0
 
+  # Stores high-risk credentials (PATs, tokens, passphrases) outside of
+  # SharedPreferences — Android Keystore-backed on device, Keychain on
+  # iOS. Anything we'd be unhappy to see in a stolen-phone forensic
+  # dump goes here, not in `app_settings_v1`.
+  flutter_secure_storage: ^9.2.2
+
   # Utilities
   collection: ^1.18.0
   intl: ^0.20.2
