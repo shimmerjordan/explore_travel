@@ -116,35 +116,41 @@ jobs:
         working-directory: .
         run: flutter analyze --no-fatal-infos || true
 
-      - name: Build APK
+      - name: Build APK (universal)
         working-directory: .
-        # split-per-abi gives us 3 smaller APKs (armv7 / arm64 / x86_64).
-        # Chinese stores often have 100 MB free-tier upload limits so
-        # this is the friendlier shape than one fat universal APK.
-        run: flutter build apk --release --split-per-abi
+        # Universal APK — one binary that contains armv7, arm64 AND
+        # x86_64 native libs. Larger (~70-100 MB) but installs on EVERY
+        # Android device without users having to pick the right ABI,
+        # and SIDE-steps the "软件包与现有软件包存在冲突" issue you can
+        # get when split-per-abi APKs end up signed with a different
+        # debug key than a previously-installed split.
+        #
+        # If you later want per-ABI splits for the Play Store (smaller
+        # downloads), use `--release --split-per-abi` from your local
+        # machine — Play Console resolves split conflicts for you. CI
+        # explicitly does NOT split because the artifacts here are for
+        # sideloading, where one-APK-fits-all matters more than size.
+        run: flutter build apk --release
 
-      - name: Find APKs
+      - name: Rename APK
         id: find_apk
         working-directory: .
         run: |
+          set -euo pipefail
           ls -lah build/app/outputs/flutter-apk/
-          # Rename arm64 to a clean, tag-aware filename for the release
-          # asset list. The others stay as-is.
           TAG="${{ github.event.inputs.tag }}"
-          cp build/app/outputs/flutter-apk/app-arm64-v8a-release.apk \
-             "explore_journal-${TAG}-android-arm64.apk"
-          cp build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk \
-             "explore_journal-${TAG}-android-arm32.apk" || true
-          cp build/app/outputs/flutter-apk/app-x86_64-release.apk \
-             "explore_journal-${TAG}-android-x86_64.apk" || true
-          ls -lah explore_journal-${TAG}-android-*.apk
+          # `flutter build apk` (no split) emits a single
+          # app-release.apk under flutter-apk/. Rename for clarity.
+          cp build/app/outputs/flutter-apk/app-release.apk \
+             "explore_journal-${TAG}-android-universal.apk"
+          ls -lah explore_journal-${TAG}-android-universal.apk
           echo "name=explore_journal-${TAG}-android" >> "$GITHUB_OUTPUT"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: android-apks
-          path: ./explore_journal-*-android-*.apk
+          path: ./explore_journal-*-android-universal.apk
           if-no-files-found: error
           retention-days: 14
 
@@ -331,25 +337,16 @@ jobs:
             echo "Manually-built release. Artifacts attached below."
             echo
 
-            if ls artifacts/explore_journal-*-android-*.apk >/dev/null 2>&1; then
+            if ls artifacts/explore_journal-*-android-universal.apk >/dev/null 2>&1; then
               echo "## Android"
-              for f in artifacts/explore_journal-*-android-arm64.apk \
-                       artifacts/explore_journal-*-android-arm32.apk \
-                       artifacts/explore_journal-*-android-x86_64.apk; do
-                [ -f "$f" ] || continue
+              for f in artifacts/explore_journal-*-android-universal.apk; do
                 bn=$(basename "$f")
-                case "$bn" in
-                  *-arm64.apk)   echo "- \`$bn\` — modern devices (recommended)";;
-                  *-arm32.apk)   echo "- \`$bn\` — older 32-bit phones";;
-                  *-x86_64.apk)  echo "- \`$bn\` — emulator / x86 Chromebooks";;
-                esac
+                echo "- \`$bn\` — universal build, installs on every Android device (armv7 / arm64 / x86_64 all included)"
               done
               echo
-              # Quick heuristic: a debug-signed APK has CN=Android Debug
-              # in its v1 signature. We don't unzip to inspect — the
-              # presence of `android/key.properties` in the matrix would
-              # be ideal, but we don't have it here. Note neutrally.
-              echo "_Signing: production if you configured ANDROID_KEYSTORE_BASE64, otherwise debug-signed._"
+              echo "_Signing: production if you configured \`ANDROID_KEYSTORE_BASE64\`, otherwise debug-signed._"
+              echo
+              echo "> **遇到「软件包与现有软件包存在冲突」？** 这是签名不一致导致的（之前装过本地 dev 版，这次是 CI 版 / 反之）。卸载旧版本后重新安装即可。后续要彻底避免，在仓库 Secrets 里配好 \`ANDROID_KEYSTORE_BASE64\` 等四个值，所有 CI 产物都会用同一个上传密钥签名。"
               echo
             fi
 
