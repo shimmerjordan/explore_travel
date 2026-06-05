@@ -8,7 +8,8 @@ class AppSettings {
   final RecordingMode recordingMode;
   final int fogColor; // ARGB
   final double fogOpacity; // 0..1
-  final double fogPenRadius; // meters
+  final double fogPenRadius; // meters — manual erase/add brush radius
+  final double trailWidth; // meters — visible recorded path/point size
   final String? amapApiKey;
   final String? googleMapKey;
   /// Optional override URL template for OSM/raster tiles, used when the
@@ -122,6 +123,13 @@ class AppSettings {
   /// viewer.
   final bool debugMode;
 
+  /// When true, the map tile layer is rendered through an invert-style
+  /// `ColorFilter` so light raster tiles look like a dark theme. None
+  /// of the upstream providers (高德 / Google / OSM) expose a real
+  /// dark-tile URL on terms we can ship; the filter is the next-best
+  /// option and matches what other Flutter apps in the wild do.
+  final bool darkMap;
+
   // ── Profile / avatar ──────────────────────────────────────────────────
   /// Base64-encoded JPEG (256×256, ~10–20 KB). Empty = no avatar; UI
   /// falls back to hue-from-peerId initials. Stored in prefs so it's
@@ -154,6 +162,7 @@ class AppSettings {
     this.fogColor = 0xFF101820,
     this.fogOpacity = 0.78,
     this.fogPenRadius = 50,
+    this.trailWidth = 14,
     this.amapApiKey,
     this.googleMapKey,
     this.customOsmTileUrl,
@@ -204,6 +213,7 @@ class AppSettings {
     this.importClearBeforeImport = false,
     this.backupSelectedModules = const [],
     this.debugMode = false,
+    this.darkMap = false,
     this.avatarBase64 = '',
     this.leaderboardPrivateKey = '',
     this.leaderboardPublicKey = '',
@@ -223,6 +233,7 @@ class AppSettings {
     int? fogColor,
     double? fogOpacity,
     double? fogPenRadius,
+    double? trailWidth,
     String? amapApiKey,
     String? googleMapKey,
     String? customOsmTileUrl,
@@ -272,6 +283,7 @@ class AppSettings {
     bool? importClearBeforeImport,
     List<String>? backupSelectedModules,
     bool? debugMode,
+    bool? darkMap,
     String? avatarBase64,
     String? leaderboardPrivateKey,
     String? leaderboardPublicKey,
@@ -290,6 +302,7 @@ class AppSettings {
         fogColor: fogColor ?? this.fogColor,
         fogOpacity: fogOpacity ?? this.fogOpacity,
         fogPenRadius: fogPenRadius ?? this.fogPenRadius,
+        trailWidth: trailWidth ?? this.trailWidth,
         amapApiKey: amapApiKey ?? this.amapApiKey,
         googleMapKey: googleMapKey ?? this.googleMapKey,
         customOsmTileUrl: customOsmTileUrl ?? this.customOsmTileUrl,
@@ -347,6 +360,7 @@ class AppSettings {
         backupSelectedModules:
             backupSelectedModules ?? this.backupSelectedModules,
         debugMode: debugMode ?? this.debugMode,
+        darkMap: darkMap ?? this.darkMap,
         avatarBase64: avatarBase64 ?? this.avatarBase64,
         leaderboardPrivateKey:
             leaderboardPrivateKey ?? this.leaderboardPrivateKey,
@@ -373,6 +387,7 @@ class AppSettings {
         'fogColor': fogColor,
         'fogOpacity': fogOpacity,
         'fogPenRadius': fogPenRadius,
+        'trailWidth': trailWidth,
         'amapApiKey': amapApiKey,
         'googleMapKey': googleMapKey,
         'customOsmTileUrl': customOsmTileUrl,
@@ -422,6 +437,7 @@ class AppSettings {
         'importClearBeforeImport': importClearBeforeImport,
         'backupSelectedModules': backupSelectedModules,
         'debugMode': debugMode,
+        'darkMap': darkMap,
         'avatarBase64': avatarBase64,
         'leaderboardPrivateKey': leaderboardPrivateKey,
         'leaderboardPublicKey': leaderboardPublicKey,
@@ -441,6 +457,7 @@ class AppSettings {
         fogColor: j['fogColor'] ?? 0xFF101820,
         fogOpacity: (j['fogOpacity'] ?? 0.78).toDouble(),
         fogPenRadius: (j['fogPenRadius'] ?? 50).toDouble(),
+        trailWidth: (j['trailWidth'] ?? 14).toDouble(),
         amapApiKey: j['amapApiKey'],
         googleMapKey: j['googleMapKey'],
         customOsmTileUrl: j['customOsmTileUrl'],
@@ -503,6 +520,7 @@ class AppSettings {
             (j['backupSelectedModules'] as List?)?.cast<String>() ??
                 const [],
         debugMode: j['debugMode'] ?? false,
+        darkMap: j['darkMap'] ?? false,
         avatarBase64: j['avatarBase64']?.toString() ?? '',
         leaderboardPrivateKey:
             j['leaderboardPrivateKey']?.toString() ?? '',

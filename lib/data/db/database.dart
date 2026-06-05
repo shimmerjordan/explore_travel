@@ -18,6 +18,12 @@ class TrackPoints extends Table {
   RealColumn get accuracy => real().nullable()();
   RealColumn get altitude => real().nullable()();
   RealColumn get speed => real().nullable()();
+  /// Visible trail/point size (full corridor width, in metres) captured at
+  /// record time. Stored per-point so changing the size setting only
+  /// affects *new* points — historical trails keep the width they were
+  /// recorded with. Null on rows predating this column → rendered at the
+  /// renderer's default width.
+  RealColumn get width => real().nullable()();
   IntColumn get layerId => integer()();
 }
 
@@ -110,7 +116,7 @@ class AppDb extends _$AppDb {
   AppDb() : super(openConnection());
 
   @override
-  int get schemaVersion => 4;
+  int get schemaVersion => 5;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -137,6 +143,12 @@ class AppDb extends _$AppDb {
           if (from < 4) {
             // v4: per-peer location history for playback rewinds.
             await m.createTable(peerLocations);
+          }
+          if (from < 5) {
+            // v5: per-point trail width so the size control only affects
+            // newly recorded points. Existing rows stay null and render at
+            // the renderer's default width.
+            await m.addColumn(trackPoints, trackPoints.width);
           }
           if (from < 3) {
             // v3: stable UUID on every user-content table so backup
@@ -250,6 +262,23 @@ class AppDb extends _$AppDb {
   }
 
   /// Erase points in a circular region (path editing - erase).
+  /// Insert a single manually-painted track point (the map "add" tool).
+  /// Carries its own [width] so it renders at the brush size, independent
+  /// of whatever the recording size setting is later changed to.
+  Future<int> insertManualPoint({
+    required double lat,
+    required double lng,
+    required int layerId,
+    required double width,
+  }) =>
+      insertPoint(TrackPointsCompanion.insert(
+        lat: lat,
+        lng: lng,
+        time: DateTime.now(),
+        layerId: layerId,
+        width: Value(width),
+      ));
+
   Future<int> erasePointsAround(double lat, double lng, double radiusMeters) async {
     final dLat = radiusMeters / 111320.0;
     final dLng = radiusMeters / (111320.0 * (lat.abs() < 89 ? 1 : 0.01));

@@ -11,6 +11,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../../app/providers.dart';
 import '../../core/prefs.dart' show PeerOverrideX;
 import '../../app/recording_controller.dart';
@@ -26,6 +27,19 @@ import '../../services/map/tile_providers.dart';
 import '../journal/journal_screen.dart' as journal_ui;
 import '../widgets/top_toast.dart';
 
+/// NOTE on 3D tilt: flutter_map is a 2D raster-tile widget — it has
+/// no concept of pitch / tilt / 3D buildings, and the entire camera
+/// system is a top-down LatLng + zoom + rotation. Adding "pinch
+/// up/down for 3D" would require swapping the whole base map for a
+/// real GL engine: either `mapbox_maps_flutter` (Mapbox SDK, paid for
+/// any non-trivial usage) or `google_maps_flutter` (Google Maps SDK,
+/// requires an API key and forbids screenshot-style fog overlays via
+/// `CustomPaint`). Neither is a drop-in replacement; the migration
+/// would touch every screen that renders a map (recording, playback,
+/// trip plan, journal pins, favorites). We've punted on this until
+/// the rest of the app stabilises — if it lands, it's a separate
+/// feature branch, not an incremental patch.
+///
 class MapScreen extends ConsumerStatefulWidget {
   const MapScreen({super.key});
   @override
@@ -37,6 +51,13 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   LatLng _center = const LatLng(30.6586, 104.0648);
   _EditMode _editMode = _EditMode.none;
   bool _satellite = false;
+  /// Current camera rotation in degrees, mirrored from `_mapCtrl` via
+  /// the `onMapEvent` callback. Reading `_mapCtrl.camera.rotation`
+  /// directly during build() throws "FlutterMap not rendered yet" on
+  /// the very first frame — keep a local copy and only ever READ
+  /// `_mapCtrl.camera` from event callbacks (which only fire after
+  /// the map exists).
+  double _mapRotation = 0.0;
 
   // Raw WGS-84 position — always stored in WGS-84
   double? _wgsLat;
@@ -46,6 +67,16 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   /// collapses back to a plain dot.
   double? _heading;
   StreamSubscription<Position>? _posSub;
+
+  /// Last reported fix accuracy in metres. Drives the signal-strength
+  /// chip top-center on the map. `null` = we've never received a fix
+  /// in this session (cold-start or indoors with no GPS lock).
+  double? _accuracyMeters;
+  /// When the last accuracy update arrived. Used by the signal chip to
+  /// switch from "active" colour to "stale" grey when the GPS hasn't
+  /// reported anything for 30 s+ (typically means we're indoors and
+  /// the OS gave up trying).
+  DateTime? _accuracyAt;
 
   // ─── Debug simulation ───
   bool _simActive = false;
@@ -161,6 +192,8 @@ class _MapScreenState extends ConsumerState<MapScreen> {
             if (pos.heading >= 0 && pos.speed > 0.5) {
               _heading = pos.heading;
             }
+            _accuracyMeters = pos.accuracy;
+            _accuracyAt = DateTime.now();
           });
           _publishDisplayPos();
         },
@@ -296,12 +329,19 @@ class _MapScreenState extends ConsumerState<MapScreen> {
             if (mounted) TopToast.show(context, '已停止记录');
           } else {
             final err = await ctrl.start();
-            if (mounted) {
-              TopToast.show(
-                context,
-                err ?? '已开始记录，走动几步看看迷雾',
-                background: err == null ? null : Colors.red.shade700,
-              );
+            if (!mounted) return;
+            TopToast.show(
+              context,
+              err ?? '已开始记录，走动几步看看迷雾',
+              background: err == null ? null : Colors.red.shade700,
+            );
+            // First-start nudge: if Android, prompt the user to walk
+            // through the permission + autostart checklist once.
+            // Background recording reliably fails on every major
+            // Chinese ROM without this. Gated on a SharedPreferences
+            // flag so we only ask once per install.
+            if (err == null && defaultTargetPlatform == TargetPlatform.android) {
+              _maybeOfferPermissionWalkthrough();
             }
           }
         },
@@ -325,8 +365,28 @@ class _MapScreenState extends ConsumerState<MapScreen> {
               initialZoom: 13,
               initialRotation: 0,
               interactionOptions: const InteractionOptions(
-                flags: InteractiveFlag.all & ~InteractiveFlag.rotate,
+                // All gestures including two-finger rotation. A reset
+                // compass appears top-right whenever the heading is
+                // non-zero so the user can snap back to north-up.
+                flags: InteractiveFlag.all,
+                // High-pass on rotation so accidental twists during a
+                // pinch-zoom don't constantly nudge the heading.
+                rotationThreshold: 20.0,
               ),
+              onMapEvent: (e) {
+                // Mirror the camera's rotation into local state so
+                // build() can render the compass chip without ever
+                // touching `_mapCtrl.camera` (which throws before
+                // the first frame). After the first onMapReady the
+                // camera is safe to read here.
+                if (e is MapEventRotate ||
+                    e is MapEventRotateStart ||
+                    e is MapEventRotateEnd ||
+                    e is MapEventMoveEnd) {
+                  if (!mounted) return;
+                  setState(() => _mapRotation = e.camera.rotation);
+                }
+              },
               onTap: (tapPos, latlng) => _onMapTap(latlng, activeLayerId),
               onLongPress: (kDebugMode || ref.read(settingsProvider).debugMode)
                   ? (tapPos, latlng) {
@@ -343,6 +403,12 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                   : null,
             ),
             children: [
+              // Tile layer — always rendered at full brightness. Dark mode
+              // is no longer a client-side invert of the raster (which
+              // dimmed the explored trail too); instead the fog veil below
+              // turns dark, so walked corridors reveal the bright original
+              // map exactly as in light mode while everything else is
+              // pressed dark. See the FogLayer's dark veil below.
               buildTileLayer(
                 provider: settings.mapProvider,
                 style: settings.mapStyle,
@@ -350,14 +416,25 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                 googleKey: settings.googleMapKey,
                 customOsmUrl: settings.customOsmTileUrl,
               ),
-              if (visibleLayerIds.isNotEmpty)
+              // Render the veil whenever there are visible layers OR dark
+              // mode is on — in dark mode with no layers it's just a solid
+              // dark scrim over the bright map.
+              if (visibleLayerIds.isNotEmpty || settings.darkMap)
                 FogLayer(
                   engine: ref.read(fogEngineProvider),
                   db: ref.read(dbProvider),
                   layerIds: visibleLayerIds,
-                  fogColor: Color(settings.fogColor),
-                  fogOpacity: settings.fogOpacity,
-                  trailRadiusMeters: settings.fogPenRadius,
+                  // Dark mode: a strong near-black scrim (kept at least
+                  // fairly opaque) so the un-walked map reads as dark. The
+                  // corridor holes punched through it reveal the bright
+                  // tiles — same brightness/sharpness as light mode.
+                  fogColor: settings.darkMap
+                      ? const Color(0xFF05070A)
+                      : Color(settings.fogColor),
+                  fogOpacity: settings.darkMap
+                      ? math.max(settings.fogOpacity, 0.62)
+                      : settings.fogOpacity,
+                  penRadiusMeters: settings.fogPenRadius,
                   refreshKey: fogRefresh,
                   mapProvider: settings.mapProvider,
                 ),
@@ -380,19 +457,30 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                 FutureBuilder<List<db_t.JournalEntry>>(
                   key: ValueKey('journal-pins-$_journalPinsRev'),
                   future: _journalPinsFuture,
-                  builder: (_, snap) {
+                  builder: (ctx, snap) {
                     final list = (snap.data ?? const <db_t.JournalEntry>[])
                         .where((j) => !_hiddenJournalIds.contains(j.id))
                         .toList();
                     if (list.isEmpty) return const SizedBox.shrink();
+                    // Pins scale with the map: the tile scale doubles per
+                    // zoom level, so we track that 2^(zoom-ref) relative to
+                    // a reference zoom, clamped so a pin never gets absurd.
+                    // Reading the camera here makes the layer rebuild (and
+                    // rescale) live as the user zooms.
+                    final zoom = MapCamera.of(ctx).zoom;
+                    final scale =
+                        math.pow(2.0, zoom - 16.0).toDouble().clamp(0.5, 3.0);
                     return MarkerLayer(
                       markers: list.map((j) {
                         final p = _toDisplay(j.lat, j.lng);
                         return Marker(
                           point: p,
-                          width: 48,
-                          height: 58,
+                          width: 44 * scale,
+                          height: 54 * scale,
                           alignment: Alignment.bottomCenter,
+                          // Counter-rotate so the pin always stays upright
+                          // (tip pointing down) however the map is rotated.
+                          rotate: true,
                           child: GestureDetector(
                             onTap: () async {
                               final changed = await journal_ui
@@ -402,7 +490,10 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                               }
                             },
                             onLongPress: () => _showPinHideMenu(j),
-                            child: _JournalPin(entry: j),
+                            child: FittedBox(
+                              fit: BoxFit.contain,
+                              child: _JournalPin(entry: j),
+                            ),
                           ),
                         );
                       }).toList(),
@@ -473,9 +564,10 @@ class _MapScreenState extends ConsumerState<MapScreen> {
             ),
           // (PTT moved to group screen — private chat / call view only.)
           // Right-side floating column: layers, my location, edit modes.
+          // Sits above the signal chip now docked at the bottom-right.
           Positioned(
             right: 16,
-            bottom: 110,
+            bottom: 168,
             child: Column(
               children: [
                 _MapFab(
@@ -540,7 +632,38 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                         .update((p) => p.copyWith(mapProvider: next));
                   },
                 ),
+                _MapChip(
+                  icon: settings.darkMap
+                      ? Icons.dark_mode_rounded
+                      : Icons.light_mode_outlined,
+                  onTap: () => ref
+                      .read(settingsProvider.notifier)
+                      .update((p) => p.copyWith(darkMap: !p.darkMap)),
+                ),
+                // Compass — only visible when the map has been rotated
+                // off-north. Reads from `_mapRotation` (mirrored from
+                // controller via onMapEvent), NOT `_mapCtrl.camera`,
+                // because the camera throws before first render.
+                if (_mapRotation.abs() > 0.5)
+                  _CompassChip(
+                    bearingDeg: _mapRotation,
+                    onTap: () => _mapCtrl.rotate(0),
+                  ),
               ],
+            ),
+          ),
+          // ── Bottom-right: signal-strength chip (always visible) ──
+          //    Moved out of the top-center where it sat over the map and
+          //    obscured content. Anchored above the 64px bottom nav bar,
+          //    below the right-hand FAB column.
+          Positioned(
+            right: 12,
+            bottom: 110,
+            child: IgnorePointer(
+              child: _SignalChip(
+                accuracyMeters: _accuracyMeters,
+                reportedAt: _accuracyAt,
+              ),
             ),
           ),
           // ── Top-center: REC pill when recording ──
@@ -656,6 +779,39 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     );
   }
 
+  /// First-recording nudge — once per install, on Android only.
+  /// Pops a soft dialog explaining the background-recording pitfalls
+  /// and offering to take the user to the permission walkthrough.
+  /// Skipped silently after the first acknowledgement so it never
+  /// becomes nagware.
+  Future<void> _maybeOfferPermissionWalkthrough() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (prefs.getBool('perm_walkthrough_offered_v1') == true) return;
+    await prefs.setBool('perm_walkthrough_offered_v1', true);
+    if (!mounted) return;
+    final go = await showDialog<bool>(
+      context: context,
+      builder: (dctx) => AlertDialog(
+        icon: const Icon(Icons.shield_outlined),
+        title: const Text('后台记录会被系统杀掉'),
+        content: const Text(
+          '安卓手机厂商默认会限制后台 App。如果你想锁屏 / 切后台后还能继续记录轨迹，'
+          '需要授予「始终允许定位」、加入电池豁免、打开自启动开关。\n\n'
+          '这一步只需要做一次。',
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(dctx, false),
+              child: const Text('稍后')),
+          FilledButton(
+              onPressed: () => Navigator.pop(dctx, true),
+              child: const Text('去设置')),
+        ],
+      ),
+    );
+    if (go == true && mounted) context.push('/permissions');
+  }
+
   Future<void> _gotoCurrent() async {
     if (_wgsLat != null && _wgsLng != null) {
       final display = _toDisplay(_wgsLat!, _wgsLng!);
@@ -671,8 +827,10 @@ class _MapScreenState extends ConsumerState<MapScreen> {
 
   Future<void> _showNearbyJournals() async {
     if (_wgsLat == null || _wgsLng == null) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(const SnackBar(content: Text('还没有位置')));
+      // Top toast so this doesn't dock to the bottom Scaffold and
+      // hide the centred REC button. Same UX as "已开始记录" etc.
+      TopToast.show(context, '还没有位置',
+          background: Colors.orange.shade700);
       return;
     }
     final db = ref.read(dbProvider);
@@ -1016,9 +1174,20 @@ class _MapScreenState extends ConsumerState<MapScreen> {
 
   Future<void> _onMapTap(LatLng latlng, int layerId) async {
     final fog = ref.read(fogEngineProvider);
+    final db = ref.read(dbProvider);
     final wgs = _fromDisplay(latlng.latitude, latlng.longitude);
     final radius = ref.read(settingsProvider).fogPenRadius;
     if (_editMode == _EditMode.add) {
+      // The visible trail is drawn from track_points, so a manual dab has
+      // to insert a point (not just paint the fog bitmap) to show up. We
+      // still reveal the fog bitmap so exploration stats stay correct.
+      // Width = brush diameter so the dab renders at the brush radius.
+      await db.insertManualPoint(
+        lat: wgs.latitude,
+        lng: wgs.longitude,
+        layerId: layerId,
+        width: radius * 2,
+      );
       await fog.revealPoint(
         lat: wgs.latitude,
         lng: wgs.longitude,
@@ -1027,6 +1196,10 @@ class _MapScreenState extends ConsumerState<MapScreen> {
       );
       ref.read(fogRefreshProvider.notifier).state++;
     } else if (_editMode == _EditMode.erase) {
+      // Delete the actual track points under the brush — that's what the
+      // render reads now — then clear the fog bitmap for stats. Without
+      // the point delete the trail would just redraw on the next refresh.
+      await db.erasePointsAround(wgs.latitude, wgs.longitude, radius);
       await fog.erase(
         lat: wgs.latitude,
         lng: wgs.longitude,
@@ -2226,3 +2399,134 @@ class _SelfAvatar extends StatelessWidget {
 /// bumps that counter (debounced to 250 ms) every time it writes new
 /// samples. The whole result is memoised on (layerIds, refreshKey) via a
 /// cached FutureBuilder so panning the map doesn't re-hit the DB.
+
+/// Live GPS signal indicator. Shows fix quality + accuracy distance,
+/// or a clear "no fix" state when the OS hasn't reported anything
+/// recently. Users would otherwise have no idea why the trail isn't
+/// moving — especially indoors where the OS silently stops reporting.
+class _SignalChip extends StatefulWidget {
+  final double? accuracyMeters;
+  final DateTime? reportedAt;
+  const _SignalChip({required this.accuracyMeters, required this.reportedAt});
+  @override
+  State<_SignalChip> createState() => _SignalChipState();
+}
+
+class _SignalChipState extends State<_SignalChip> {
+  Timer? _tick;
+  @override
+  void initState() {
+    super.initState();
+    // Rebuild every 5 s so the "stale after 30 s" colour change is
+    // accurate without needing a position update to trigger setState.
+    _tick = Timer.periodic(const Duration(seconds: 5), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _tick?.cancel();
+    super.dispose();
+  }
+
+  /// Map accuracy in metres to "bars" (1-4) + colour.
+  ({int bars, Color color, String label}) _classify() {
+    if (widget.reportedAt == null) {
+      return (bars: 0, color: Colors.grey, label: '无定位');
+    }
+    final age = DateTime.now().difference(widget.reportedAt!);
+    if (age > const Duration(seconds: 30)) {
+      return (
+        bars: 1,
+        color: Colors.orange.shade400,
+        label: '信号弱 · ${age.inSeconds}s 未更新'
+      );
+    }
+    final acc = widget.accuracyMeters ?? 9999;
+    if (acc <= 10) return (bars: 4, color: const Color(0xFF66BB6A), label: '强 · ±${acc.toStringAsFixed(0)} m');
+    if (acc <= 30) return (bars: 3, color: const Color(0xFFAED581), label: '良好 · ±${acc.toStringAsFixed(0)} m');
+    if (acc <= 80) return (bars: 2, color: const Color(0xFFFFB74D), label: '一般 · ±${acc.toStringAsFixed(0)} m');
+    return (bars: 1, color: const Color(0xFFE57373), label: '弱 · ±${acc.toStringAsFixed(0)} m');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final s = _classify();
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.55),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: s.color.withValues(alpha: 0.6), width: 1),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Four ascending bars; lit ones use the level colour.
+          for (int i = 1; i <= 4; i++)
+            Container(
+              width: 3,
+              height: 4.0 + i * 2.5,
+              margin: const EdgeInsets.symmetric(horizontal: 1),
+              decoration: BoxDecoration(
+                color: i <= s.bars
+                    ? s.color
+                    : Colors.white.withValues(alpha: 0.18),
+                borderRadius: BorderRadius.circular(1),
+              ),
+            ),
+          const SizedBox(width: 8),
+          Text(
+            s.label,
+            style: TextStyle(
+                color: s.color,
+                fontSize: 11.5,
+                fontWeight: FontWeight.w600),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Tiny circular compass — only shown when the map's been rotated
+/// off-north. Tapping snaps the camera back to north-up.
+class _CompassChip extends StatelessWidget {
+  final double bearingDeg;
+  final VoidCallback onTap;
+  const _CompassChip({required this.bearingDeg, required this.onTap});
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(left: 4),
+      child: Tooltip(
+        message: '回正北',
+        child: Material(
+          color: Colors.black.withValues(alpha: 0.55),
+          shape: const CircleBorder(),
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+            onTap: onTap,
+            customBorder: const CircleBorder(),
+            child: SizedBox(
+              width: 32,
+              height: 32,
+              child: Transform.rotate(
+                // flutter_map's `rotation` is degrees CCW; the compass
+                // needle should point to true north, which is opposite
+                // the camera rotation.
+                angle: -bearingDeg * math.pi / 180.0,
+                child: const Icon(
+                  Icons.navigation_rounded,
+                  color: Color(0xFFFF5252),
+                  size: 18,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}

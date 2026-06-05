@@ -83,10 +83,27 @@ class SettingsScreen extends ConsumerWidget {
                       onChanged: (v) =>
                           n.update((p) => p.copyWith(fogOpacity: v)),
                     ),
-                    Text('画笔粗细',
+                    Text('轨迹粗细',
                         style: TextStyle(
                             color: cs.onSurface, fontWeight: FontWeight.w500)),
                     Slider(
+                      // Visible recorded-path width. Stored per-point at
+                      // record time, so changing this only affects points
+                      // recorded afterwards — existing trails are untouched.
+                      value: s.trailWidth,
+                      min: 2,
+                      max: 60,
+                      divisions: 58,
+                      label: '${s.trailWidth.toStringAsFixed(0)} m',
+                      onChanged: (v) =>
+                          n.update((p) => p.copyWith(trailWidth: v)),
+                    ),
+                    Text('擦除 / 涂抹半径',
+                        style: TextStyle(
+                            color: cs.onSurface, fontWeight: FontWeight.w500)),
+                    Slider(
+                      // Brush radius for the map add/erase tools only —
+                      // independent of the trail thickness above.
                       value: s.fogPenRadius,
                       min: 5,
                       max: 200,
@@ -233,6 +250,15 @@ class SettingsScreen extends ConsumerWidget {
                     }
                   }
                 },
+              ),
+              _SectionHeader('权限与后台'),
+              ListTile(
+                leading: const Icon(Icons.shield_outlined),
+                title: const Text('后台记录设置'),
+                subtitle: const Text(
+                    '始终允许定位 / 电池豁免 / 厂商自启动 — 排查"后台不记录"'),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => context.push('/permissions'),
               ),
               _SectionHeader('组队'),
               ListTile(

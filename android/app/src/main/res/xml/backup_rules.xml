@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Pre-Android 12 backup rules. The OS will persist every file we
+  include here through device transfers, "back up to Google Drive",
+  and crucially through reinstalls: as long as the user's account is
+  the same, an uninstall + reinstall restores all listed paths.
+
+  We include EVERYTHING under the app's private data dir so the user
+  never loses fog tiles, track points, journal media, or settings
+  between releases. We exclude flutter_secure_storage's keystore-
+  backed bin because that's restored separately by the platform.
+-->
+<full-backup-content>
+    <include domain="database" path="."/>
+    <include domain="sharedpref" path="."/>
+    <include domain="file" path="."/>
+    <include domain="external" path="."/>
+    <!-- The secure-storage layer (flutter_secure_storage) is
+         restored by Android's own keystore-backed restore flow. We
+         exclude the encrypted shared-prefs file because the keys
+         themselves are device-bound and won't decrypt on a new
+         device anyway. -->
+    <exclude domain="sharedpref" path="FlutterSecureStorage"/>
+</full-backup-content>

@@ -34,13 +34,23 @@ class _LocationTaskHandler extends TaskHandler {
     );
     _sub = Geolocator.getPositionStream(locationSettings: settings)
         .listen((pos) {
+      // CRITICAL: use the GPS fix's own timestamp, NOT `DateTime.now()`.
+      // When Android suspends the app or the OS buffers samples during
+      // a doze cycle, several positions can be delivered in a rapid
+      // burst minutes after they were captured. Stamping with `now()`
+      // collapses all their times to nearly-identical values, defeating
+      // both the line-stitching gate in RecordingController AND the
+      // session-split logic in FogLayer's polyline build — that's why
+      // far-apart points got connected with a long false line.
+      final capturedAt =
+          pos.timestamp.millisecondsSinceEpoch;
       FlutterForegroundTask.sendDataToMain({
         'lat': pos.latitude,
         'lng': pos.longitude,
         'accuracy': pos.accuracy,
         'altitude': pos.altitude,
         'speed': pos.speed,
-        'timeMs': DateTime.now().millisecondsSinceEpoch,
+        'timeMs': capturedAt,
       });
     });
   }

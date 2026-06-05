@@ -45,12 +45,52 @@ class LocationService {
     }
   }
 
+  /// Best-effort one-shot fix. Strategy:
+  ///   1. Return the OS's last-known fix immediately if we have one
+  ///      AND it's recent enough that it's still useful (≤ 5 min)
+  ///   2. Race a high-accuracy GPS fix against a 6 s timeout
+  ///   3. Fall back to a low-accuracy (network/Wi-Fi/cell) fix —
+  ///      indoors with no sky view, low-accuracy is often the only
+  ///      thing that succeeds. Better a 200 m fix than nothing
+  ///
+  /// Used by:
+  ///   • the map's initial centring (returns ASAP so UI feels snappy)
+  ///   • the journal "create at my current position" flow
+  ///   • the AI planner's locality keyword extraction
   Future<Position?> currentOnce() async {
     if (!await ensurePermission()) return null;
+    // 1. Last-known. `getLastKnownPosition` returns whatever the OS
+    //    cached during a previous fix, instantly — no GPS warm-up.
+    try {
+      final last = await Geolocator.getLastKnownPosition();
+      if (last != null) {
+        final age = DateTime.now().difference(last.timestamp);
+        if (age < const Duration(minutes: 5)) return last;
+      }
+    } catch (_) {}
+    // 2. Try a real high-accuracy fix with a tight timeout.
     try {
       return await Geolocator.getCurrentPosition(
-          locationSettings:
-              const LocationSettings(accuracy: LocationAccuracy.high));
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+          timeLimit: Duration(seconds: 6),
+        ),
+      );
+    } on TimeoutException catch (_) {
+      // Fall through to the network-fallback branch below.
+    } catch (e) {
+      lastError = '获取位置失败：$e';
+    }
+    // 3. Network fallback. LocationAccuracy.low/medium tells the OS
+    //    "I'll take Wi-Fi / cell triangulation if GPS isn't ready" —
+    //    this is what makes indoor location actually work.
+    try {
+      return await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.low,
+          timeLimit: Duration(seconds: 8),
+        ),
+      );
     } catch (e) {
       lastError = '获取位置失败：$e';
       return null;

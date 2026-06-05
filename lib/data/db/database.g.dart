@@ -57,6 +57,11 @@ class $TrackPointsTable extends TrackPoints
   late final GeneratedColumn<double> speed = GeneratedColumn<double>(
       'speed', aliasedName, true,
       type: DriftSqlType.double, requiredDuringInsert: false);
+  static const VerificationMeta _widthMeta = const VerificationMeta('width');
+  @override
+  late final GeneratedColumn<double> width = GeneratedColumn<double>(
+      'width', aliasedName, true,
+      type: DriftSqlType.double, requiredDuringInsert: false);
   static const VerificationMeta _layerIdMeta =
       const VerificationMeta('layerId');
   @override
@@ -65,7 +70,7 @@ class $TrackPointsTable extends TrackPoints
       type: DriftSqlType.int, requiredDuringInsert: true);
   @override
   List<GeneratedColumn> get $columns =>
-      [id, uuid, lat, lng, time, accuracy, altitude, speed, layerId];
+      [id, uuid, lat, lng, time, accuracy, altitude, speed, width, layerId];
   @override
   String get aliasedName => _alias ?? actualTableName;
   @override
@@ -113,6 +118,10 @@ class $TrackPointsTable extends TrackPoints
       context.handle(
           _speedMeta, speed.isAcceptableOrUnknown(data['speed']!, _speedMeta));
     }
+    if (data.containsKey('width')) {
+      context.handle(
+          _widthMeta, width.isAcceptableOrUnknown(data['width']!, _widthMeta));
+    }
     if (data.containsKey('layer_id')) {
       context.handle(_layerIdMeta,
           layerId.isAcceptableOrUnknown(data['layer_id']!, _layerIdMeta));
@@ -144,6 +153,8 @@ class $TrackPointsTable extends TrackPoints
           .read(DriftSqlType.double, data['${effectivePrefix}altitude']),
       speed: attachedDatabase.typeMapping
           .read(DriftSqlType.double, data['${effectivePrefix}speed']),
+      width: attachedDatabase.typeMapping
+          .read(DriftSqlType.double, data['${effectivePrefix}width']),
       layerId: attachedDatabase.typeMapping
           .read(DriftSqlType.int, data['${effectivePrefix}layer_id'])!,
     );
@@ -167,6 +178,13 @@ class TrackPoint extends DataClass implements Insertable<TrackPoint> {
   final double? accuracy;
   final double? altitude;
   final double? speed;
+
+  /// Visible trail/point size (full corridor width, in metres) captured at
+  /// record time. Stored per-point so changing the size setting only
+  /// affects *new* points — historical trails keep the width they were
+  /// recorded with. Null on rows predating this column → rendered at the
+  /// renderer's default width.
+  final double? width;
   final int layerId;
   const TrackPoint(
       {required this.id,
@@ -177,6 +195,7 @@ class TrackPoint extends DataClass implements Insertable<TrackPoint> {
       this.accuracy,
       this.altitude,
       this.speed,
+      this.width,
       required this.layerId});
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -194,6 +213,9 @@ class TrackPoint extends DataClass implements Insertable<TrackPoint> {
     }
     if (!nullToAbsent || speed != null) {
       map['speed'] = Variable<double>(speed);
+    }
+    if (!nullToAbsent || width != null) {
+      map['width'] = Variable<double>(width);
     }
     map['layer_id'] = Variable<int>(layerId);
     return map;
@@ -214,6 +236,8 @@ class TrackPoint extends DataClass implements Insertable<TrackPoint> {
           : Value(altitude),
       speed:
           speed == null && nullToAbsent ? const Value.absent() : Value(speed),
+      width:
+          width == null && nullToAbsent ? const Value.absent() : Value(width),
       layerId: Value(layerId),
     );
   }
@@ -230,6 +254,7 @@ class TrackPoint extends DataClass implements Insertable<TrackPoint> {
       accuracy: serializer.fromJson<double?>(json['accuracy']),
       altitude: serializer.fromJson<double?>(json['altitude']),
       speed: serializer.fromJson<double?>(json['speed']),
+      width: serializer.fromJson<double?>(json['width']),
       layerId: serializer.fromJson<int>(json['layerId']),
     );
   }
@@ -245,6 +270,7 @@ class TrackPoint extends DataClass implements Insertable<TrackPoint> {
       'accuracy': serializer.toJson<double?>(accuracy),
       'altitude': serializer.toJson<double?>(altitude),
       'speed': serializer.toJson<double?>(speed),
+      'width': serializer.toJson<double?>(width),
       'layerId': serializer.toJson<int>(layerId),
     };
   }
@@ -258,6 +284,7 @@ class TrackPoint extends DataClass implements Insertable<TrackPoint> {
           Value<double?> accuracy = const Value.absent(),
           Value<double?> altitude = const Value.absent(),
           Value<double?> speed = const Value.absent(),
+          Value<double?> width = const Value.absent(),
           int? layerId}) =>
       TrackPoint(
         id: id ?? this.id,
@@ -268,6 +295,7 @@ class TrackPoint extends DataClass implements Insertable<TrackPoint> {
         accuracy: accuracy.present ? accuracy.value : this.accuracy,
         altitude: altitude.present ? altitude.value : this.altitude,
         speed: speed.present ? speed.value : this.speed,
+        width: width.present ? width.value : this.width,
         layerId: layerId ?? this.layerId,
       );
   TrackPoint copyWithCompanion(TrackPointsCompanion data) {
@@ -280,6 +308,7 @@ class TrackPoint extends DataClass implements Insertable<TrackPoint> {
       accuracy: data.accuracy.present ? data.accuracy.value : this.accuracy,
       altitude: data.altitude.present ? data.altitude.value : this.altitude,
       speed: data.speed.present ? data.speed.value : this.speed,
+      width: data.width.present ? data.width.value : this.width,
       layerId: data.layerId.present ? data.layerId.value : this.layerId,
     );
   }
@@ -295,14 +324,15 @@ class TrackPoint extends DataClass implements Insertable<TrackPoint> {
           ..write('accuracy: $accuracy, ')
           ..write('altitude: $altitude, ')
           ..write('speed: $speed, ')
+          ..write('width: $width, ')
           ..write('layerId: $layerId')
           ..write(')'))
         .toString();
   }
 
   @override
-  int get hashCode =>
-      Object.hash(id, uuid, lat, lng, time, accuracy, altitude, speed, layerId);
+  int get hashCode => Object.hash(
+      id, uuid, lat, lng, time, accuracy, altitude, speed, width, layerId);
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -315,6 +345,7 @@ class TrackPoint extends DataClass implements Insertable<TrackPoint> {
           other.accuracy == this.accuracy &&
           other.altitude == this.altitude &&
           other.speed == this.speed &&
+          other.width == this.width &&
           other.layerId == this.layerId);
 }
 
@@ -327,6 +358,7 @@ class TrackPointsCompanion extends UpdateCompanion<TrackPoint> {
   final Value<double?> accuracy;
   final Value<double?> altitude;
   final Value<double?> speed;
+  final Value<double?> width;
   final Value<int> layerId;
   const TrackPointsCompanion({
     this.id = const Value.absent(),
@@ -337,6 +369,7 @@ class TrackPointsCompanion extends UpdateCompanion<TrackPoint> {
     this.accuracy = const Value.absent(),
     this.altitude = const Value.absent(),
     this.speed = const Value.absent(),
+    this.width = const Value.absent(),
     this.layerId = const Value.absent(),
   });
   TrackPointsCompanion.insert({
@@ -348,6 +381,7 @@ class TrackPointsCompanion extends UpdateCompanion<TrackPoint> {
     this.accuracy = const Value.absent(),
     this.altitude = const Value.absent(),
     this.speed = const Value.absent(),
+    this.width = const Value.absent(),
     required int layerId,
   })  : lat = Value(lat),
         lng = Value(lng),
@@ -362,6 +396,7 @@ class TrackPointsCompanion extends UpdateCompanion<TrackPoint> {
     Expression<double>? accuracy,
     Expression<double>? altitude,
     Expression<double>? speed,
+    Expression<double>? width,
     Expression<int>? layerId,
   }) {
     return RawValuesInsertable({
@@ -373,6 +408,7 @@ class TrackPointsCompanion extends UpdateCompanion<TrackPoint> {
       if (accuracy != null) 'accuracy': accuracy,
       if (altitude != null) 'altitude': altitude,
       if (speed != null) 'speed': speed,
+      if (width != null) 'width': width,
       if (layerId != null) 'layer_id': layerId,
     });
   }
@@ -386,6 +422,7 @@ class TrackPointsCompanion extends UpdateCompanion<TrackPoint> {
       Value<double?>? accuracy,
       Value<double?>? altitude,
       Value<double?>? speed,
+      Value<double?>? width,
       Value<int>? layerId}) {
     return TrackPointsCompanion(
       id: id ?? this.id,
@@ -396,6 +433,7 @@ class TrackPointsCompanion extends UpdateCompanion<TrackPoint> {
       accuracy: accuracy ?? this.accuracy,
       altitude: altitude ?? this.altitude,
       speed: speed ?? this.speed,
+      width: width ?? this.width,
       layerId: layerId ?? this.layerId,
     );
   }
@@ -427,6 +465,9 @@ class TrackPointsCompanion extends UpdateCompanion<TrackPoint> {
     if (speed.present) {
       map['speed'] = Variable<double>(speed.value);
     }
+    if (width.present) {
+      map['width'] = Variable<double>(width.value);
+    }
     if (layerId.present) {
       map['layer_id'] = Variable<int>(layerId.value);
     }
@@ -444,6 +485,7 @@ class TrackPointsCompanion extends UpdateCompanion<TrackPoint> {
           ..write('accuracy: $accuracy, ')
           ..write('altitude: $altitude, ')
           ..write('speed: $speed, ')
+          ..write('width: $width, ')
           ..write('layerId: $layerId')
           ..write(')'))
         .toString();
@@ -2919,6 +2961,7 @@ typedef $$TrackPointsTableCreateCompanionBuilder = TrackPointsCompanion
   Value<double?> accuracy,
   Value<double?> altitude,
   Value<double?> speed,
+  Value<double?> width,
   required int layerId,
 });
 typedef $$TrackPointsTableUpdateCompanionBuilder = TrackPointsCompanion
@@ -2931,6 +2974,7 @@ typedef $$TrackPointsTableUpdateCompanionBuilder = TrackPointsCompanion
   Value<double?> accuracy,
   Value<double?> altitude,
   Value<double?> speed,
+  Value<double?> width,
   Value<int> layerId,
 });
 
@@ -2966,6 +3010,9 @@ class $$TrackPointsTableFilterComposer
 
   ColumnFilters<double> get speed => $composableBuilder(
       column: $table.speed, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<double> get width => $composableBuilder(
+      column: $table.width, builder: (column) => ColumnFilters(column));
 
   ColumnFilters<int> get layerId => $composableBuilder(
       column: $table.layerId, builder: (column) => ColumnFilters(column));
@@ -3004,6 +3051,9 @@ class $$TrackPointsTableOrderingComposer
   ColumnOrderings<double> get speed => $composableBuilder(
       column: $table.speed, builder: (column) => ColumnOrderings(column));
 
+  ColumnOrderings<double> get width => $composableBuilder(
+      column: $table.width, builder: (column) => ColumnOrderings(column));
+
   ColumnOrderings<int> get layerId => $composableBuilder(
       column: $table.layerId, builder: (column) => ColumnOrderings(column));
 }
@@ -3041,6 +3091,9 @@ class $$TrackPointsTableAnnotationComposer
   GeneratedColumn<double> get speed =>
       $composableBuilder(column: $table.speed, builder: (column) => column);
 
+  GeneratedColumn<double> get width =>
+      $composableBuilder(column: $table.width, builder: (column) => column);
+
   GeneratedColumn<int> get layerId =>
       $composableBuilder(column: $table.layerId, builder: (column) => column);
 }
@@ -3076,6 +3129,7 @@ class $$TrackPointsTableTableManager extends RootTableManager<
             Value<double?> accuracy = const Value.absent(),
             Value<double?> altitude = const Value.absent(),
             Value<double?> speed = const Value.absent(),
+            Value<double?> width = const Value.absent(),
             Value<int> layerId = const Value.absent(),
           }) =>
               TrackPointsCompanion(
@@ -3087,6 +3141,7 @@ class $$TrackPointsTableTableManager extends RootTableManager<
             accuracy: accuracy,
             altitude: altitude,
             speed: speed,
+            width: width,
             layerId: layerId,
           ),
           createCompanionCallback: ({
@@ -3098,6 +3153,7 @@ class $$TrackPointsTableTableManager extends RootTableManager<
             Value<double?> accuracy = const Value.absent(),
             Value<double?> altitude = const Value.absent(),
             Value<double?> speed = const Value.absent(),
+            Value<double?> width = const Value.absent(),
             required int layerId,
           }) =>
               TrackPointsCompanion.insert(
@@ -3109,6 +3165,7 @@ class $$TrackPointsTableTableManager extends RootTableManager<
             accuracy: accuracy,
             altitude: altitude,
             speed: speed,
+            width: width,
             layerId: layerId,
           ),
           withReferenceMapper: (p0) => p0

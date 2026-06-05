@@ -23,6 +23,7 @@ import 'ui/group_setup/group_setup_screen.dart';
 import 'ui/group_setup/group_diagnostics_screen.dart';
 import 'ui/leaderboard/leaderboard_screen.dart';
 import 'ui/about/about_screen.dart';
+import 'ui/permissions/permissions_screen.dart';
 import 'app/providers.dart' show groupLifecycleProvider;
 import 'services/debug/log_buffer.dart';
 import 'ui/debug/debug_screen.dart';
@@ -115,6 +116,9 @@ class ExploreJournalApp extends ConsumerWidget {
           path: '/leaderboard',
           builder: (_, __) => const LeaderboardScreen()),
       GoRoute(path: '/about', builder: (_, __) => const AboutScreen()),
+      GoRoute(
+          path: '/permissions',
+          builder: (_, __) => const PermissionsScreen()),
     ],
   );
 

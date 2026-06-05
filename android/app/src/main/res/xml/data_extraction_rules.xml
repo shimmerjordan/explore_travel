@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 12+ replaced the single backup_rules.xml with two separate
+  policies:
+    * cloud-backup: Google's "back up to your Google account" path
+    * device-transfer: phone-to-phone transfers (Pixel "Switch", etc.)
+
+  We opt the user IN to both by default — the worst that happens is
+  their fog and journal data survive when they replace their phone,
+  which is exactly what users intuitively expect from this kind of
+  app. The user can still turn cloud backup off via the system
+  setting; we just don't fight it.
+
+  Secure-storage is excluded for the same reason as in backup_rules.xml:
+  keystore-bound encrypted blobs don't decrypt on a different device.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <include domain="database" path="."/>
+        <include domain="sharedpref" path="."/>
+        <include domain="file" path="."/>
+        <include domain="external" path="."/>
+        <exclude domain="sharedpref" path="FlutterSecureStorage"/>
+    </cloud-backup>
+    <device-transfer>
+        <include domain="database" path="."/>
+        <include domain="sharedpref" path="."/>
+        <include domain="file" path="."/>
+        <include domain="external" path="."/>
+        <exclude domain="sharedpref" path="FlutterSecureStorage"/>
+    </device-transfer>
+</data-extraction-rules>

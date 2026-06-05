@@ -74,7 +74,13 @@ class RecordingController {
           'accuracy': pos.accuracy,
           'altitude': pos.altitude,
           'speed': pos.speed,
-          'timeMs': DateTime.now().millisecondsSinceEpoch,
+          // Use the GPS fix's own capture time, not now(). Same reason
+          // as background_task.dart — when the OS buffers samples and
+          // delivers them in a burst, stamping with now() collapses
+          // their times together and the 30 s split gate stops
+          // firing, so far-apart-in-time points end up connected by a
+          // long false line on the map.
+          'timeMs': pos.timestamp.millisecondsSinceEpoch,
         }));
 
     ref.read(recordingActiveProvider.notifier).state = true;
@@ -145,6 +151,9 @@ class RecordingController {
         accuracy: Value((s['accuracy'] as num?)?.toDouble()),
         altitude: Value((s['altitude'] as num?)?.toDouble()),
         speed: Value((s['speed'] as num?)?.toDouble()),
+        // Freeze the current trail size onto this point so later changes
+        // to the size setting only affect points recorded after them.
+        width: Value(settings.trailWidth),
       ));
 
       // Connect ONLY the immediate predecessor sample when both:
@@ -158,16 +167,26 @@ class RecordingController {
       // map. Disk radius is `fogPenRadius`; a 50 m default clears a
       // ~10-pixel-wide corridor at FOW's 9.55 m/px storage, which
       // hides the per-sample rasterisation entirely.
+      // Use the SAMPLE's recorded time, not now() — `_inflight` drains
+      // the queue in a tight loop after a foreground resume, so several
+      // samples may be processed within milliseconds of each other
+      // even though their GPS fixes are minutes apart. Comparing
+      // `pos.timestamp` deltas is the only way the 30 s gate stays
+      // honest.
+      final sampleAt = DateTime.fromMillisecondsSinceEpoch(
+          (s['timeMs'] as num?)?.toInt() ??
+              DateTime.now().millisecondsSinceEpoch);
       final last = _lastSample[layerId];
       final penR = settings.fogPenRadius;
       final maxGap = math.max(penR * 5, 30.0);
       bool chained = false;
       if (last != null) {
         final gap = _haversineMeters(last.lat, last.lng, lat, lng);
-        final age = DateTime.now().difference(last.t);
+        final age = sampleAt.difference(last.t);
         if (gap > 0.5 &&
             gap <= maxGap &&
-            age <= const Duration(seconds: 30)) {
+            age <= const Duration(seconds: 30) &&
+            !age.isNegative) {
           await fog.revealLine(
             lat0: last.lat,
             lng0: last.lng,
@@ -187,7 +206,7 @@ class RecordingController {
           layerId: layerId,
         );
       }
-      _lastSample[layerId] = (lat: lat, lng: lng, t: DateTime.now());
+      _lastSample[layerId] = (lat: lat, lng: lng, t: sampleAt);
       _scheduleRefresh();
     } catch (e, st) {
       debugPrint('[Recording] write failed at ($lat,$lng) layer=$layerId: $e\n$st');
