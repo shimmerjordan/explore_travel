@@ -201,6 +201,17 @@ class AppDb extends _$AppDb {
       (select(trackPoints)..where((t) => t.time.isBetweenValues(from, to))).get();
   Future<List<TrackPoint>> pointsForLayer(int layerId) =>
       (select(trackPoints)..where((t) => t.layerId.equals(layerId))).get();
+
+  /// Newest sample time stored for a layer, or null if it has no points.
+  /// Used to dedup the background sample-buffer drain — only file samples
+  /// newer than this were captured while the main isolate wasn't writing.
+  Future<DateTime?> lastPointTime(int layerId) async {
+    final q = selectOnly(trackPoints)
+      ..addColumns([trackPoints.time.max()])
+      ..where(trackPoints.layerId.equals(layerId));
+    final row = await q.getSingleOrNull();
+    return row?.read(trackPoints.time.max());
+  }
   Stream<List<TrackPoint>> watchPointsForLayer(int layerId) =>
       (select(trackPoints)..where((t) => t.layerId.equals(layerId))).watch();
 

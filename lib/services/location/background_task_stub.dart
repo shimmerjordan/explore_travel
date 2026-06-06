@@ -6,6 +6,8 @@ class BackgroundLocation {
   static void init() {}
   static Future<void> start(RecordingMode mode) async {}
   static Future<void> stop() async {}
+  static Future<bool> wasRecording() async => false;
+  static Future<bool> isServiceRunning() async => false;
   static StreamSubscription<Map<String, dynamic>> listen(
       void Function(Map<String, dynamic>) onSample) {
     return const Stream<Map<String, dynamic>>.empty().listen(onSample);

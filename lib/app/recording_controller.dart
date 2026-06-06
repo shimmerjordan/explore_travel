@@ -2,10 +2,12 @@ import 'dart:async';
 import 'dart:math' as math;
 import 'package:drift/drift.dart' show Value;
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart' show WidgetsBinding, WidgetsBindingObserver, AppLifecycleState;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../data/db/database.dart';
 import '../services/location/background_task.dart'
     if (dart.library.js_interop) '../services/location/background_task_stub.dart';
+import '../services/location/sample_buffer.dart';
 import 'providers.dart';
 // providers exports groupServiceProvider
 
@@ -28,11 +30,24 @@ final recordingActiveProvider = StateProvider<bool>((ref) => false);
 ///   * `fogRefreshProvider` is bumped at most once per 250 ms via a
 ///     coalescing timer instead of once per sample, so a flurry of
 ///     points doesn't trigger a frame-storm in the fog painter.
-class RecordingController {
+class RecordingController with WidgetsBindingObserver {
   final Ref ref;
   StreamSubscription<Map<String, dynamic>>? _bgSub;
   StreamSubscription? _fgSub;
+  bool _observing = false;
+  bool _ingesting = false;
   RecordingController(this.ref);
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Coming back to the foreground: the background service may have
+    // captured fixes into the durable buffer while the main isolate was
+    // suspended (screen off) — fold them into the DB now.
+    if (state == AppLifecycleState.resumed &&
+        ref.read(recordingActiveProvider)) {
+      _ingestBuffer();
+    }
+  }
 
   /// Last sample (lat, lng, time) per layer — used for the line-stitching
   /// gate.
@@ -67,6 +82,10 @@ class RecordingController {
     // Background service only available on native platforms; safe to call on web (stub no-ops).
     await BackgroundLocation.start(settings.recordingMode);
     _bgSub = BackgroundLocation.listen(_enqueueSample);
+    _startObserving();
+    // Fold in anything the background service buffered while we were away
+    // (e.g. a previous session the OS suspended, or a boot-resumed run).
+    await _ingestBuffer();
 
     _fgSub = loc.stream.listen((pos) => _enqueueSample({
           'lat': pos.latitude,
@@ -85,6 +104,84 @@ class RecordingController {
 
     ref.read(recordingActiveProvider.notifier).state = true;
     return null;
+  }
+
+  /// Called once at app startup. If the user was recording when the app was
+  /// last killed (or the service was auto-restarted after a reboot), the
+  /// foreground service is already streaming + buffering — re-attach the UI
+  /// pipeline and drain whatever it captured while we were gone, so the
+  /// trail picks up seamlessly without the user having to tap record again.
+  Future<void> resumeIfRecording() async {
+    if (ref.read(recordingActiveProvider)) return; // already wired up
+    if (!await BackgroundLocation.wasRecording()) return;
+    final loc = ref.read(locationServiceProvider);
+    final settings = ref.read(settingsProvider);
+    // Make sure the service is actually up (it is after a boot-resume; this
+    // also revives it if the OS killed it while the flag stayed set).
+    await BackgroundLocation.start(settings.recordingMode);
+    _bgSub = BackgroundLocation.listen(_enqueueSample);
+    _startObserving();
+    await _ingestBuffer();
+    // Best-effort foreground stream for a snappy live marker; ignore errors.
+    if (await loc.start(settings.recordingMode)) {
+      _fgSub = loc.stream.listen((pos) => _enqueueSample({
+            'lat': pos.latitude,
+            'lng': pos.longitude,
+            'accuracy': pos.accuracy,
+            'altitude': pos.altitude,
+            'speed': pos.speed,
+            'timeMs': pos.timestamp.millisecondsSinceEpoch,
+          }));
+    }
+    ref.read(recordingActiveProvider.notifier).state = true;
+  }
+
+  void _startObserving() {
+    if (_observing) return;
+    _observing = true;
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  void _stopObserving() {
+    if (!_observing) return;
+    _observing = false;
+    WidgetsBinding.instance.removeObserver(this);
+  }
+
+  /// Drain the durable background buffer into the DB. Only samples newer
+  /// than what's already stored for the active layer are inserted, so fixes
+  /// the main isolate already wrote live (via [_enqueueSample]) aren't
+  /// duplicated. Runs the same insert + fog-reveal path as live samples so
+  /// stitching and stats stay consistent.
+  Future<void> _ingestBuffer() async {
+    if (_ingesting) return;
+    _ingesting = true;
+    try {
+      final samples = await SampleBuffer.drain();
+      if (samples.isEmpty) return;
+      samples.sort((a, b) => ((a['timeMs'] as num?) ?? 0)
+          .compareTo((b['timeMs'] as num?) ?? 0));
+      final layerId = ref.read(effectiveActiveLayerIdProvider);
+      final lastT = await ref.read(dbProvider).lastPointTime(layerId);
+      final cutoff = lastT?.millisecondsSinceEpoch ?? 0;
+      var ingested = 0;
+      for (final s in samples) {
+        final t = (s['timeMs'] as num?)?.toInt() ?? 0;
+        if (t <= cutoff) continue; // already written live — skip the dup
+        await _handleSample(s, broadcast: false);
+        ingested++;
+      }
+      if (ingested > 0) {
+        if (kDebugMode) {
+          debugPrint('[Recording] ingested $ingested buffered bg samples');
+        }
+        _scheduleRefresh();
+      }
+    } catch (e) {
+      if (kDebugMode) debugPrint('[Recording] buffer ingest failed: $e');
+    } finally {
+      _ingesting = false;
+    }
   }
 
   /// Public entry point — every sample (fg / bg / sim) goes through here.
@@ -118,7 +215,8 @@ class RecordingController {
     });
   }
 
-  Future<void> _handleSample(Map<String, dynamic> s) async {
+  Future<void> _handleSample(Map<String, dynamic> s,
+      {bool broadcast = true}) async {
     final db = ref.read(dbProvider);
     final fog = ref.read(fogEngineProvider);
     final layerId = ref.read(effectiveActiveLayerIdProvider);
@@ -128,8 +226,9 @@ class RecordingController {
     // Fire-and-forget the broadcast — it can hit a slow socket and we
     // don't want the fog write to wait for it. The previous code
     // `await`ed it, which is why a flaky LAN peer could stall the
-    // record path entirely.
-    if (settings.groupId != null && settings.groupId!.isNotEmpty) {
+    // record path entirely. Skipped when replaying buffered samples
+    // (broadcast=false) — those are historical, not live positions.
+    if (broadcast && settings.groupId != null && settings.groupId!.isNotEmpty) {
       unawaited(() async {
         try {
           await ref.read(groupServiceProvider).broadcastLocation(
@@ -242,6 +341,7 @@ class RecordingController {
   }
 
   Future<void> stop() async {
+    _stopObserving();
     await _bgSub?.cancel();
     await _fgSub?.cancel();
     _bgSub = null;
@@ -251,6 +351,7 @@ class RecordingController {
     _refreshPending = false;
     _lastHandledKey = null;
     await BackgroundLocation.stop();
+    await SampleBuffer.clear();
     await ref.read(locationServiceProvider).stop();
     // Critical: forget the last sample, so when recording resumes —
     // tomorrow, next week — the first new sample doesn't paint a long

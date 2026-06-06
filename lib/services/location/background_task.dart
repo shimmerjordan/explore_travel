@@ -1,9 +1,17 @@
 import 'dart:async';
 import 'dart:isolate';
+import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:geolocator/geolocator.dart';
 import '../../models/models.dart';
+import 'sample_buffer.dart';
+
+/// Cross-isolate, persisted flag: were we recording when the process last
+/// went away? Set true on start / false on stop. An OS-restarted service
+/// (boot, app update, low-memory kill) reads it in [onStart] to decide
+/// whether to resume or shut itself back down.
+const String _kRecordingFlagKey = 'recording_active';
 
 /// Foreground service entry point. The OS keeps this isolate alive while a
 /// persistent notification is shown. We stream GPS samples and forward them
@@ -17,46 +25,138 @@ class _LocationTaskHandler extends TaskHandler {
   StreamSubscription<Position>? _sub;
   RecordingMode _mode = RecordingMode.balanced;
 
+  /// When we last forwarded a fix. The repeat-event watchdog uses this to
+  /// notice a stalled stream (common after a Doze cycle or an OEM "freeze")
+  /// and recover with an active fetch + resubscribe.
+  DateTime _lastFixAt = DateTime.fromMillisecondsSinceEpoch(0);
+
+  /// Guards against overlapping active polls (a slow fix + the next
+  /// repeat tick) and against resubscribing while one is already pending.
+  bool _polling = false;
+
   @override
   Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
+    // If the OS auto-restarted us (boot / app-update / low-memory) but the
+    // user wasn't actually recording when the process died, shut back down
+    // instead of silently draining battery and showing a notification.
+    final wasRecording =
+        await FlutterForegroundTask.getData<bool>(key: _kRecordingFlagKey) ??
+            false;
+    if (starter != TaskStarter.developer && !wasRecording) {
+      await FlutterForegroundTask.stopService();
+      return;
+    }
+    // Recover the mode the UI last pushed, so a service auto-restarted by
+    // the OS keeps the user's chosen accuracy.
+    final saved = await FlutterForegroundTask.getData<int>(key: 'rec_mode');
+    if (saved != null && saved >= 0 && saved < RecordingMode.values.length) {
+      _mode = RecordingMode.values[saved];
+    }
     await _startStream();
+  }
+
+  LocationSettings _settings() {
+    final accuracy = switch (_mode) {
+      RecordingMode.highPerformance => LocationAccuracy.best,
+      RecordingMode.balanced => LocationAccuracy.high,
+      RecordingMode.batterySaver => LocationAccuracy.medium,
+    };
+    final distanceFilter = _mode.distanceFilter.toInt();
+    // On Android, an explicit interval tells the fused provider the cadence
+    // we want even while dozing under a foreground service. We deliberately
+    // do NOT set `foregroundNotificationConfig` — flutter_foreground_task
+    // already owns the persistent notification + service; a second one
+    // would conflict.
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      return AndroidSettings(
+        accuracy: accuracy,
+        distanceFilter: distanceFilter,
+        intervalDuration: _mode.interval,
+      );
+    }
+    return LocationSettings(accuracy: accuracy, distanceFilter: distanceFilter);
+  }
+
+  /// CRITICAL: use the GPS fix's own timestamp, NOT `DateTime.now()`. When
+  /// Android suspends the app or buffers samples during a Doze cycle,
+  /// several positions can arrive in a rapid burst minutes after capture.
+  /// Stamping with `now()` collapses their times together and defeats both
+  /// the line-stitching gate in RecordingController and the session-split
+  /// logic in FogLayer — that's how far-apart points got joined by a long
+  /// false line.
+  void _emit(Position pos) {
+    _lastFixAt = DateTime.now();
+    final sample = <String, dynamic>{
+      'lat': pos.latitude,
+      'lng': pos.longitude,
+      'accuracy': pos.accuracy,
+      'altitude': pos.altitude,
+      'speed': pos.speed,
+      'timeMs': pos.timestamp.millisecondsSinceEpoch,
+    };
+    // Live update for the UI when the app is open…
+    FlutterForegroundTask.sendDataToMain(sample);
+    // …and a durable copy so a fix taken while the main isolate is
+    // suspended (screen off) or absent (boot-resumed service) survives to
+    // be ingested into the DB next time the app runs.
+    SampleBuffer.append(sample);
   }
 
   Future<void> _startStream() async {
     await _sub?.cancel();
-    final settings = LocationSettings(
-      accuracy: switch (_mode) {
-        RecordingMode.highPerformance => LocationAccuracy.best,
-        RecordingMode.balanced => LocationAccuracy.high,
-        RecordingMode.batterySaver => LocationAccuracy.medium,
+    _sub = Geolocator.getPositionStream(locationSettings: _settings()).listen(
+      _emit,
+      // A stream error (provider hiccup, transient GMS failure) used to
+      // kill recording permanently because nothing resubscribed. Now we
+      // tear down and let the next repeat-event watchdog bring it back.
+      onError: (Object e) {
+        _sub?.cancel();
+        _sub = null;
       },
-      distanceFilter: _mode.distanceFilter.toInt(),
+      // Some OEM ROMs end the stream outright when the screen sleeps;
+      // treat completion the same as an error so the watchdog revives it.
+      onDone: () {
+        _sub = null;
+      },
+      cancelOnError: true,
     );
-    _sub = Geolocator.getPositionStream(locationSettings: settings)
-        .listen((pos) {
-      // CRITICAL: use the GPS fix's own timestamp, NOT `DateTime.now()`.
-      // When Android suspends the app or the OS buffers samples during
-      // a doze cycle, several positions can be delivered in a rapid
-      // burst minutes after they were captured. Stamping with `now()`
-      // collapses all their times to nearly-identical values, defeating
-      // both the line-stitching gate in RecordingController AND the
-      // session-split logic in FogLayer's polyline build — that's why
-      // far-apart points got connected with a long false line.
-      final capturedAt =
-          pos.timestamp.millisecondsSinceEpoch;
-      FlutterForegroundTask.sendDataToMain({
-        'lat': pos.latitude,
-        'lng': pos.longitude,
-        'accuracy': pos.accuracy,
-        'altitude': pos.altitude,
-        'speed': pos.speed,
-        'timeMs': capturedAt,
-      });
-    });
   }
 
+  /// Fires on the foreground service's repeat timer (see [ForegroundTaskOptions]).
+  /// This is the keep-alive heartbeat: it runs under the service's wakelock
+  /// even while the device dozes, so it's our reliable chance to (a) revive
+  /// a dead/cancelled stream and (b) actively pull a fresh fix when the
+  /// passive stream has gone quiet for too long.
   @override
-  void onRepeatEvent(DateTime timestamp) {}
+  void onRepeatEvent(DateTime timestamp) {
+    if (_sub == null) _startStream();
+    // Stall threshold: a couple of expected intervals, with a floor so we
+    // don't hammer GPS in high-performance mode. If the stream is healthy
+    // and the user is moving, this never fires (the stream keeps _lastFixAt
+    // fresh); it only kicks in when updates have actually stopped.
+    final stallFor = Duration(
+        milliseconds:
+            math.max(_mode.interval.inMilliseconds * 2, 12000));
+    if (DateTime.now().difference(_lastFixAt) >= stallFor) {
+      _activePoll();
+    }
+  }
+
+  Future<void> _activePoll() async {
+    if (_polling) return;
+    _polling = true;
+    try {
+      final pos = await Geolocator.getCurrentPosition(
+        locationSettings: _settings(),
+      ).timeout(const Duration(seconds: 20));
+      _emit(pos);
+    } catch (_) {
+      // No fix this cycle (no sky view / GPS cold). The next repeat tick
+      // tries again; nothing to do but wait.
+    } finally {
+      _polling = false;
+    }
+  }
 
   @override
   Future<void> onDestroy(DateTime timestamp) async {
@@ -69,6 +169,8 @@ class _LocationTaskHandler extends TaskHandler {
       final idx = data['mode'] as int?;
       if (idx != null) {
         _mode = RecordingMode.values[idx];
+        // Persist so an OS-restarted service recovers the right mode.
+        FlutterForegroundTask.saveData(key: 'rec_mode', value: idx);
         _startStream();
       }
     }
@@ -104,11 +206,22 @@ class BackgroundLocation {
         playSound: false,
       ),
       foregroundTaskOptions: ForegroundTaskOptions(
-        eventAction: ForegroundTaskEventAction.repeat(5000),
-        autoRunOnBoot: false,
-        autoRunOnMyPackageReplaced: false,
+        // Heartbeat for the keep-alive watchdog in onRepeatEvent. 9 s is
+        // frequent enough to revive a stalled stream / pull a fresh fix
+        // soon after a Doze cycle, without waking GPS too often itself.
+        eventAction: ForegroundTaskEventAction.repeat(9000),
+        // Restart the service after a reboot. onStart re-checks the
+        // persisted recording flag and stops itself if we weren't actually
+        // recording, so this never starts an unwanted background drain.
+        autoRunOnBoot: true,
+        // If the OS replaces the process on an app update, bring the
+        // recording service back automatically.
+        autoRunOnMyPackageReplaced: true,
+        // Hold a partial wakelock so onRepeatEvent + the GPS callbacks keep
+        // firing while the screen is off — without this the foreground
+        // service stays alive but its CPU work is deferred during Doze.
         allowWakeLock: true,
-        allowWifiLock: false,
+        allowWifiLock: true,
       ),
     );
   }
@@ -129,6 +242,11 @@ class BackgroundLocation {
   static Future<void> start(RecordingMode mode) async {
     init();
     await requestPermissions();
+    // Persist BEFORE startService so the service's onStart sees a true flag
+    // (and so a later OS restart knows to resume).
+    await FlutterForegroundTask.saveData(
+        key: _kRecordingFlagKey, value: true);
+    await FlutterForegroundTask.saveData(key: 'rec_mode', value: mode.index);
     if (await FlutterForegroundTask.isRunningService) {
       FlutterForegroundTask.sendDataToTask(
           {'cmd': 'setMode', 'mode': mode.index});
@@ -145,10 +263,27 @@ class BackgroundLocation {
   }
 
   static Future<void> stop() async {
+    // Clear the flag first so an OS restart racing with our stop won't
+    // resume a recording the user just ended.
+    await FlutterForegroundTask.saveData(
+        key: _kRecordingFlagKey, value: false);
     if (await FlutterForegroundTask.isRunningService) {
       await FlutterForegroundTask.stopService();
     }
   }
+
+  /// Whether the user was recording when the process last went away — used
+  /// on cold launch to decide whether to auto-resume.
+  static Future<bool> wasRecording() async {
+    if (defaultTargetPlatform != TargetPlatform.android) return false;
+    return await FlutterForegroundTask.getData<bool>(
+            key: _kRecordingFlagKey) ??
+        false;
+  }
+
+  /// Whether the foreground service is currently alive.
+  static Future<bool> isServiceRunning() =>
+      FlutterForegroundTask.isRunningService;
 
   /// Subscribes to GPS samples coming from the background isolate.
   static StreamSubscription<Map<String, dynamic>> listen(

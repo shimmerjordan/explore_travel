@@ -110,6 +110,12 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) setState(_reloadJournalPins);
     });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      // If a recording was in progress when the app was last killed (or the
+      // service was auto-restarted after a reboot), re-attach the pipeline
+      // and fold in whatever the background service buffered while away.
+      ref.read(recordingControllerProvider).resumeIfRecording();
+    });
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       // Auto-join group if user has set a groupId. This makes the map see
       // peers' colored trails the moment you open the app.
