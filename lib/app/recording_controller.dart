@@ -223,6 +223,14 @@ class RecordingController with WidgetsBindingObserver {
     final lat = (s['lat'] as num).toDouble();
     final lng = (s['lng'] as num).toDouble();
     final settings = ref.read(settingsProvider);
+    // Width for NEW points = the active layer's own path width, falling back
+    // to the global default when the layer hasn't customised it.
+    final activeLayer = ref
+        .read(layersProvider)
+        .valueOrNull
+        ?.where((l) => l.id == layerId)
+        .firstOrNull;
+    final newPointWidth = activeLayer?.pathWidth ?? settings.trailWidth;
     // Fire-and-forget the broadcast — it can hit a slow socket and we
     // don't want the fog write to wait for it. The previous code
     // `await`ed it, which is why a flaky LAN peer could stall the
@@ -250,9 +258,9 @@ class RecordingController with WidgetsBindingObserver {
         accuracy: Value((s['accuracy'] as num?)?.toDouble()),
         altitude: Value((s['altitude'] as num?)?.toDouble()),
         speed: Value((s['speed'] as num?)?.toDouble()),
-        // Freeze the current trail size onto this point so later changes
-        // to the size setting only affect points recorded after them.
-        width: Value(settings.trailWidth),
+        // Freeze the trail size onto this point so later changes to the
+        // layer's size only affect points recorded after them.
+        width: Value(newPointWidth),
       ));
 
       // Connect ONLY the immediate predecessor sample when both:

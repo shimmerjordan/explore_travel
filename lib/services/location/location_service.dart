@@ -68,22 +68,26 @@ class LocationService {
         if (age < const Duration(minutes: 5)) return last;
       }
     } catch (_) {}
-    // 2. Try a real high-accuracy fix with a tight timeout.
+    // 2. Fast fix FIRST, at balanced-power accuracy. This maps to Android's
+    //    PRIORITY_BALANCED_POWER (Wi-Fi / cell / fused), which is exactly
+    //    what returns in ~1-2 s indoors — the same path 高德 uses. The old
+    //    code led with high-accuracy GPS and sat on a 6 s timeout indoors
+    //    before ever trying the network, which is why a fix felt slow even
+    //    with a perfectly good Wi-Fi position available.
     try {
       return await Geolocator.getCurrentPosition(
         locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.high,
-          timeLimit: Duration(seconds: 6),
+          accuracy: LocationAccuracy.medium,
+          timeLimit: Duration(seconds: 5),
         ),
       );
     } on TimeoutException catch (_) {
-      // Fall through to the network-fallback branch below.
+      // Fall through.
     } catch (e) {
       lastError = '获取位置失败：$e';
     }
-    // 3. Network fallback. LocationAccuracy.low/medium tells the OS
-    //    "I'll take Wi-Fi / cell triangulation if GPS isn't ready" —
-    //    this is what makes indoor location actually work.
+    // 3. Last resort: low accuracy (cell), longer timeout — better a coarse
+    //    fix than none.
     try {
       return await Geolocator.getCurrentPosition(
         locationSettings: const LocationSettings(

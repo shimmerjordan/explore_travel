@@ -15,32 +15,39 @@ TileLayer buildTileLayer({
 }) {
   final ua = kIsWeb ? '' : 'com.explorejournal.app';
 
+  // Retain more off-screen / previous-zoom tiles so panning and pinch-zoom
+  // don't expose blank blocks before the new tiles arrive. `keepBuffer`
+  // holds tiles after they scroll out (and old-zoom tiles during a zoom);
+  // `panBuffer` pre-loads a ring of tiles around the viewport.
+  TileLayer make(String url, {List<String> subdomains = const []}) =>
+      TileLayer(
+        urlTemplate: url,
+        subdomains: subdomains,
+        userAgentPackageName: ua,
+        tileProvider: CachedTileProvider(),
+        keepBuffer: 5,
+        panBuffer: 3,
+      );
+
+  const amapSubs = ['1', '2', '3', '4'];
+
   switch (provider) {
     case MapProvider.amap:
       switch (style) {
         case MapStyle.standard:
-          return TileLayer(
-            urlTemplate:
-                'https://wprd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&style=7&x={x}&y={y}&z={z}',
-            subdomains: const ['1', '2', '3', '4'],
-            userAgentPackageName: ua,
-            tileProvider: CachedTileProvider(),
+          return make(
+            'https://wprd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&style=7&x={x}&y={y}&z={z}',
+            subdomains: amapSubs,
           );
         case MapStyle.satellite:
-          return TileLayer(
-            urlTemplate:
-                'https://webst0{s}.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}',
-            subdomains: const ['1', '2', '3', '4'],
-            userAgentPackageName: ua,
-            tileProvider: CachedTileProvider(),
+          return make(
+            'https://webst0{s}.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}',
+            subdomains: amapSubs,
           );
         case MapStyle.hybrid:
-          return TileLayer(
-            urlTemplate:
-                'https://webst0{s}.is.autonavi.com/appmaptile?style=8&x={x}&y={y}&z={z}',
-            subdomains: const ['1', '2', '3', '4'],
-            userAgentPackageName: ua,
-            tileProvider: CachedTileProvider(),
+          return make(
+            'https://webst0{s}.is.autonavi.com/appmaptile?style=8&x={x}&y={y}&z={z}',
+            subdomains: amapSubs,
           );
       }
     case MapProvider.google:
@@ -49,12 +56,9 @@ TileLayer buildTileLayer({
         MapStyle.satellite => 's',
         MapStyle.hybrid => 'y',
       };
-      return TileLayer(
-        urlTemplate:
-            'https://mt{s}.google.com/vt/lyrs=$t&x={x}&y={y}&z={z}',
+      return make(
+        'https://mt{s}.google.com/vt/lyrs=$t&x={x}&y={y}&z={z}',
         subdomains: const ['0', '1', '2', '3'],
-        userAgentPackageName: ua,
-            tileProvider: CachedTileProvider(),
       );
     case MapProvider.osm:
       final url = (customOsmUrl != null && customOsmUrl.trim().isNotEmpty)
@@ -67,10 +71,6 @@ TileLayer buildTileLayer({
               MapStyle.hybrid =>
                 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
             };
-      return TileLayer(
-        urlTemplate: url,
-        userAgentPackageName: ua,
-        tileProvider: CachedTileProvider(),
-      );
+      return make(url);
   }
 }

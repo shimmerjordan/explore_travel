@@ -35,6 +35,9 @@ class LayersScreen extends ConsumerWidget {
           return StatefulBuilder(
             builder: (context, setState) => Column(
               children: [
+                // Discoverability tip — the style editor is behind a
+                // long-press, which isn't obvious otherwise.
+                const _Tip('点按切换当前图层 · 长按图层可编辑路径样式（颜色 / 粗细 / 浓淡）'),
                 Expanded(
                   child: ListView.builder(
                     itemCount: layers.length,
@@ -82,15 +85,8 @@ class LayersScreen extends ConsumerWidget {
                               icon: Icon(l.visible
                                   ? Icons.visibility
                                   : Icons.visibility_off),
-                              onPressed: () => db.updateLayer(TrackLayer(
-                                id: l.id,
-                                uuid: l.uuid,
-                                name: l.name,
-                                colorValue: l.colorValue,
-                                visible: !l.visible,
-                                tag: l.tag,
-                                createdAt: l.createdAt,
-                              )),
+                              onPressed: () =>
+                                  db.updateLayer(l.copyWith(visible: !l.visible)),
                             ),
                             if (isActive)
                               const Padding(
@@ -167,45 +163,41 @@ class LayersScreen extends ConsumerWidget {
   void _showCreateDialog(BuildContext context, AppDb db) {
     final nameCtrl = TextEditingController();
     final tagCtrl = TextEditingController();
-    Color color = Colors.primaries[DateTime.now().millisecond %
+    Color? color = Colors.primaries[DateTime.now().millisecond %
         Colors.primaries.length];
+    double opacity = 0.6;
+    double width = 14;
     showDialog<void>(
       context: context,
       builder: (_) => AlertDialog(
         title: const Text('新建图层'),
         content: StatefulBuilder(builder: (context, setState) {
-          return Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: nameCtrl,
-                decoration: const InputDecoration(labelText: '名称'),
-              ),
-              TextField(
-                controller: tagCtrl,
-                decoration: const InputDecoration(labelText: '标签（可选）'),
-              ),
-              const SizedBox(height: 12),
-              Wrap(
-                children: Colors.primaries
-                    .map((c) => GestureDetector(
-                          onTap: () => setState(() => color = c),
-                          child: Container(
-                            margin: const EdgeInsets.all(4),
-                            width: 28,
-                            height: 28,
-                            decoration: BoxDecoration(
-                              color: c,
-                              shape: BoxShape.circle,
-                              border: c == color
-                                  ? Border.all(width: 3, color: Colors.black)
-                                  : null,
-                            ),
-                          ),
-                        ))
-                    .toList(),
-              ),
-            ],
+          return SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                TextField(
+                  controller: nameCtrl,
+                  decoration: const InputDecoration(labelText: '名称'),
+                ),
+                TextField(
+                  controller: tagCtrl,
+                  decoration: const InputDecoration(labelText: '标签（可选）'),
+                ),
+                const SizedBox(height: 12),
+                ..._styleControls(
+                  context: context,
+                  setState: setState,
+                  color: color,
+                  opacity: opacity,
+                  width: width,
+                  onColor: (c) => color = c,
+                  onOpacity: (v) => opacity = v,
+                  onWidth: (v) => width = v,
+                ),
+              ],
+            ),
           );
         }),
         actions: [
@@ -216,12 +208,18 @@ class LayersScreen extends ConsumerWidget {
             onPressed: () async {
               if (nameCtrl.text.isEmpty) return;
               await db.insertLayer(TrackLayersCompanion.insert(
+                // Identity/chip colour — fall back to a neutral when the
+                // user chose "无" (no coloured line).
+                colorValue: (color ?? const Color(0xFF90A4AE)).toARGB32(),
                 name: nameCtrl.text,
-                colorValue: color.toARGB32(),
                 tag: tagCtrl.text.isEmpty
                     ? const Value.absent()
                     : Value(tagCtrl.text),
                 createdAt: DateTime.now(),
+                // The chosen colour draws the in-fog line; null = no line.
+                pathColor: Value(color?.toARGB32()),
+                pathOpacity: Value(opacity),
+                pathWidth: Value(width),
               ));
               if (context.mounted) Navigator.pop(context);
             },
@@ -232,47 +230,127 @@ class LayersScreen extends ConsumerWidget {
     );
   }
 
+  /// Shared colour + opacity + width controls for the create/edit dialogs.
+  /// The picked colour draws a translucent line along the revealed trail
+  /// ("a line in the fog"); the first "无" swatch (color == null) means no
+  /// coloured line — just the plain reveal. Takes effect on the map live.
+  List<Widget> _styleControls({
+    required BuildContext context,
+    required StateSetter setState,
+    required Color? color,
+    required double opacity,
+    required double width,
+    required ValueChanged<Color?> onColor,
+    required ValueChanged<double> onOpacity,
+    required ValueChanged<double> onWidth,
+  }) {
+    final cs = Theme.of(context).colorScheme;
+    Widget swatch(
+            {required bool selected,
+            required Widget child,
+            required VoidCallback onTap}) =>
+        GestureDetector(
+          onTap: () => setState(onTap),
+          child: Container(
+            margin: const EdgeInsets.all(4),
+            width: 28,
+            height: 28,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              border:
+                  selected ? Border.all(width: 3, color: Colors.black) : null,
+            ),
+            child: child,
+          ),
+        );
+    return [
+      Text('路径颜色（在迷雾中画线）',
+          style: Theme.of(context).textTheme.labelLarge),
+      Wrap(
+        children: [
+          // "无 / 透明" — no coloured line, just the revealed corridor.
+          swatch(
+            selected: color == null,
+            onTap: () => onColor(null),
+            child: Container(
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: cs.surfaceContainerHighest,
+                border: Border.all(color: cs.outline),
+              ),
+              child: Icon(Icons.block, size: 16, color: cs.onSurfaceVariant),
+            ),
+          ),
+          ...Colors.primaries.map((c) => swatch(
+                selected: color?.toARGB32() == c.toARGB32(),
+                onTap: () => onColor(c),
+                child: Container(
+                  decoration:
+                      BoxDecoration(shape: BoxShape.circle, color: c),
+                ),
+              )),
+        ],
+      ),
+      const SizedBox(height: 8),
+      Text('路径不透明度 ${opacity.toStringAsFixed(2)}',
+          style: const TextStyle(fontSize: 12)),
+      Slider(
+        value: opacity,
+        min: 0.1,
+        max: 1.0,
+        divisions: 18,
+        onChanged: (v) => setState(() => onOpacity(v)),
+      ),
+      Text('路径粗细 ${width.toStringAsFixed(0)} m',
+          style: const TextStyle(fontSize: 12)),
+      Slider(
+        value: width,
+        min: 2,
+        max: 60,
+        divisions: 58,
+        onChanged: (v) => setState(() => onWidth(v)),
+      ),
+    ];
+  }
+
   void _showEditDialog(BuildContext context, AppDb db, TrackLayer l) {
     final nameCtrl = TextEditingController(text: l.name);
     final tagCtrl = TextEditingController(text: l.tag ?? '');
-    Color color = Color(l.colorValue);
+    // The line colour drawn in the fog. null (no pathColor) = no line.
+    Color? color = l.pathColor == null ? null : Color(l.pathColor!);
+    double opacity = l.pathOpacity ?? 0.6;
+    double width = l.pathWidth ?? 14;
     showDialog<void>(
       context: context,
       builder: (_) => AlertDialog(
         title: const Text('编辑图层'),
         content: StatefulBuilder(builder: (context, setState) {
-          return Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: nameCtrl,
-                decoration: const InputDecoration(labelText: '名称'),
-              ),
-              TextField(
-                controller: tagCtrl,
-                decoration: const InputDecoration(labelText: '标签'),
-              ),
-              const SizedBox(height: 12),
-              Wrap(
-                children: Colors.primaries
-                    .map((c) => GestureDetector(
-                          onTap: () => setState(() => color = c),
-                          child: Container(
-                            margin: const EdgeInsets.all(4),
-                            width: 28,
-                            height: 28,
-                            decoration: BoxDecoration(
-                              color: c,
-                              shape: BoxShape.circle,
-                              border: c.toARGB32() == color.toARGB32()
-                                  ? Border.all(width: 3, color: Colors.black)
-                                  : null,
-                            ),
-                          ),
-                        ))
-                    .toList(),
-              ),
-            ],
+          return SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                TextField(
+                  controller: nameCtrl,
+                  decoration: const InputDecoration(labelText: '名称'),
+                ),
+                TextField(
+                  controller: tagCtrl,
+                  decoration: const InputDecoration(labelText: '标签'),
+                ),
+                const SizedBox(height: 12),
+                ..._styleControls(
+                  context: context,
+                  setState: setState,
+                  color: color,
+                  opacity: opacity,
+                  width: width,
+                  onColor: (c) => color = c,
+                  onOpacity: (v) => opacity = v,
+                  onWidth: (v) => width = v,
+                ),
+              ],
+            ),
           );
         }),
         actions: [
@@ -286,18 +364,52 @@ class LayersScreen extends ConsumerWidget {
           ),
           FilledButton(
             onPressed: () async {
-              await db.updateLayer(TrackLayer(
-                id: l.id,
-                uuid: l.uuid,
+              // Apply the chosen style to the whole layer (live, incl. past
+              // data). copyWith preserves columns we don't set.
+              await db.updateLayer(l.copyWith(
                 name: nameCtrl.text,
-                colorValue: color.toARGB32(),
-                visible: l.visible,
-                tag: tagCtrl.text.isEmpty ? null : tagCtrl.text,
-                createdAt: l.createdAt,
+                // Keep the chip colour in sync when a line colour is set;
+                // preserve the existing chip colour for "无".
+                colorValue: (color ?? Color(l.colorValue)).toARGB32(),
+                tag: Value(tagCtrl.text.isEmpty ? null : tagCtrl.text),
+                pathColor: Value(color?.toARGB32()),
+                pathOpacity: Value(opacity),
+                pathWidth: Value(width),
               ));
               if (context.mounted) Navigator.pop(context);
             },
             child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Small inline hint banner — used to surface actions that are otherwise
+/// hidden behind a long-press, so users can actually discover them.
+class _Tip extends StatelessWidget {
+  final String text;
+  const _Tip(this.text);
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.fromLTRB(12, 10, 12, 4),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.lightbulb_outline_rounded,
+              size: 16, color: cs.primary),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(text,
+                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
           ),
         ],
       ),

@@ -136,7 +136,7 @@ class _LocationTaskHandler extends TaskHandler {
     // fresh); it only kicks in when updates have actually stopped.
     final stallFor = Duration(
         milliseconds:
-            math.max(_mode.interval.inMilliseconds * 2, 12000));
+            math.max(_mode.interval.inMilliseconds * 2, 10000));
     if (DateTime.now().difference(_lastFixAt) >= stallFor) {
       _activePoll();
     }
@@ -146,13 +146,26 @@ class _LocationTaskHandler extends TaskHandler {
     if (_polling) return;
     _polling = true;
     try {
+      // Use balanced-power accuracy for the recovery poll, NOT the (often
+      // GPS-only) recording accuracy. When the stream has stalled — which
+      // indoors usually means no GPS sky view — a Wi-Fi / cell / fused fix
+      // is what actually comes back, and quickly. The live stream still
+      // uses the higher recording accuracy for quality while moving.
       final pos = await Geolocator.getCurrentPosition(
-        locationSettings: _settings(),
-      ).timeout(const Duration(seconds: 20));
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.medium,
+        ),
+      ).timeout(const Duration(seconds: 15));
       _emit(pos);
     } catch (_) {
-      // No fix this cycle (no sky view / GPS cold). The next repeat tick
-      // tries again; nothing to do but wait.
+      // Still nothing — fall back to the OS's last-known fix so the trail
+      // keeps a heartbeat. It carries its own (older) timestamp, so the
+      // session-split logic won't draw a false line, and an unchanged fix
+      // dedups away in RecordingController.
+      try {
+        final last = await Geolocator.getLastKnownPosition();
+        if (last != null) _emit(last);
+      } catch (_) {}
     } finally {
       _polling = false;
     }

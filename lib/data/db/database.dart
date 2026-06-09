@@ -35,6 +35,15 @@ class TrackLayers extends Table {
   BoolColumn get visible => boolean().withDefault(const Constant(true))();
   TextColumn get tag => text().nullable()();
   DateTimeColumn get createdAt => dateTime()();
+  /// Per-layer path/fog style. All nullable — null means "inherit the
+  /// global default" (settings.fogColor / fogOpacity / trailWidth), so
+  /// existing layers render exactly as before until the user customises
+  /// them. [pathColor] is the layer's fog-veil ARGB; [pathOpacity] its
+  /// veil opacity (0..1); [pathWidth] the corridor width (metres) applied
+  /// to NEWLY recorded points on this layer.
+  IntColumn get pathColor => integer().nullable()();
+  RealColumn get pathOpacity => real().nullable()();
+  RealColumn get pathWidth => real().nullable()();
 }
 
 /// Tile-based fog storage. Each row is one tile at a given zoom; the bitmap is
@@ -116,7 +125,7 @@ class AppDb extends _$AppDb {
   AppDb() : super(openConnection());
 
   @override
-  int get schemaVersion => 5;
+  int get schemaVersion => 6;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -149,6 +158,13 @@ class AppDb extends _$AppDb {
             // newly recorded points. Existing rows stay null and render at
             // the renderer's default width.
             await m.addColumn(trackPoints, trackPoints.width);
+          }
+          if (from < 6) {
+            // v6: per-layer path/fog style. Null = inherit global default,
+            // so existing layers look unchanged until customised.
+            await m.addColumn(trackLayers, trackLayers.pathColor);
+            await m.addColumn(trackLayers, trackLayers.pathOpacity);
+            await m.addColumn(trackLayers, trackLayers.pathWidth);
           }
           if (from < 3) {
             // v3: stable UUID on every user-content table so backup

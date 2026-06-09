@@ -313,10 +313,33 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     // Use the EFFECTIVE active id so manual reveals also go to a visible
     // layer — see provider docs for the why.
     final activeLayerId = ref.watch(effectiveActiveLayerIdProvider);
-    final visibleLayerIds = layersAsync.maybeWhen(
-      data: (rows) => rows.where((l) => l.visible).map((l) => l.id).toList(),
-      orElse: () => <int>[],
+    final visibleLayers = layersAsync.maybeWhen(
+      data: (rows) => rows.where((l) => l.visible).toList(),
+      orElse: () => const <db_t.TrackLayer>[],
     );
+    final visibleLayerIds = visibleLayers.map((l) => l.id).toList();
+    // Single fog veil for everyone. Light mode = the global fog colour /
+    // opacity; dark mode = a strong dark scrim. The walked corridors are
+    // erased out of it to reveal the map.
+    final fogVeil = settings.darkMap
+        ? const Color(0xFF05070A)
+            .withValues(alpha: math.max(settings.fogOpacity, 0.62))
+        : Color(settings.fogColor)
+            .withValues(alpha: settings.fogOpacity.clamp(0.0, 1.0));
+    // Per-layer style: an optional translucent COLOURED LINE drawn along the
+    // revealed corridor (selected colour + opacity). pathColor null = no
+    // line (plain reveal). Width applies to the whole layer, live.
+    final fogStyles = [
+      for (final l in visibleLayers)
+        FogLayerStyle(
+          layerId: l.id,
+          lineColor: l.pathColor == null
+              ? null
+              : Color(l.pathColor!).withValues(
+                  alpha: (l.pathOpacity ?? 0.6).clamp(0.0, 1.0)),
+          widthMeters: l.pathWidth ?? settings.trailWidth,
+        ),
+    ];
 
     final LatLng? displayPos = (_wgsLat != null && _wgsLng != null)
         ? _toDisplay(_wgsLat!, _wgsLng!)
@@ -370,14 +393,33 @@ class _MapScreenState extends ConsumerState<MapScreen> {
               initialCenter: _center,
               initialZoom: 13,
               initialRotation: 0,
-              interactionOptions: const InteractionOptions(
-                // All gestures including two-finger rotation. A reset
-                // compass appears top-right whenever the heading is
-                // non-zero so the user can snap back to north-up.
-                flags: InteractiveFlag.all,
-                // High-pass on rotation so accidental twists during a
-                // pinch-zoom don't constantly nudge the heading.
-                rotationThreshold: 20.0,
+              // Floor the zoom so the map always fills the screen — below
+              // this the world is smaller than a tall viewport and the grey
+              // backdrop showed through as a full-white screen. Combined with
+              // the world cameraConstraint below, zoom-out stops at a filled
+              // view (you see most of the world, not blank margins).
+              minZoom: 3,
+              maxZoom: 19,
+              cameraConstraint: CameraConstraint.contain(
+                bounds: LatLngBounds(
+                  const LatLng(-85.05, -180),
+                  const LatLng(85.05, 180),
+                ),
+              ),
+              // A neutral loading-grey for not-yet-fetched tiles — reads as
+              // "map loading", never a black hole, even when a fast zoom
+              // momentarily clears every tile.
+              backgroundColor: const Color(0xFFE6E8EB),
+              interactionOptions: InteractionOptions(
+                // Rotation is opt-in (default off): most two-finger gestures
+                // are just pinch-zoom, so by default we strip the rotate flag
+                // entirely — no accidental tilt. When the user enables it, a
+                // high rotation threshold still ignores small twists during a
+                // pinch, and the top-right compass snaps back to north.
+                flags: settings.allowMapRotation
+                    ? InteractiveFlag.all
+                    : InteractiveFlag.all & ~InteractiveFlag.rotate,
+                rotationThreshold: 25.0,
               ),
               onMapEvent: (e) {
                 // Mirror the camera's rotation into local state so
@@ -429,17 +471,8 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                 FogLayer(
                   engine: ref.read(fogEngineProvider),
                   db: ref.read(dbProvider),
-                  layerIds: visibleLayerIds,
-                  // Dark mode: a strong near-black scrim (kept at least
-                  // fairly opaque) so the un-walked map reads as dark. The
-                  // corridor holes punched through it reveal the bright
-                  // tiles — same brightness/sharpness as light mode.
-                  fogColor: settings.darkMap
-                      ? const Color(0xFF05070A)
-                      : Color(settings.fogColor),
-                  fogOpacity: settings.darkMap
-                      ? math.max(settings.fogOpacity, 0.62)
-                      : settings.fogOpacity,
+                  layers: fogStyles,
+                  veil: fogVeil,
                   penRadiusMeters: settings.fogPenRadius,
                   refreshKey: fogRefresh,
                   mapProvider: settings.mapProvider,
@@ -646,6 +679,24 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                       .read(settingsProvider.notifier)
                       .update((p) => p.copyWith(darkMap: !p.darkMap)),
                 ),
+                // Rotation lock toggle — lives in the existing top-left chip
+                // row so it doesn't cover any other control. Default state
+                // (off) shows a "locked" icon; tapping enables two-finger
+                // rotation.
+                _MapChip(
+                  icon: settings.allowMapRotation
+                      ? Icons.screen_rotation_rounded
+                      : Icons.screen_lock_rotation_rounded,
+                  onTap: () {
+                    final next = !settings.allowMapRotation;
+                    ref
+                        .read(settingsProvider.notifier)
+                        .update((p) => p.copyWith(allowMapRotation: next));
+                    // Snap back to north when locking, so we don't leave the
+                    // map stuck at an angle the user can no longer correct.
+                    if (!next) _mapCtrl.rotate(0);
+                  },
+                ),
                 // Compass — only visible when the map has been rotated
                 // off-north. Reads from `_mapRotation` (mirrored from
                 // controller via onMapEvent), NOT `_mapCtrl.camera`,
@@ -672,18 +723,9 @@ class _MapScreenState extends ConsumerState<MapScreen> {
               ),
             ),
           ),
-          // ── Top-center: REC pill when recording ──
-          if (recording)
-            Positioned(
-              top: MediaQuery.of(context).padding.top + 12,
-              left: 0,
-              right: 0,
-              child: const Center(
-                child: IgnorePointer(
-                  child: _RecPill(),
-                ),
-              ),
-            ),
+          // (REC pill removed — the centre record button already shows the
+          // live recording state, so a second top-centre indicator was
+          // redundant and covered the map.)
           // ── Top-left: layer selector chip. Sits BELOW the existing
           //    map-style/provider chips at +8 so it doesn't overlap them.
           //    The "active" layer is where new fog reveals get written;
@@ -700,15 +742,11 @@ class _MapScreenState extends ConsumerState<MapScreen> {
               onSelectActive: (id) =>
                   ref.read(activeLayerIdProvider.notifier).state = id,
               onToggleVisible: (l) async {
-                await ref.read(dbProvider).updateLayer(db_t.TrackLayer(
-                      id: l.id,
-                      uuid: l.uuid,
-                      name: l.name,
-                      colorValue: l.colorValue,
-                      visible: !l.visible,
-                      tag: l.tag,
-                      createdAt: l.createdAt,
-                    ));
+                // copyWith preserves the per-layer style columns; building
+                // a fresh TrackLayer would null them out.
+                await ref
+                    .read(dbProvider)
+                    .updateLayer(l.copyWith(visible: !l.visible));
                 // Force fog re-render after visibility change.
                 ref.read(fogRefreshProvider.notifier).state++;
               },
@@ -931,6 +969,17 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     final pct = await fog.globalExplorationPercent(layerIds);
     final tiles = await db.fogTilesForLayers(layerIds, FogEngine.tileZoom);
     final journalCount = (await db.recentJournal(limit: 1000)).length;
+    // Level XP = total explored *path area* (km²) across all visible layers,
+    // Mercator-corrected — the area actually walked / revealed, not a raw
+    // block count.
+    final exploredKm2 = await fog.revealedAreaInBboxKm2(
+      layerIds,
+      minLat: -85.05,
+      minLng: -180,
+      maxLat: 85.05,
+      maxLng: 180,
+    );
+    final lvl = _levelForArea(exploredKm2);
     if (!context.mounted) return;
     showModalBottomSheet<void>(
       useRootNavigator: true,
@@ -1017,9 +1066,11 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                             ),
                           ),
                           Text(
-                            '等级 ${(pct * 100000).toInt().clamp(1, 999)}',
+                            '探索者 Lv ${lvl.level}',
                             style: const TextStyle(
-                                color: Colors.white60, fontSize: 12),
+                                color: Color(0xFFFFD54F),
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600),
                           ),
                         ],
                       ),
@@ -1034,6 +1085,66 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                             .update((p) => p.copyWith(avatarBase64: '')),
                       ),
                   ],
+                ),
+                const SizedBox(height: 18),
+                // ── Level + progress to next level ──
+                Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    gradient: const LinearGradient(
+                      colors: [Color(0xFF26A69A), Color(0xFF00897B)],
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                    ),
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 10, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: Colors.white.withValues(alpha: 0.22),
+                              borderRadius: BorderRadius.circular(20),
+                            ),
+                            child: Text('Lv ${lvl.level}',
+                                style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.w800)),
+                          ),
+                          const Spacer(),
+                          Text(
+                            lvl.remaining > 0
+                                ? '再探索 ${_fmtArea(lvl.remaining)} 升到 Lv ${lvl.level + 1}'
+                                : '已满级',
+                            style: const TextStyle(
+                                color: Colors.white70, fontSize: 11),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(6),
+                        child: LinearProgressIndicator(
+                          value: lvl.progress,
+                          minHeight: 8,
+                          backgroundColor: Colors.white24,
+                          valueColor: const AlwaysStoppedAnimation(
+                              Color(0xFFFFD54F)),
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        'Lv ${lvl.level}  ·  ${(lvl.progress * 100).toStringAsFixed(0)}%  ·  已探索 ${_fmtArea(exploredKm2)}',
+                        style:
+                            const TextStyle(color: Colors.white70, fontSize: 11),
+                      ),
+                    ],
+                  ),
                 ),
                 const SizedBox(height: 20),
                 const Text('已探索',
@@ -1744,7 +1855,7 @@ class _NavItem extends StatelessWidget {
   });
   @override
   Widget build(BuildContext context) {
-    return InkResponse(
+    final core = InkResponse(
       onTap: onTap,
       onLongPress: onLongPress,
       radius: 36,
@@ -1781,6 +1892,10 @@ class _NavItem extends StatelessWidget {
         ],
       ),
     );
+    // Surface the hidden long-press action via a long-press tooltip.
+    return onLongPress == null
+        ? core
+        : Tooltip(message: '长按可快速新建手账', child: core);
   }
 }
 
@@ -2071,41 +2186,6 @@ class _PeerMarker extends StatelessWidget {
     );
   }
 }
-
-class _RecPill extends StatelessWidget {
-  const _RecPill();
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-      decoration: BoxDecoration(
-        color: Colors.red.shade700.withValues(alpha: 0.92),
-        borderRadius: BorderRadius.circular(20),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.red.withValues(alpha: 0.4),
-            blurRadius: 8,
-            spreadRadius: 2,
-          ),
-        ],
-      ),
-      child: const Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(Icons.fiber_manual_record, color: Colors.white, size: 10),
-          SizedBox(width: 6),
-          Text('REC',
-              style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 1.5)),
-        ],
-      ),
-    );
-  }
-}
-
 
 /// Map pin for a journal entry: a small thumbnail (first media image if any,
 /// otherwise an icon) on top of a teardrop tail. Tapped via the enclosing
@@ -2535,4 +2615,38 @@ class _CompassChip extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Exploration level derived from the total explored *path area* (km²).
+/// Thresholds grow triangularly — reaching level L needs
+/// `base · L·(L−1)/2` km² — so early levels come from a walk or two and
+/// later ones take real exploring.
+const double _kLevelBaseKm2 = 0.5; // km² for the first level-up
+
+class _LevelInfo {
+  final int level;
+  final double progress; // 0..1 within the current level
+  final double remaining; // km² still needed for the next level
+  const _LevelInfo(this.level, this.progress, this.remaining);
+}
+
+_LevelInfo _levelForArea(double km2) {
+  final a = km2 < 0 ? 0.0 : km2;
+  double reqToReach(int l) => _kLevelBaseKm2 * l * (l - 1) / 2;
+  var level = ((1 + math.sqrt(1 + 8 * a / _kLevelBaseKm2)) / 2).floor();
+  if (level < 1) level = 1;
+  final reqCur = reqToReach(level);
+  final reqNext = reqToReach(level + 1);
+  final span = reqNext - reqCur;
+  final progress = span <= 0 ? 0.0 : ((a - reqCur) / span).clamp(0.0, 1.0);
+  final remaining = (reqNext - a).clamp(0.0, reqNext);
+  return _LevelInfo(level, progress.toDouble(), remaining.toDouble());
+}
+
+/// Format a km² area for display, dropping to m² when it's tiny so a short
+/// trip doesn't read as "0.00 km²".
+String _fmtArea(double km2) {
+  if (km2 < 0.1) return '${(km2 * 1e6).toStringAsFixed(0)} m²';
+  if (km2 < 100) return '${km2.toStringAsFixed(2)} km²';
+  return '${km2.toStringAsFixed(0)} km²';
 }

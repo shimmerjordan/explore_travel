@@ -141,6 +141,18 @@ class SettingsScreen extends ConsumerWidget {
                       n.update((p) => p.copyWith(mapProvider: v.first)),
                 ),
               ),
+              _buildTile(
+                context,
+                icon: Icons.screen_rotation_rounded,
+                title: '允许地图旋转',
+                subtitle: '关闭时双指只缩放、不旋转（默认）。开启后可双指旋转，'
+                    '小幅度转动仍会被忽略，右上角指南针可一键回正北。',
+                trailing: Switch.adaptive(
+                  value: s.allowMapRotation,
+                  onChanged: (v) =>
+                      n.update((p) => p.copyWith(allowMapRotation: v)),
+                ),
+              ),
               _InfoTile(
                 icon: Icons.info_outline_rounded,
                 title: '关于地图 API Key',

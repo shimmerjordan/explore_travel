@@ -55,6 +55,7 @@ dependencies:
 
   # Offline tile cache
   cached_network_image: ^3.4.1
+  flutter_cache_manager: ^3.4.1
 
   # Networking (AI + Music APIs)
   dio: ^5.7.0

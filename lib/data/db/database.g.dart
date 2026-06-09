@@ -546,9 +546,37 @@ class $TrackLayersTable extends TrackLayers
   late final GeneratedColumn<DateTime> createdAt = GeneratedColumn<DateTime>(
       'created_at', aliasedName, false,
       type: DriftSqlType.dateTime, requiredDuringInsert: true);
+  static const VerificationMeta _pathColorMeta =
+      const VerificationMeta('pathColor');
   @override
-  List<GeneratedColumn> get $columns =>
-      [id, uuid, name, colorValue, visible, tag, createdAt];
+  late final GeneratedColumn<int> pathColor = GeneratedColumn<int>(
+      'path_color', aliasedName, true,
+      type: DriftSqlType.int, requiredDuringInsert: false);
+  static const VerificationMeta _pathOpacityMeta =
+      const VerificationMeta('pathOpacity');
+  @override
+  late final GeneratedColumn<double> pathOpacity = GeneratedColumn<double>(
+      'path_opacity', aliasedName, true,
+      type: DriftSqlType.double, requiredDuringInsert: false);
+  static const VerificationMeta _pathWidthMeta =
+      const VerificationMeta('pathWidth');
+  @override
+  late final GeneratedColumn<double> pathWidth = GeneratedColumn<double>(
+      'path_width', aliasedName, true,
+      type: DriftSqlType.double, requiredDuringInsert: false);
+  @override
+  List<GeneratedColumn> get $columns => [
+        id,
+        uuid,
+        name,
+        colorValue,
+        visible,
+        tag,
+        createdAt,
+        pathColor,
+        pathOpacity,
+        pathWidth
+      ];
   @override
   String get aliasedName => _alias ?? actualTableName;
   @override
@@ -594,6 +622,20 @@ class $TrackLayersTable extends TrackLayers
     } else if (isInserting) {
       context.missing(_createdAtMeta);
     }
+    if (data.containsKey('path_color')) {
+      context.handle(_pathColorMeta,
+          pathColor.isAcceptableOrUnknown(data['path_color']!, _pathColorMeta));
+    }
+    if (data.containsKey('path_opacity')) {
+      context.handle(
+          _pathOpacityMeta,
+          pathOpacity.isAcceptableOrUnknown(
+              data['path_opacity']!, _pathOpacityMeta));
+    }
+    if (data.containsKey('path_width')) {
+      context.handle(_pathWidthMeta,
+          pathWidth.isAcceptableOrUnknown(data['path_width']!, _pathWidthMeta));
+    }
     return context;
   }
 
@@ -617,6 +659,12 @@ class $TrackLayersTable extends TrackLayers
           .read(DriftSqlType.string, data['${effectivePrefix}tag']),
       createdAt: attachedDatabase.typeMapping
           .read(DriftSqlType.dateTime, data['${effectivePrefix}created_at'])!,
+      pathColor: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}path_color']),
+      pathOpacity: attachedDatabase.typeMapping
+          .read(DriftSqlType.double, data['${effectivePrefix}path_opacity']),
+      pathWidth: attachedDatabase.typeMapping
+          .read(DriftSqlType.double, data['${effectivePrefix}path_width']),
     );
   }
 
@@ -634,6 +682,16 @@ class TrackLayer extends DataClass implements Insertable<TrackLayer> {
   final bool visible;
   final String? tag;
   final DateTime createdAt;
+
+  /// Per-layer path/fog style. All nullable — null means "inherit the
+  /// global default" (settings.fogColor / fogOpacity / trailWidth), so
+  /// existing layers render exactly as before until the user customises
+  /// them. [pathColor] is the layer's fog-veil ARGB; [pathOpacity] its
+  /// veil opacity (0..1); [pathWidth] the corridor width (metres) applied
+  /// to NEWLY recorded points on this layer.
+  final int? pathColor;
+  final double? pathOpacity;
+  final double? pathWidth;
   const TrackLayer(
       {required this.id,
       required this.uuid,
@@ -641,7 +699,10 @@ class TrackLayer extends DataClass implements Insertable<TrackLayer> {
       required this.colorValue,
       required this.visible,
       this.tag,
-      required this.createdAt});
+      required this.createdAt,
+      this.pathColor,
+      this.pathOpacity,
+      this.pathWidth});
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
     final map = <String, Expression>{};
@@ -654,6 +715,15 @@ class TrackLayer extends DataClass implements Insertable<TrackLayer> {
       map['tag'] = Variable<String>(tag);
     }
     map['created_at'] = Variable<DateTime>(createdAt);
+    if (!nullToAbsent || pathColor != null) {
+      map['path_color'] = Variable<int>(pathColor);
+    }
+    if (!nullToAbsent || pathOpacity != null) {
+      map['path_opacity'] = Variable<double>(pathOpacity);
+    }
+    if (!nullToAbsent || pathWidth != null) {
+      map['path_width'] = Variable<double>(pathWidth);
+    }
     return map;
   }
 
@@ -666,6 +736,15 @@ class TrackLayer extends DataClass implements Insertable<TrackLayer> {
       visible: Value(visible),
       tag: tag == null && nullToAbsent ? const Value.absent() : Value(tag),
       createdAt: Value(createdAt),
+      pathColor: pathColor == null && nullToAbsent
+          ? const Value.absent()
+          : Value(pathColor),
+      pathOpacity: pathOpacity == null && nullToAbsent
+          ? const Value.absent()
+          : Value(pathOpacity),
+      pathWidth: pathWidth == null && nullToAbsent
+          ? const Value.absent()
+          : Value(pathWidth),
     );
   }
 
@@ -680,6 +759,9 @@ class TrackLayer extends DataClass implements Insertable<TrackLayer> {
       visible: serializer.fromJson<bool>(json['visible']),
       tag: serializer.fromJson<String?>(json['tag']),
       createdAt: serializer.fromJson<DateTime>(json['createdAt']),
+      pathColor: serializer.fromJson<int?>(json['pathColor']),
+      pathOpacity: serializer.fromJson<double?>(json['pathOpacity']),
+      pathWidth: serializer.fromJson<double?>(json['pathWidth']),
     );
   }
   @override
@@ -693,6 +775,9 @@ class TrackLayer extends DataClass implements Insertable<TrackLayer> {
       'visible': serializer.toJson<bool>(visible),
       'tag': serializer.toJson<String?>(tag),
       'createdAt': serializer.toJson<DateTime>(createdAt),
+      'pathColor': serializer.toJson<int?>(pathColor),
+      'pathOpacity': serializer.toJson<double?>(pathOpacity),
+      'pathWidth': serializer.toJson<double?>(pathWidth),
     };
   }
 
@@ -703,7 +788,10 @@ class TrackLayer extends DataClass implements Insertable<TrackLayer> {
           int? colorValue,
           bool? visible,
           Value<String?> tag = const Value.absent(),
-          DateTime? createdAt}) =>
+          DateTime? createdAt,
+          Value<int?> pathColor = const Value.absent(),
+          Value<double?> pathOpacity = const Value.absent(),
+          Value<double?> pathWidth = const Value.absent()}) =>
       TrackLayer(
         id: id ?? this.id,
         uuid: uuid ?? this.uuid,
@@ -712,6 +800,9 @@ class TrackLayer extends DataClass implements Insertable<TrackLayer> {
         visible: visible ?? this.visible,
         tag: tag.present ? tag.value : this.tag,
         createdAt: createdAt ?? this.createdAt,
+        pathColor: pathColor.present ? pathColor.value : this.pathColor,
+        pathOpacity: pathOpacity.present ? pathOpacity.value : this.pathOpacity,
+        pathWidth: pathWidth.present ? pathWidth.value : this.pathWidth,
       );
   TrackLayer copyWithCompanion(TrackLayersCompanion data) {
     return TrackLayer(
@@ -723,6 +814,10 @@ class TrackLayer extends DataClass implements Insertable<TrackLayer> {
       visible: data.visible.present ? data.visible.value : this.visible,
       tag: data.tag.present ? data.tag.value : this.tag,
       createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
+      pathColor: data.pathColor.present ? data.pathColor.value : this.pathColor,
+      pathOpacity:
+          data.pathOpacity.present ? data.pathOpacity.value : this.pathOpacity,
+      pathWidth: data.pathWidth.present ? data.pathWidth.value : this.pathWidth,
     );
   }
 
@@ -735,14 +830,17 @@ class TrackLayer extends DataClass implements Insertable<TrackLayer> {
           ..write('colorValue: $colorValue, ')
           ..write('visible: $visible, ')
           ..write('tag: $tag, ')
-          ..write('createdAt: $createdAt')
+          ..write('createdAt: $createdAt, ')
+          ..write('pathColor: $pathColor, ')
+          ..write('pathOpacity: $pathOpacity, ')
+          ..write('pathWidth: $pathWidth')
           ..write(')'))
         .toString();
   }
 
   @override
-  int get hashCode =>
-      Object.hash(id, uuid, name, colorValue, visible, tag, createdAt);
+  int get hashCode => Object.hash(id, uuid, name, colorValue, visible, tag,
+      createdAt, pathColor, pathOpacity, pathWidth);
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -753,7 +851,10 @@ class TrackLayer extends DataClass implements Insertable<TrackLayer> {
           other.colorValue == this.colorValue &&
           other.visible == this.visible &&
           other.tag == this.tag &&
-          other.createdAt == this.createdAt);
+          other.createdAt == this.createdAt &&
+          other.pathColor == this.pathColor &&
+          other.pathOpacity == this.pathOpacity &&
+          other.pathWidth == this.pathWidth);
 }
 
 class TrackLayersCompanion extends UpdateCompanion<TrackLayer> {
@@ -764,6 +865,9 @@ class TrackLayersCompanion extends UpdateCompanion<TrackLayer> {
   final Value<bool> visible;
   final Value<String?> tag;
   final Value<DateTime> createdAt;
+  final Value<int?> pathColor;
+  final Value<double?> pathOpacity;
+  final Value<double?> pathWidth;
   const TrackLayersCompanion({
     this.id = const Value.absent(),
     this.uuid = const Value.absent(),
@@ -772,6 +876,9 @@ class TrackLayersCompanion extends UpdateCompanion<TrackLayer> {
     this.visible = const Value.absent(),
     this.tag = const Value.absent(),
     this.createdAt = const Value.absent(),
+    this.pathColor = const Value.absent(),
+    this.pathOpacity = const Value.absent(),
+    this.pathWidth = const Value.absent(),
   });
   TrackLayersCompanion.insert({
     this.id = const Value.absent(),
@@ -781,6 +888,9 @@ class TrackLayersCompanion extends UpdateCompanion<TrackLayer> {
     this.visible = const Value.absent(),
     this.tag = const Value.absent(),
     required DateTime createdAt,
+    this.pathColor = const Value.absent(),
+    this.pathOpacity = const Value.absent(),
+    this.pathWidth = const Value.absent(),
   })  : name = Value(name),
         colorValue = Value(colorValue),
         createdAt = Value(createdAt);
@@ -792,6 +902,9 @@ class TrackLayersCompanion extends UpdateCompanion<TrackLayer> {
     Expression<bool>? visible,
     Expression<String>? tag,
     Expression<DateTime>? createdAt,
+    Expression<int>? pathColor,
+    Expression<double>? pathOpacity,
+    Expression<double>? pathWidth,
   }) {
     return RawValuesInsertable({
       if (id != null) 'id': id,
@@ -801,6 +914,9 @@ class TrackLayersCompanion extends UpdateCompanion<TrackLayer> {
       if (visible != null) 'visible': visible,
       if (tag != null) 'tag': tag,
       if (createdAt != null) 'created_at': createdAt,
+      if (pathColor != null) 'path_color': pathColor,
+      if (pathOpacity != null) 'path_opacity': pathOpacity,
+      if (pathWidth != null) 'path_width': pathWidth,
     });
   }
 
@@ -811,7 +927,10 @@ class TrackLayersCompanion extends UpdateCompanion<TrackLayer> {
       Value<int>? colorValue,
       Value<bool>? visible,
       Value<String?>? tag,
-      Value<DateTime>? createdAt}) {
+      Value<DateTime>? createdAt,
+      Value<int?>? pathColor,
+      Value<double?>? pathOpacity,
+      Value<double?>? pathWidth}) {
     return TrackLayersCompanion(
       id: id ?? this.id,
       uuid: uuid ?? this.uuid,
@@ -820,6 +939,9 @@ class TrackLayersCompanion extends UpdateCompanion<TrackLayer> {
       visible: visible ?? this.visible,
       tag: tag ?? this.tag,
       createdAt: createdAt ?? this.createdAt,
+      pathColor: pathColor ?? this.pathColor,
+      pathOpacity: pathOpacity ?? this.pathOpacity,
+      pathWidth: pathWidth ?? this.pathWidth,
     );
   }
 
@@ -847,6 +969,15 @@ class TrackLayersCompanion extends UpdateCompanion<TrackLayer> {
     if (createdAt.present) {
       map['created_at'] = Variable<DateTime>(createdAt.value);
     }
+    if (pathColor.present) {
+      map['path_color'] = Variable<int>(pathColor.value);
+    }
+    if (pathOpacity.present) {
+      map['path_opacity'] = Variable<double>(pathOpacity.value);
+    }
+    if (pathWidth.present) {
+      map['path_width'] = Variable<double>(pathWidth.value);
+    }
     return map;
   }
 
@@ -859,7 +990,10 @@ class TrackLayersCompanion extends UpdateCompanion<TrackLayer> {
           ..write('colorValue: $colorValue, ')
           ..write('visible: $visible, ')
           ..write('tag: $tag, ')
-          ..write('createdAt: $createdAt')
+          ..write('createdAt: $createdAt, ')
+          ..write('pathColor: $pathColor, ')
+          ..write('pathOpacity: $pathOpacity, ')
+          ..write('pathWidth: $pathWidth')
           ..write(')'))
         .toString();
   }
@@ -3196,6 +3330,9 @@ typedef $$TrackLayersTableCreateCompanionBuilder = TrackLayersCompanion
   Value<bool> visible,
   Value<String?> tag,
   required DateTime createdAt,
+  Value<int?> pathColor,
+  Value<double?> pathOpacity,
+  Value<double?> pathWidth,
 });
 typedef $$TrackLayersTableUpdateCompanionBuilder = TrackLayersCompanion
     Function({
@@ -3206,6 +3343,9 @@ typedef $$TrackLayersTableUpdateCompanionBuilder = TrackLayersCompanion
   Value<bool> visible,
   Value<String?> tag,
   Value<DateTime> createdAt,
+  Value<int?> pathColor,
+  Value<double?> pathOpacity,
+  Value<double?> pathWidth,
 });
 
 class $$TrackLayersTableFilterComposer
@@ -3237,6 +3377,15 @@ class $$TrackLayersTableFilterComposer
 
   ColumnFilters<DateTime> get createdAt => $composableBuilder(
       column: $table.createdAt, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<int> get pathColor => $composableBuilder(
+      column: $table.pathColor, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<double> get pathOpacity => $composableBuilder(
+      column: $table.pathOpacity, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<double> get pathWidth => $composableBuilder(
+      column: $table.pathWidth, builder: (column) => ColumnFilters(column));
 }
 
 class $$TrackLayersTableOrderingComposer
@@ -3268,6 +3417,15 @@ class $$TrackLayersTableOrderingComposer
 
   ColumnOrderings<DateTime> get createdAt => $composableBuilder(
       column: $table.createdAt, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<int> get pathColor => $composableBuilder(
+      column: $table.pathColor, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<double> get pathOpacity => $composableBuilder(
+      column: $table.pathOpacity, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<double> get pathWidth => $composableBuilder(
+      column: $table.pathWidth, builder: (column) => ColumnOrderings(column));
 }
 
 class $$TrackLayersTableAnnotationComposer
@@ -3299,6 +3457,15 @@ class $$TrackLayersTableAnnotationComposer
 
   GeneratedColumn<DateTime> get createdAt =>
       $composableBuilder(column: $table.createdAt, builder: (column) => column);
+
+  GeneratedColumn<int> get pathColor =>
+      $composableBuilder(column: $table.pathColor, builder: (column) => column);
+
+  GeneratedColumn<double> get pathOpacity => $composableBuilder(
+      column: $table.pathOpacity, builder: (column) => column);
+
+  GeneratedColumn<double> get pathWidth =>
+      $composableBuilder(column: $table.pathWidth, builder: (column) => column);
 }
 
 class $$TrackLayersTableTableManager extends RootTableManager<
@@ -3331,6 +3498,9 @@ class $$TrackLayersTableTableManager extends RootTableManager<
             Value<bool> visible = const Value.absent(),
             Value<String?> tag = const Value.absent(),
             Value<DateTime> createdAt = const Value.absent(),
+            Value<int?> pathColor = const Value.absent(),
+            Value<double?> pathOpacity = const Value.absent(),
+            Value<double?> pathWidth = const Value.absent(),
           }) =>
               TrackLayersCompanion(
             id: id,
@@ -3340,6 +3510,9 @@ class $$TrackLayersTableTableManager extends RootTableManager<
             visible: visible,
             tag: tag,
             createdAt: createdAt,
+            pathColor: pathColor,
+            pathOpacity: pathOpacity,
+            pathWidth: pathWidth,
           ),
           createCompanionCallback: ({
             Value<int> id = const Value.absent(),
@@ -3349,6 +3522,9 @@ class $$TrackLayersTableTableManager extends RootTableManager<
             Value<bool> visible = const Value.absent(),
             Value<String?> tag = const Value.absent(),
             required DateTime createdAt,
+            Value<int?> pathColor = const Value.absent(),
+            Value<double?> pathOpacity = const Value.absent(),
+            Value<double?> pathWidth = const Value.absent(),
           }) =>
               TrackLayersCompanion.insert(
             id: id,
@@ -3358,6 +3534,9 @@ class $$TrackLayersTableTableManager extends RootTableManager<
             visible: visible,
             tag: tag,
             createdAt: createdAt,
+            pathColor: pathColor,
+            pathOpacity: pathOpacity,
+            pathWidth: pathWidth,
           ),
           withReferenceMapper: (p0) => p0
               .map((e) => (e.readTable(table), BaseReferences(db, table, e)))

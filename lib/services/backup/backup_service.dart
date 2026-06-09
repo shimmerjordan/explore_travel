@@ -141,6 +141,10 @@ class BackupService {
                     'visible': r.visible,
                     'tag': r.tag,
                     'createdAt': r.createdAt.toIso8601String(),
+                    // Per-layer path style (null = inherit global default).
+                    'pathColor': r.pathColor,
+                    'pathOpacity': r.pathOpacity,
+                    'pathWidth': r.pathWidth,
                   })
               .toList());
     }
@@ -401,6 +405,10 @@ class BackupService {
                 createdAt:
                     DateTime.tryParse(r['createdAt']?.toString() ?? '') ??
                         DateTime.now(),
+                // Per-layer style (older backups omit these → stay null).
+                pathColor: Value((r['pathColor'] as num?)?.toInt()),
+                pathOpacity: Value((r['pathOpacity'] as num?)?.toDouble()),
+                pathWidth: Value((r['pathWidth'] as num?)?.toDouble()),
               ),
             );
         if (uuid.isNotEmpty) seen.add(uuid);

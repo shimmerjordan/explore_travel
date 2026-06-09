@@ -10,6 +10,7 @@ class AppSettings {
   final double fogOpacity; // 0..1
   final double fogPenRadius; // meters — manual erase/add brush radius
   final double trailWidth; // meters — visible recorded path/point size
+  final bool allowMapRotation; // two-finger rotation gesture (default off)
   final String? amapApiKey;
   final String? googleMapKey;
   /// Optional override URL template for OSM/raster tiles, used when the
@@ -163,6 +164,7 @@ class AppSettings {
     this.fogOpacity = 0.78,
     this.fogPenRadius = 50,
     this.trailWidth = 14,
+    this.allowMapRotation = false,
     this.amapApiKey,
     this.googleMapKey,
     this.customOsmTileUrl,
@@ -234,6 +236,7 @@ class AppSettings {
     double? fogOpacity,
     double? fogPenRadius,
     double? trailWidth,
+    bool? allowMapRotation,
     String? amapApiKey,
     String? googleMapKey,
     String? customOsmTileUrl,
@@ -303,6 +306,7 @@ class AppSettings {
         fogOpacity: fogOpacity ?? this.fogOpacity,
         fogPenRadius: fogPenRadius ?? this.fogPenRadius,
         trailWidth: trailWidth ?? this.trailWidth,
+        allowMapRotation: allowMapRotation ?? this.allowMapRotation,
         amapApiKey: amapApiKey ?? this.amapApiKey,
         googleMapKey: googleMapKey ?? this.googleMapKey,
         customOsmTileUrl: customOsmTileUrl ?? this.customOsmTileUrl,
@@ -388,6 +392,7 @@ class AppSettings {
         'fogOpacity': fogOpacity,
         'fogPenRadius': fogPenRadius,
         'trailWidth': trailWidth,
+        'allowMapRotation': allowMapRotation,
         'amapApiKey': amapApiKey,
         'googleMapKey': googleMapKey,
         'customOsmTileUrl': customOsmTileUrl,
@@ -458,6 +463,7 @@ class AppSettings {
         fogOpacity: (j['fogOpacity'] ?? 0.78).toDouble(),
         fogPenRadius: (j['fogPenRadius'] ?? 50).toDouble(),
         trailWidth: (j['trailWidth'] ?? 14).toDouble(),
+        allowMapRotation: (j['allowMapRotation'] ?? false) as bool,
         amapApiKey: j['amapApiKey'],
         googleMapKey: j['googleMapKey'],
         customOsmTileUrl: j['customOsmTileUrl'],

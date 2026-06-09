@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:drift/drift.dart' show OrderingTerm;
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
@@ -9,41 +10,52 @@ import '../../models/models.dart';
 import '../fog/fog_engine.dart';
 import '../geo/coord_converter.dart';
 
-/// A GPS fix worse than this (in metres) is treated as junk — usually a
-/// cell-tower / Wi-Fi fallback fix indoors — and dropped before it can
-/// anchor a misleading line. Null-accuracy points (old data, web) are
-/// always kept.
+/// A GPS fix worse than this (in metres) is treated as junk and dropped.
 const double _kMaxAccuracyMeters = 150.0;
 
-/// Implied speed (m/s) above which two consecutive fixes can't be one
-/// continuous walk — a teleport spike. ~70 m/s = 252 km/h, above any
-/// car / metro but below the per-sample distance a flight or HSR would
-/// produce (those break on the distance gate first anyway).
+/// Implied speed (m/s) above which two consecutive fixes can't be one walk.
 const double _kMaxSpeedMps = 70.0;
 
-/// Fallback corridor width (metres) for points recorded before per-point
-/// width existed (`width` column is null). Kept independent of the live
-/// size setting so historical trails don't shift when the user retunes it.
+/// Fallback corridor width (metres) for points with a null `width`.
 const double _kDefaultTrailWidthMeters = 14.0;
 
-/// One sample on a trail: its position plus the corridor width (metres) it
-/// was recorded with.
 typedef _P = ({LatLng pt, double w});
 
+/// Per-layer style. The single dark veil ("fog") is global; each layer
+/// reveals its own corridor (width [widthMeters]) and, if [lineColor] is
+/// non-null, draws a translucent coloured line along that corridor — a
+/// "line drawn in the fog". [lineColor] already bakes its opacity into the
+/// alpha channel; null = no coloured line (plain reveal).
+class FogLayerStyle {
+  final int layerId;
+  final Color? lineColor;
+  final double widthMeters;
+  const FogLayerStyle({
+    required this.layerId,
+    required this.lineColor,
+    required this.widthMeters,
+  });
+
+  @override
+  bool operator ==(Object other) =>
+      other is FogLayerStyle &&
+      other.layerId == layerId &&
+      other.lineColor == lineColor &&
+      other.widthMeters == widthMeters;
+  @override
+  int get hashCode => Object.hash(layerId, lineColor, widthMeters);
+}
+
 class FogLayer extends StatefulWidget {
-  /// Kept for API compatibility — callers still pass it, and stats /
-  /// import code references the engine through other paths. The live
-  /// renderer doesn't use it: the user-visible trail is drawn directly
-  /// from `track_points` as an anti-aliased canvas stroke.
   final FogEngine engine;
   final AppDb db;
-  final List<int> layerIds;
-  final Color fogColor;
-  final double fogOpacity;
+  final List<FogLayerStyle> layers;
 
-  /// Manual erase/add brush radius (metres). Only used to size the gate
-  /// that decides whether two consecutive samples belong to one walk; the
-  /// visible corridor width comes from each point's own stored `width`.
+  /// The single fog veil colour (alpha baked in). Light mode = the global
+  /// fog colour/opacity; dark mode = a strong dark scrim. The veil covers
+  /// the map and is erased along every layer's trail to reveal it.
+  final Color veil;
+
   final double penRadiusMeters;
   final Object? refreshKey;
   final MapProvider mapProvider;
@@ -51,9 +63,8 @@ class FogLayer extends StatefulWidget {
     super.key,
     required this.engine,
     required this.db,
-    required this.layerIds,
-    required this.fogColor,
-    required this.fogOpacity,
+    required this.layers,
+    required this.veil,
     required this.penRadiusMeters,
     required this.mapProvider,
     this.refreshKey,
@@ -64,12 +75,10 @@ class FogLayer extends StatefulWidget {
 }
 
 class _FogLayerState extends State<FogLayer> {
-  /// Per-session sample lists loaded from track_points. Loaded once per
-  /// (layerIds, refreshKey) change and cached; the painter strokes through
-  /// these. Each inner list is one continuous walk (no GPS drop-out /
-  /// teleport), and each sample carries the width it was recorded with.
-  List<List<_P>> _trailSessions = const [];
+  Map<int, List<List<_P>>> _sessionsByLayer = const {};
   String _trailKey = '';
+
+  List<int> get _layerIds => widget.layers.map((l) => l.layerId).toList();
 
   @override
   void didChangeDependencies() {
@@ -84,44 +93,34 @@ class _FogLayerState extends State<FogLayer> {
   }
 
   void _maybeReloadTrail() {
-    final key = '${widget.layerIds.join(",")}|${widget.refreshKey}';
+    final key = '${_layerIds.join(",")}|${widget.refreshKey}';
     if (key == _trailKey) return;
     _trailKey = key;
     _loadTrail();
   }
 
   Future<void> _loadTrail() async {
-    final layerIds = widget.layerIds;
-    if (layerIds.isEmpty) return;
-    final sessions = <List<_P>>[];
-    // Connect two consecutive samples into one continuous walk only when
-    // ALL of these hold; any failure starts a fresh sub-path so we never
-    // draw a straight line across a gap the user didn't actually walk:
-    //
-    //   * temporal: gap ≤ 30 s          → catches "no signal" pauses,
-    //                                      backgrounded app, GPS sleep
-    //   * spatial:  distance ≤ maxMeters → catches teleports (subway,
-    //                                      flight, app resume far away)
-    //   * speed:    distance/Δt ≤ 70 m/s → catches a fast GPS spike that
-    //                                      is still *within* maxMeters
-    //
-    // Junk fixes (accuracy worse than 150 m) are dropped up front so a
-    // single bad reading can't anchor a line on either side of itself.
+    final layerIds = _layerIds;
+    if (layerIds.isEmpty) {
+      if (mounted && _sessionsByLayer.isNotEmpty) {
+        setState(() => _sessionsByLayer = const {});
+      }
+      return;
+    }
     final maxAge = const Duration(seconds: 30);
     final maxMeters = math.max(widget.penRadiusMeters * 5.0, 50.0);
+    final out = <int, List<List<_P>>>{};
     for (final lid in layerIds) {
       final rows = await (widget.db.select(widget.db.trackPoints)
             ..where((p) => p.layerId.equals(lid))
             ..orderBy([(p) => OrderingTerm.asc(p.time)]))
           .get();
+      final sessions = <List<_P>>[];
       var current = <_P>[];
       DateTime? lastT;
       double? lastLat, lastLng;
       for (final p in rows) {
-        // Drop unreliable fixes outright — never let them anchor a line.
-        if (p.accuracy != null && p.accuracy! > _kMaxAccuracyMeters) {
-          continue;
-        }
+        if (p.accuracy != null && p.accuracy! > _kMaxAccuracyMeters) continue;
         if (lastT != null) {
           final dt = p.time.difference(lastT);
           final dist = _haversineMeters(lastLat!, lastLng!, p.lat, p.lng);
@@ -143,30 +142,25 @@ class _FogLayerState extends State<FogLayer> {
         lastLng = p.lng;
       }
       if (current.isNotEmpty) sessions.add(current);
+      out[lid] = sessions;
     }
     if (!mounted) return;
-    setState(() => _trailSessions = sessions);
+    setState(() => _sessionsByLayer = out);
   }
 
   @override
   Widget build(BuildContext context) {
     final camera = MapCamera.of(context);
-    // Wrap in MobileLayerTransformer — exactly what flutter_map's own
-    // PolylineLayer / CircleLayer / MarkerLayer do. The painter projects
-    // points with `getOffsetFromOrigin`, which returns coordinates in the
-    // *un-rotated* pixel frame; the transformer then rotates the whole
-    // canvas by `camera.rotationRad` so the fog + revealed trail stay
-    // glued to the tiles when the user rotates the map.
     return MobileLayerTransformer(
       child: IgnorePointer(
         child: CustomPaint(
           size: Size(camera.size.x, camera.size.y),
           painter: _FogPainter(
             camera: camera,
-            layerIds: widget.layerIds,
-            fogColor: widget.fogColor.withValues(alpha: widget.fogOpacity),
+            layers: widget.layers,
+            veil: widget.veil,
             mapProvider: widget.mapProvider,
-            trailSessions: _trailSessions,
+            sessionsByLayer: _sessionsByLayer,
           ),
         ),
       ),
@@ -176,27 +170,22 @@ class _FogLayerState extends State<FogLayer> {
 
 class _FogPainter extends CustomPainter {
   final MapCamera camera;
-  final List<int> layerIds;
-  final Color fogColor;
+  final List<FogLayerStyle> layers;
+  final Color veil;
   final MapProvider mapProvider;
-  final List<List<_P>> trailSessions;
+  final Map<int, List<List<_P>>> sessionsByLayer;
 
   _FogPainter({
     required this.camera,
-    required this.layerIds,
-    required this.fogColor,
+    required this.layers,
+    required this.veil,
     required this.mapProvider,
-    required this.trailSessions,
+    required this.sessionsByLayer,
   });
 
   @override
   void paint(Canvas canvas, Size size) {
-    // The MobileLayerTransformer rotates this canvas about the screen
-    // centre, so a rect the exact size of the viewport would leave the
-    // four corners un-fogged when the map is rotated off-north. Pad each
-    // axis by exactly what the current rotation needs (zero when
-    // north-up) so the saveLayer below stays viewport-sized in the common
-    // case instead of always allocating a diagonal-sized offscreen layer.
+    // Pad for rotation so a rotated viewport's corners stay covered.
     final c = math.cos(camera.rotationRad).abs();
     final s = math.sin(camera.rotationRad).abs();
     final halfW = size.width / 2, halfH = size.height / 2;
@@ -204,11 +193,8 @@ class _FogPainter extends CustomPainter {
     final padY = (halfW * s + halfH * c) - halfH + 1;
     final rect = Rect.fromLTRB(
         -padX, -padY, size.width + padX, size.height + padY);
-    final fogPaint = Paint()..color = fogColor;
-    if (layerIds.isEmpty) {
-      canvas.drawRect(rect, fogPaint);
-      return;
-    }
+
+    if (layers.isEmpty && veil.a == 0) return;
 
     final needsGcj = CoordConverter.needsGcj02(mapProvider);
     Offset project(LatLng p) {
@@ -219,9 +205,6 @@ class _FogPainter extends CustomPainter {
       return camera.getOffsetFromOrigin(p);
     }
 
-    // Screen pixels per metre at the current camera scale, measured near
-    // the camera centre over a 100 m reference span (the projection is
-    // linear, so the reference length just buys numerical stability).
     final centre = camera.center;
     const refM = 100.0;
     final refDLat = refM / 111320.0;
@@ -231,91 +214,92 @@ class _FogPainter extends CustomPainter {
         .distance
         .abs()) /
         refM;
+    double strokePx(double m) => (m * pxPerMeter).clamp(1.0, 600.0);
 
-    double strokePx(double widthMeters) =>
-        (widthMeters * pxPerMeter).clamp(1.0, 600.0);
+    // Build a polyline path (in screen space) for a layer's sessions, and a
+    // separate list of single-sample dots.
+    void forEachStroke(
+      List<List<_P>> sessions,
+      void Function(ui.Path path) onPath,
+      void Function(Offset c) onDot,
+    ) {
+      for (final session in sessions) {
+        if (session.isEmpty) continue;
+        if (session.length == 1) {
+          onDot(project(session.first.pt));
+          continue;
+        }
+        final path = ui.Path();
+        final first = project(session.first.pt);
+        path.moveTo(first.dx, first.dy);
+        for (var i = 1; i < session.length; i++) {
+          final o = project(session[i].pt);
+          path.lineTo(o.dx, o.dy);
+        }
+        onPath(path);
+      }
+    }
 
-    // The fog bitmap (`fog_tiles`) is no longer used for live rendering —
-    // it's still updated by the recording controller (so backups, sync,
-    // and exploration-% stats stay correct), but the user-visible reveal
-    // is drawn here as crisp anti-aliased strokes along the actual GPS
-    // samples: the places you've walked "light up" by erasing the grey
-    // fog. No blur — a hard-edged swept corridor, which is what reads as
-    // clear and clean. Each width-run is stroked at its own width so
-    // changing the size setting never reshapes older trails.
+    // ── 1. Fog veil + reveal corridors ──────────────────────────────
+    // One dark veil over the whole map; each layer's trail is erased out of
+    // it (dstOut) so the walked corridor reveals the map beneath.
     canvas.saveLayer(rect, Paint());
-    canvas.drawRect(rect, fogPaint);
-
-    // Bucket widths to ~0.1 m so float noise doesn't fragment a uniform
-    // trail into thousands of single-segment runs.
-    int bucket(double w) => (w * 10).round();
-
-    final base = Paint()
+    canvas.drawRect(rect, Paint()..color = veil);
+    final eraser = Paint()
       ..blendMode = BlendMode.dstOut
       ..color = const Color(0xFFFFFFFF)
       ..strokeCap = StrokeCap.round
       ..strokeJoin = StrokeJoin.round
       ..isAntiAlias = true;
-
-    void strokeRun(List<Offset> pts, double widthM) {
-      if (pts.isEmpty) return;
-      final w = strokePx(widthM);
-      if (pts.length == 1) {
-        canvas.drawCircle(
-            pts.first, w / 2, base..style = PaintingStyle.fill);
-        return;
-      }
-      final path = ui.Path()..moveTo(pts.first.dx, pts.first.dy);
-      for (var i = 1; i < pts.length; i++) {
-        path.lineTo(pts[i].dx, pts[i].dy);
-      }
-      canvas.drawPath(
-          path,
-          base
-            ..style = PaintingStyle.stroke
-            ..strokeWidth = w);
+    for (final st in layers) {
+      final w = strokePx(st.widthMeters);
+      forEachStroke(
+        sessionsByLayer[st.layerId] ?? const [],
+        (path) => canvas.drawPath(
+            path,
+            eraser
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = w),
+        (dot) => canvas.drawCircle(
+            dot, w / 2, eraser..style = PaintingStyle.fill),
+      );
     }
-
-    for (final session in trailSessions) {
-      if (session.isEmpty) continue;
-      if (session.length == 1) {
-        strokeRun([project(session.first.pt)], session.first.w);
-        continue;
-      }
-      // Split the session into maximal runs of equal width, sharing the
-      // boundary point between adjacent runs so the corridor stays
-      // continuous across a width change.
-      var runPts = <Offset>[project(session.first.pt)];
-      var runW = session.first.w;
-      for (var i = 1; i < session.length; i++) {
-        final o = project(session[i].pt);
-        if (bucket(session[i].w) == bucket(runW)) {
-          runPts.add(o);
-        } else {
-          runPts.add(o);
-          strokeRun(runPts, runW);
-          runPts = [o];
-          runW = session[i].w;
-        }
-      }
-      strokeRun(runPts, runW);
-    }
-
     canvas.restore();
+
+    // ── 2. Coloured line in the fog ─────────────────────────────────
+    // For layers with a line colour, draw a translucent coloured line along
+    // the same corridor — the "line drawn in the fog". Opacity is baked into
+    // the colour's alpha; transparent / null = no line (plain reveal).
+    for (final st in layers) {
+      final col = st.lineColor;
+      if (col == null || col.a == 0) continue;
+      final w = strokePx(st.widthMeters);
+      final line = Paint()
+        ..color = col
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = w
+        ..isAntiAlias = true;
+      forEachStroke(
+        sessionsByLayer[st.layerId] ?? const [],
+        (path) => canvas.drawPath(path, line),
+        (dot) => canvas.drawCircle(
+            dot, w / 2, Paint()..color = col..isAntiAlias = true),
+      );
+    }
   }
 
   @override
   bool shouldRepaint(covariant _FogPainter old) =>
       old.camera != camera ||
-      old.layerIds != layerIds ||
-      old.fogColor != fogColor ||
+      old.veil != veil ||
       old.mapProvider != mapProvider ||
-      !identical(old.trailSessions, trailSessions);
+      !listEquals(old.layers, layers) ||
+      !identical(old.sessionsByLayer, sessionsByLayer);
 }
 
-/// Standard haversine — meters between two WGS-84 points. Inlined here so
-/// the renderer doesn't have to depend on a math util module just to
-/// decide whether to break a polyline at a GPS drop-out.
+/// Standard haversine — meters between two WGS-84 points.
 double _haversineMeters(double lat1, double lng1, double lat2, double lng2) {
   const r = 6371000.0;
   final dLat = (lat2 - lat1) * math.pi / 180;
