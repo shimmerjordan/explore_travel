@@ -236,11 +236,40 @@ jobs:
         run: |
           set -euo pipefail
           flutter build ios --release --no-codesign
+
+          APP=build/ios/iphoneos/Runner.app
+          # ── Sanity-check the bundle BEFORE packaging ──────────────────
+          # A correct release .app embeds the Flutter engine, the Dart AOT
+          # (App.framework) and every plugin's framework under Frameworks/.
+          # If CocoaPods didn't integrate (e.g. a missing Podfile), the app
+          # builds but ships without those — a tiny, broken IPA. Fail loudly
+          # instead of silently publishing it.
+          echo "── Runner.app size ──"; du -sh "$APP"
+          echo "── Frameworks/ ──"
+          ls -lah "$APP/Frameworks" || { echo "::error::Runner.app has NO Frameworks/ directory — CocoaPods did not integrate (check ios/Podfile)."; exit 1; }
+          test -e "$APP/Frameworks/Flutter.framework/Flutter" || { echo "::error::Flutter.framework engine binary missing from the bundle."; exit 1; }
+          test -e "$APP/Frameworks/App.framework/App" || { echo "::error::App.framework (Dart AOT) missing from the bundle."; exit 1; }
+          # Plugins pull their own frameworks (geolocator, sqlite3, etc.).
+          FW_COUNT=$(ls "$APP/Frameworks" | wc -l | tr -d ' ')
+          echo "Embedded frameworks: $FW_COUNT"
+          if [ "$FW_COUNT" -lt 5 ]; then
+            echo "::error::Only $FW_COUNT frameworks embedded — plugin pods are missing. Expected the engine + Dart + ~8 plugin frameworks."
+            exit 1
+          fi
+
           mkdir -p Payload
-          cp -R build/ios/iphoneos/Runner.app Payload/
+          cp -R "$APP" Payload/
           TAG="${{ github.event.inputs.tag }}"
-          zip -qr "explore_journal-${TAG}-ios-unsigned.ipa" Payload
+          # -y preserves any symlinks inside frameworks rather than inlining
+          # copies of their targets.
+          zip -qry "explore_journal-${TAG}-ios-unsigned.ipa" Payload
           ls -lah explore_journal-${TAG}-ios-unsigned.ipa
+          SZ=$(stat -f%z "explore_journal-${TAG}-ios-unsigned.ipa")
+          echo "IPA size: $((SZ / 1024 / 1024)) MB"
+          if [ "$SZ" -lt 15000000 ]; then
+            echo "::error::IPA is under 15 MB — that's far too small for this app and means native frameworks are missing."
+            exit 1
+          fi
 
       - name: Build IPA (signed)
         if: steps.detect.outputs.signed == 'true'
@@ -269,6 +298,12 @@ jobs:
           # `flutter build ipa` emits exactly one .ipa under build/ios/ipa/.
           cp build/ios/ipa/*.ipa "explore_journal-${TAG}-ios.ipa"
           ls -lah explore_journal-${TAG}-ios.ipa
+          SZ=$(stat -f%z "explore_journal-${TAG}-ios.ipa")
+          echo "IPA size: $((SZ / 1024 / 1024)) MB"
+          if [ "$SZ" -lt 15000000 ]; then
+            echo "::error::Signed IPA under 15 MB — native frameworks likely missing (check ios/Podfile)."
+            exit 1
+          fi
 
       - name: Locate IPA
         id: find_ipa
