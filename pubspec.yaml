@@ -119,4 +119,5 @@ flutter:
   uses-material-design: true
   assets:
     - assets/boundaries/
+    - assets/textures/
     - docs/

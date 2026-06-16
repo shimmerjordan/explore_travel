@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'ui/home/home_screen.dart';
 import 'ui/map/map_screen.dart';
+import 'ui/globe/globe_screen.dart';
 import 'ui/layers/layers_screen.dart';
 import 'ui/settings/settings_screen.dart';
 import 'ui/journal/journal_screen.dart';
@@ -86,6 +87,7 @@ class ExploreJournalApp extends ConsumerWidget {
   static final _router = GoRouter(
     routes: [
       GoRoute(path: '/', builder: (_, __) => const MapScreen()),
+      GoRoute(path: '/globe', builder: (_, __) => const GlobeScreen()),
       GoRoute(path: '/menu', builder: (_, __) => const HomeScreen()),
       GoRoute(path: '/layers', builder: (_, __) => const LayersScreen()),
       GoRoute(path: '/settings', builder: (_, __) => const SettingsScreen()),

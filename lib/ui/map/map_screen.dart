@@ -88,6 +88,64 @@ class _MapScreenState extends ConsumerState<MapScreen> {
 
   StreamSubscription<GroupMessage>? _groupMsgSub;
 
+  // ─── "Zoom out 3× past min → 3D globe" gesture ───
+  static const double _kMinZoom = 3.0;
+  bool _atMinZoom = false;
+  int _zoomOutTries = 0; // pinch-in attempts while already fully zoomed out
+  Timer? _zoomTriesReset;
+  final Map<int, Offset> _ptrs = {}; // live pointers for pinch detection
+  double? _pinchStartDist; // two-finger distance at the start of a pinch
+  bool _pinchCounted = false; // already counted this two-finger gesture?
+
+  void _onPointerDown(PointerDownEvent e) {
+    _ptrs[e.pointer] = e.position;
+    if (_ptrs.length == 2) {
+      _pinchStartDist = _twoPtrDist();
+      _pinchCounted = false;
+    }
+  }
+
+  void _onPointerMove(PointerMoveEvent e) {
+    if (!_ptrs.containsKey(e.pointer)) return;
+    _ptrs[e.pointer] = e.position;
+    // Only care about a clean two-finger pinch while already at min zoom.
+    if (_ptrs.length != 2 || _pinchStartDist == null || _pinchCounted) return;
+    if (!_atMinZoom) return;
+    final now = _twoPtrDist();
+    if (now != null && _pinchStartDist! > 0 && now < _pinchStartDist! * 0.72) {
+      _pinchCounted = true; // one count per pinch gesture
+      _registerZoomOutTry();
+    }
+  }
+
+  void _onPointerUp(PointerEvent e) {
+    _ptrs.remove(e.pointer);
+    if (_ptrs.length < 2) {
+      _pinchStartDist = null;
+      _pinchCounted = false;
+    }
+  }
+
+  double? _twoPtrDist() {
+    if (_ptrs.length != 2) return null;
+    final it = _ptrs.values.toList();
+    return (it[0] - it[1]).distance;
+  }
+
+  void _registerZoomOutTry() {
+    _zoomTriesReset?.cancel();
+    setState(() => _zoomOutTries++);
+    if (_zoomOutTries >= 3) {
+      _zoomOutTries = 0;
+      if (mounted) context.push('/globe');
+      return;
+    }
+    // Forget the streak if they pause — avoids accidental accumulation.
+    _zoomTriesReset = Timer(const Duration(seconds: 4), () {
+      if (mounted) setState(() => _zoomOutTries = 0);
+    });
+  }
+
   // Cached journal-pin future: rebuilt only when entries change, so we don't
   // hit the DB on every map frame.
   Future<List<db_t.JournalEntry>>? _journalPinsFuture;
@@ -217,6 +275,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     _groupMsgSub?.cancel();
     _groupPeerSub?.cancel();
     _peerRefreshTimer?.cancel();
+    _zoomTriesReset?.cancel();
     super.dispose();
   }
 
@@ -387,7 +446,16 @@ class _MapScreenState extends ConsumerState<MapScreen> {
       // toolbar hit area.
       body: Stack(
         children: [
-          FlutterMap(
+          // Listener wraps the map purely to OBSERVE pointers (it doesn't
+          // absorb them — the map still gets every gesture) so we can detect
+          // the "pinch-in while already fully zoomed out" attempts that open
+          // the 3D globe.
+          Listener(
+            onPointerDown: _onPointerDown,
+            onPointerMove: _onPointerMove,
+            onPointerUp: _onPointerUp,
+            onPointerCancel: _onPointerUp,
+            child: FlutterMap(
             mapController: _mapCtrl,
             options: MapOptions(
               initialCenter: _center,
@@ -433,6 +501,17 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                     e is MapEventMoveEnd) {
                   if (!mounted) return;
                   setState(() => _mapRotation = e.camera.rotation);
+                }
+                // Track whether we're pressed against the zoom floor; that's
+                // the only time pinch-in attempts count toward the 3D globe.
+                final atMin = e.camera.zoom <= _kMinZoom + 0.05;
+                if (atMin != _atMinZoom) {
+                  if (mounted) setState(() => _atMinZoom = atMin);
+                }
+                // Zooming back in cancels the streak.
+                if (!atMin && _zoomOutTries != 0) {
+                  _zoomTriesReset?.cancel();
+                  if (mounted) setState(() => _zoomOutTries = 0);
                 }
               },
               onTap: (tapPos, latlng) => _onMapTap(latlng, activeLayerId),
@@ -540,6 +619,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                   },
                 ),
             ],
+          ),
           ),
           if (_editMode != _EditMode.none)
             Positioned(
@@ -816,6 +896,31 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                   if (_wgsLat != null) _simLat = _wgsLat!;
                   if (_wgsLng != null) _simLng = _wgsLng!;
                 }),
+              ),
+            ),
+          // Hint that appears once the user starts pinching at the zoom
+          // floor, guiding them into the 3D globe.
+          if (_atMinZoom && _zoomOutTries > 0)
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: MediaQuery.of(context).padding.bottom + 90,
+              child: IgnorePointer(
+                child: Center(
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 14, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.62),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: Text(
+                      '🌐 再捏合缩小 ${3 - _zoomOutTries} 次进入 3D 地球',
+                      style: const TextStyle(
+                          color: Colors.white, fontSize: 13),
+                    ),
+                  ),
+                ),
               ),
             ),
         ],
