@@ -112,3 +112,80 @@ XTCP 打洞由 frps 自动协助（natHole），无需额外端口配置；服�
 - **roster 依赖 dashboard**：不开 frps webServer 时，只能手动加 Peer ID。
 - **reload 行为**：`UpdateAllConfigurer` 不可用的 frp 版本会退化为重启 frpc，已建隧道会短暂断开重连。
 - 以上 Dart 侧逻辑只过了静态分析，端到端打洞务必真机 + 真实 frps 验证。
+
+---
+
+## 首次 CI 排查 checklist
+
+两个 gomobile 步骤是 `continue-on-error`，所以即使全挂，APK/IPA 也会照常产出（只是不带
+frp）。判断 frp 到底有没有进包：看 **Build embedded frpc** 那步的日志，结尾应有
+`frpmobile.aar`（几 MB）或 `Frpmobile.xcframework/` 列出来；没有就是没构建成功，按下面逐条查。
+
+### A. `gomobile bind` 编译失败（最可能）
+
+frp 的嵌入 API 在小版本间会变。[native/frpmobile/frp.go](../native/frpmobile/frp.go) 写的是 v0.5x
+的形态，报错对照改：
+
+| 报错关键字 | 含义 / 改法 |
+|---|---|
+| `client.NewService` undefined / 签名不符 | 该 frp 版本的 `ServiceOptions` 字段名变了。`go doc github.com/fatedier/frp/client.ServiceOptions` 看真实字段，对应改 `New().Start()` 里的构造。 |
+| `config.LoadClientConfig` undefined | 加载函数改名/改包。常见替代：`pkg/config.LoadConfigure` 或 `pkg/config/load`。`go doc github.com/fatedier/frp/pkg/config` 查。 |
+| `validation.ValidateAllClientConfig` undefined | 校验包路径变了或返回值变了；查不到就**直接删掉校验调用**（非必需，frpc 启动时也会校验）。 |
+| `svc.UpdateAllConfigurer` undefined | 该版本不支持运行时热更。把 `Reload()` 改成 `e.Start(cfg)`（全量重启），并接受隧道会短暂重连。 |
+| `ProxyConfigurer` / `VisitorConfigurer` 类型不符 | v1 配置类型名变了，按 `go doc .../pkg/config/v1` 的真实类型改 `parse()` 返回值。 |
+
+**最稳的版本对策**：先 `cd native/frpmobile && go get github.com/fatedier/frp@vX.Y.Z` 钉到一个你查过
+API 的 tag（go.mod 现钉 v0.58.1），再 `go mod tidy`。改完务必本地 `gomobile bind` 跑通再推 CI——
+CI 迭代一轮好几分钟，本地（有 Go+NDK 的机器）调最快。
+
+### B. gomobile 符号名对不上（编译过了但链接/运行期报错）
+
+`gomobile bind` 的命名规则可能随版本微调。**确认真实名字**：
+
+- Android：解压 `frpmobile.aar`，看 `classes.jar` 里 `frpmobile/` 下的类名
+  （`unzip -l frpmobile.aar` → `javap -classpath classes.jar frpmobile.Frpmobile`）。
+  [FrpBridge.kt](../android/app/src/main/kotlin/com/explorejournal/explore_journal/FrpBridge.kt)
+  里用到的是：工厂类 `frpmobile.Frpmobile` 的静态 `new_()`、实例类 `frpmobile.Engine` 的
+  `start/reload/stop/running/setLogSink`、接口 `frpmobile.LogSink`。名字不符就改这几个常量/方法名。
+- iOS：看 `Frpmobile.xcframework/.../Headers/Frpmobile.objc.h`（gomobile 生成的头）。
+  [AppDelegate.swift](../ios/Runner/AppDelegate.swift) 里用的是 `FrpmobileNew()`、`FrpmobileEngine`、
+  `FrpmobileLogSinkProtocol`。Swift 找不到符号时按头文件里的真实名改。
+- Go 端可加 `//gobind` 注释或重命名导出标识符来稳定生成名，但通常不必。
+
+### C. Android NDK 没找到
+
+`gomobile bind -target=android` 需要 NDK。CI 步骤里 `NDK_DIR=$(ls -d "$ANDROID_HOME"/ndk/* ...)`
+自动探测；若日志显示 `Using NDK: <none>`，说明 runner 镜像把 NDK 放在别处或没装：
+- 加一步 `sdkmanager "ndk;27.0.12077973"` 显式安装，或
+- 设 `ANDROID_NDK_HOME` / 传 `gomobile bind -ndk "$NDK_DIR"`。
+- `gomobile init` 报错时确认 `go version` ≥ 1.21 且 `$(go env GOPATH)/bin` 在 `PATH` 里。
+
+### D. iOS 链接了但 `#if canImport(Frpmobile)` 没生效
+
+- 确认 **Build embedded frpc (iOS)** 步骤在 **pod install 之前**跑（已是此顺序）。
+- 确认产物路径正好是 `ios/frpmobile/Frpmobile.xcframework`（Podfile 按这个目录判断是否 vendoring）。
+- `pod install` 日志里应能看到 `Installing frpmobile`。没有就是目录名/路径不对。
+- XCFramework 必须含 `ios-arm64`（真机）切片；只有模拟器切片会导致真机链接失败。
+
+### E. 跑起来了但连不上（运行时）
+
+打开 App 里 **组队配置 → 诊断日志**，按顺序找这些行（tag `frp`）：
+1. `Starting frpc → <addr>:<port>, proxy=ej-<group>.<peerId>` —— frpc 起来了。
+   - 没有这行、而是 `内置 frpc 不可用` → 库没进包，回 A/C/D。
+2. `frpc: ...`（来自 frpc 自身日志）出现 `login to server success` → 和 frps 通了。
+   - 卡在登录 → frps 地址/端口/`token` 不对，或 frps 没开。
+3. `roster: N member(s), initiating to M` → dashboard 发现成员了。
+   - 一直 `0 member(s)` → dashboard URL/账号密码不对，或对方还没上线注册 proxy；
+     可先用「手动添加成员」填对方 Peer ID 验证打洞本身。
+4. `visitor → <peerId> via 127.0.0.1:<port>` 然后 `HANDSHAKE OK` → 打洞 + mesh 握手成功 ✅。
+   - 有 visitor 行但迟迟不 HANDSHAKE → XTCP 打洞失败：把打洞协议 QUIC↔KCP 互换试；
+     仍不行多半是对称 NAT，需换网络或退 WebRTC transport（frp 无 TURN 兜底）。
+   - `解密失败` → 两端"共享口令"不一致（sk 由它派生，必须完全相同）。
+
+### F. frps 侧最易忽略的点
+
+- XTCP 打洞要求 frps 版本与 frpc **大版本一致或兼容**（建议两端同一 minor）。
+- 自动发现要 frps 开 `webServer`（dashboard），且 App 里 dashboard 地址填 `http://host:7500`
+  （**不要**带 `/api/...`，代码会自己拼 `/api/proxy/xtcp`）。
+- frps 默认就支持 natHole，无需为 XTCP 单独开端口；但确认 frps 所在机器的安全组放行了
+  `bindPort`（默认 7000）的 UDP+TCP。
