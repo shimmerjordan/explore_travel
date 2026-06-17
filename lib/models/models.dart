@@ -35,19 +35,29 @@ enum MapStyle { standard, satellite, hybrid }
 ///           it to exchange SDP/ICE, then connects P2P directly. Use this
 ///           when members are on totally separate networks.
 ///
+/// - frp:    No LAN required, minimal server bandwidth. Members run an
+///           embedded frp client (frpc) against a shared frp server (frps)
+///           and hole-punch direct P2P connections via XTCP. The frps only
+///           coordinates the punch; once the tunnel is up, location/chat data
+///           flows peer-to-peer. Interoperates with standard frpc/frps.
+///
 /// `zerotier` is kept as a legacy enum value so older saved settings still
 /// load, but it's now treated identically to `lan` and not exposed in UI.
-enum GroupTransport { lan, zerotier, webrtc }
+///
+/// IMPORTANT: enum order is the on-disk index (see prefs.dart toJson/fromJson)
+/// and the transport int passed to GroupService.create — only ever APPEND.
+enum GroupTransport { lan, zerotier, webrtc, frp }
 
 extension GroupTransportX on GroupTransport {
   /// Maps the legacy `zerotier` value to `lan` so the rest of the code only
-  /// sees two cases.
+  /// sees the live cases.
   GroupTransport get canonical =>
       this == GroupTransport.zerotier ? GroupTransport.lan : this;
 
   String get label => switch (canonical) {
         GroupTransport.lan => '局域网 / 虚拟局域网',
         GroupTransport.webrtc => 'WebRTC + WebDAV 信令',
+        GroupTransport.frp => 'frp XTCP 打洞（内置 frpc）',
         _ => '局域网 / 虚拟局域网',
       };
 
@@ -57,6 +67,9 @@ extension GroupTransportX on GroupTransport {
               '用 UDP 多播自动发现，最简单稳定。',
         GroupTransport.webrtc =>
           '成员不在同一个网络时用这个。配同一个 WebDAV 账户做信令，之后 P2P 直连。',
+        GroupTransport.frp =>
+          '配一台远端 frp 服务端（frps），内置的 frpc 通过 XTCP 打洞直连其他成员。'
+              '服务器只协助打洞、几乎不占带宽，可组大型虚拟局域网。',
         _ => '',
       };
 }

@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:convert';
+import 'package:crypto/crypto.dart' as crypto_hash;
 import 'package:drift/drift.dart' show Value;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:uuid/uuid.dart';
@@ -241,7 +243,26 @@ class GroupLifecycle {
       signalingPath: s.webrtcSignalingPath,
       pollSec: s.webrtcSignalingPollSec,
       iceServers: s.webrtcIceServers,
+      frpServerAddr: s.frpServerAddr ?? '',
+      frpServerPort: s.frpServerPort,
+      frpToken: s.frpToken,
+      frpProtocol: s.frpProtocol,
+      // XTCP `sk` gates who may hole-punch into a member's proxy. Derive it
+      // from the shared passphrase + group id so only members can punch in;
+      // both sides compute the same value with no extra config.
+      frpSecretKey: _frpSecretKey(s.p2pPassphrase, s.groupId ?? ''),
+      frpDashboardUrl: s.frpDashboardUrl,
+      frpDashboardUser: s.frpDashboardUser,
+      frpDashboardPass: s.frpDashboardPass,
     );
+  }
+
+  static String _frpSecretKey(String? passphrase, String groupId) {
+    final seed = '${passphrase ?? ''}|$groupId|ej-xtcp';
+    return crypto_hash.sha256
+        .convert(utf8.encode(seed))
+        .toString()
+        .substring(0, 32);
   }
 
   Future<void> start() async {

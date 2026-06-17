@@ -263,6 +263,112 @@ class GroupSetupScreen extends ConsumerWidget {
               hint: 'stun:... 或 turn:user:pass@host:port',
             ),
           ],
+          if (transport == GroupTransport.frp) ...[
+            const _SectionHeader('frp 服务端'),
+            _Banner(
+              icon: Icons.hub_outlined,
+              title: '工作方式',
+              body:
+                  '所有成员连同一台 frp 服务端（frps），内置的 frpc 用 XTCP 在成员之间'
+                  '打洞直连。服务器只协助打洞，几乎不转发数据，所以带宽占用极小，'
+                  '适合组大型虚拟局域网。\n\n'
+                  'XTCP 的 sk 密钥由"共享口令 + 群组 ID"自动派生 —— 两端填一样的'
+                  '共享口令即可，不必手动配。打洞失败时可把打洞协议切到 kcp。',
+              tint: cs.tertiary,
+            ),
+            _TextSetting(
+              Icons.dns_outlined,
+              'frps 地址',
+              s.frpServerAddr ?? '',
+              (v) => n.update((p) => p.copyWith(frpServerAddr: v.trim())),
+              hint: '公网 IP 或域名',
+            ),
+            _TextSetting(
+              Icons.numbers_rounded,
+              'frps 端口',
+              '${s.frpServerPort}',
+              (v) => n.update((p) =>
+                  p.copyWith(frpServerPort: int.tryParse(v.trim()) ?? p.frpServerPort)),
+              hint: '默认 7000',
+            ),
+            _TextSetting(
+              Icons.key_rounded,
+              'frps Token',
+              s.frpToken ?? '',
+              (v) => n.update((p) => p.copyWith(frpToken: v.trim())),
+              hint: '与 frps auth.token 一致（可空）',
+              obscure: true,
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+              child: Row(
+                children: [
+                  const Icon(Icons.bolt_outlined, size: 18),
+                  const SizedBox(width: 12),
+                  const Text('打洞协议'),
+                  const Spacer(),
+                  ChoiceChip(
+                    label: const Text('QUIC'),
+                    selected: s.frpProtocol == 'quic',
+                    onSelected: (_) =>
+                        n.update((p) => p.copyWith(frpProtocol: 'quic')),
+                  ),
+                  const SizedBox(width: 8),
+                  ChoiceChip(
+                    label: const Text('KCP'),
+                    selected: s.frpProtocol == 'kcp',
+                    onSelected: (_) =>
+                        n.update((p) => p.copyWith(frpProtocol: 'kcp')),
+                  ),
+                ],
+              ),
+            ),
+            const _SectionHeader('成员发现'),
+            _Banner(
+              icon: Icons.travel_explore_rounded,
+              title: '怎么互相找到',
+              body:
+                  '填上 frps 的 dashboard API（在 frps 配置里开 webServer），'
+                  'App 会自动列出同群组在线成员并对每个发起打洞。\n'
+                  '不填也行：直接"手动添加成员"，输入对方的 Peer ID。',
+              tint: cs.secondary,
+            ),
+            _TextSetting(
+              Icons.dashboard_outlined,
+              'dashboard 地址',
+              s.frpDashboardUrl ?? '',
+              (v) => n.update((p) => p.copyWith(frpDashboardUrl: v.trim())),
+              hint: 'http://frps-host:7500（可空）',
+            ),
+            _TextSetting(
+              Icons.person_outline_rounded,
+              'dashboard 用户名',
+              s.frpDashboardUser ?? '',
+              (v) => n.update((p) => p.copyWith(frpDashboardUser: v.trim())),
+              hint: 'webServer.user',
+            ),
+            _TextSetting(
+              Icons.lock_outline_rounded,
+              'dashboard 密码',
+              s.frpDashboardPass ?? '',
+              (v) => n.update((p) => p.copyWith(frpDashboardPass: v.trim())),
+              hint: 'webServer.password',
+              obscure: true,
+            ),
+            ListTile(
+              leading: const Icon(Icons.person_add_alt_1_rounded),
+              title: const Text('手动添加成员'),
+              subtitle: const Text('不用 dashboard 时，输入对方的 Peer ID'),
+              onTap: () => _addManualPeer(context, ref),
+            ),
+            ListTile(
+              leading: const Icon(Icons.bug_report_outlined),
+              title: const Text('诊断日志'),
+              subtitle:
+                  const Text('看 frpc 连接 / 打洞 / 握手过程 —— 连不上先看这里'),
+              onTap: () => context.push('/group/diag'),
+            ),
+          ],
           const SizedBox(height: 40),
         ],
       ),
@@ -467,7 +573,11 @@ class _TransportPicker extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const options = [GroupTransport.lan, GroupTransport.webrtc];
+    const options = [
+      GroupTransport.lan,
+      GroupTransport.webrtc,
+      GroupTransport.frp,
+    ];
     return Column(
       children: options.map((t) {
         return RadioListTile<GroupTransport>(

@@ -32,6 +32,16 @@ target 'Runner' do
   use_modular_headers!
 
   flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
+
+  # Embedded frpc, built by `gomobile bind -target=ios` into
+  # ios/frpmobile/Frpmobile.xcframework (see docs/frp_embed.md / CI). Vendored
+  # only when present so a bare checkout without the gomobile build still
+  # `pod install`s + compiles — AppDelegate's bridge is `#if canImport`-guarded
+  # and degrades to "unsupported" when the module is absent.
+  if File.directory?(File.join(__dir__, 'frpmobile', 'Frpmobile.xcframework'))
+    pod 'frpmobile', :path => 'frpmobile'
+  end
+
   target 'RunnerTests' do
     inherit! :search_paths
   end

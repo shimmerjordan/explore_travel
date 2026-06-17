@@ -70,6 +70,24 @@ class AppSettings {
   /// use, but cross-NAT may need TURN.
   final String webrtcIceServers;
 
+  // ── frp XTCP transport (GroupTransport.frp) ───────────────────────────
+  /// frp server (frps) host/IP. The embedded frpc connects here to coordinate
+  /// XTCP hole punching with other members. Empty disables the transport.
+  final String? frpServerAddr;
+  /// frps bind port (frpc `serverPort`). frp default is 7000.
+  final int frpServerPort;
+  /// frps auth token (frpc `auth.token`). Empty = no token.
+  final String? frpToken;
+  /// XTCP punch protocol once connected: 'quic' (default, robust) or 'kcp'.
+  final String frpProtocol;
+  /// frps dashboard API base URL (e.g. http://host:7500). Used purely to
+  /// auto-discover the group roster: we list xtcp proxies whose name starts
+  /// with the group prefix and open a visitor to each. Empty = no auto
+  /// discovery (members must be added manually).
+  final String? frpDashboardUrl;
+  final String? frpDashboardUser;
+  final String? frpDashboardPass;
+
   // ── Image host (for journal photos) ───────────────────────────────────
   /// 'none' | 'github' | 'custom'
   final String imgHostKind;
@@ -192,6 +210,13 @@ class AppSettings {
     this.webrtcSignalingPath = '/explore_journal/signaling',
     this.webrtcSignalingPollSec = 5,
     this.webrtcIceServers = 'stun:stun.l.google.com:19302',
+    this.frpServerAddr,
+    this.frpServerPort = 7000,
+    this.frpToken,
+    this.frpProtocol = 'quic',
+    this.frpDashboardUrl,
+    this.frpDashboardUser,
+    this.frpDashboardPass,
     this.imgHostKind = 'none',
     this.githubPat,
     this.githubOwner,
@@ -264,6 +289,13 @@ class AppSettings {
     String? webrtcSignalingPath,
     int? webrtcSignalingPollSec,
     String? webrtcIceServers,
+    String? frpServerAddr,
+    int? frpServerPort,
+    String? frpToken,
+    String? frpProtocol,
+    String? frpDashboardUrl,
+    String? frpDashboardUser,
+    String? frpDashboardPass,
     String? imgHostKind,
     String? githubPat,
     String? githubOwner,
@@ -335,6 +367,13 @@ class AppSettings {
         webrtcSignalingPollSec:
             webrtcSignalingPollSec ?? this.webrtcSignalingPollSec,
         webrtcIceServers: webrtcIceServers ?? this.webrtcIceServers,
+        frpServerAddr: frpServerAddr ?? this.frpServerAddr,
+        frpServerPort: frpServerPort ?? this.frpServerPort,
+        frpToken: frpToken ?? this.frpToken,
+        frpProtocol: frpProtocol ?? this.frpProtocol,
+        frpDashboardUrl: frpDashboardUrl ?? this.frpDashboardUrl,
+        frpDashboardUser: frpDashboardUser ?? this.frpDashboardUser,
+        frpDashboardPass: frpDashboardPass ?? this.frpDashboardPass,
         imgHostKind: imgHostKind ?? this.imgHostKind,
         githubPat: githubPat ?? this.githubPat,
         githubOwner: githubOwner ?? this.githubOwner,
@@ -420,6 +459,13 @@ class AppSettings {
         'webrtcSignalingPath': webrtcSignalingPath,
         'webrtcSignalingPollSec': webrtcSignalingPollSec,
         'webrtcIceServers': webrtcIceServers,
+        'frpServerAddr': frpServerAddr,
+        'frpServerPort': frpServerPort,
+        'frpToken': frpToken,
+        'frpProtocol': frpProtocol,
+        'frpDashboardUrl': frpDashboardUrl,
+        'frpDashboardUser': frpDashboardUser,
+        'frpDashboardPass': frpDashboardPass,
         'imgHostKind': imgHostKind,
         'githubPat': githubPat,
         'githubOwner': githubOwner,
@@ -501,6 +547,13 @@ class AppSettings {
             (j['webrtcSignalingPollSec'] as num?)?.toInt() ?? 5,
         webrtcIceServers:
             j['webrtcIceServers'] ?? 'stun:stun.l.google.com:19302',
+        frpServerAddr: j['frpServerAddr'],
+        frpServerPort: (j['frpServerPort'] as num?)?.toInt() ?? 7000,
+        frpToken: j['frpToken'],
+        frpProtocol: j['frpProtocol'] ?? 'quic',
+        frpDashboardUrl: j['frpDashboardUrl'],
+        frpDashboardUser: j['frpDashboardUser'],
+        frpDashboardPass: j['frpDashboardPass'],
         imgHostKind: j['imgHostKind'] ?? 'none',
         githubPat: j['githubPat'],
         githubOwner: j['githubOwner'],

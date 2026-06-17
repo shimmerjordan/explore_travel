@@ -75,6 +75,30 @@ jobs:
           channel: stable
           cache: true
 
+      # Embedded frpc for the `frp` group transport. Best-effort: if the
+      # gomobile build fails, the APK still builds WITHOUT frp (gradle only
+      # links libs/frpmobile.aar when present; the bridge degrades to
+      # "unsupported"). So a frp-toolchain hiccup never blocks the release.
+      - name: Set up Go (embedded frpc)
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - name: Build embedded frpc (Android AAR)
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          NDK_DIR=$(ls -d "$ANDROID_HOME"/ndk/* 2>/dev/null | sort -V | tail -1 || true)
+          if [ -n "$NDK_DIR" ]; then export ANDROID_NDK_HOME="$NDK_DIR"; fi
+          echo "Using NDK: ${ANDROID_NDK_HOME:-<none>}"
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          gomobile init
+          cd native/frpmobile
+          go mod tidy
+          mkdir -p ../../android/app/libs
+          gomobile bind -target=android -androidapi 23 -o ../../android/app/libs/frpmobile.aar .
+          ls -lah ../../android/app/libs/ || true
+
       # If a release-signing keystore is provided as a secret, decode it
       # and write a `key.properties` that the Gradle config consumes.
       # Without these secrets the step writes nothing and Gradle falls
@@ -170,6 +194,27 @@ jobs:
           flutter-version: ${{ github.event.inputs.flutter_version }}
           channel: stable
           cache: true
+
+      # Embedded frpc for the `frp` group transport. Best-effort: if the
+      # gomobile build fails, the IPA still builds WITHOUT frp (the Podfile
+      # only vendors Frpmobile.xcframework when present; the AppDelegate
+      # bridge is `#if canImport`-guarded). Must run BEFORE pod install so
+      # CocoaPods picks the framework up.
+      - name: Set up Go (embedded frpc)
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - name: Build embedded frpc (iOS XCFramework)
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          gomobile init
+          cd native/frpmobile
+          go mod tidy
+          gomobile bind -target=ios -o ../../ios/frpmobile/Frpmobile.xcframework .
+          ls -lah ../../ios/frpmobile/ || true
 
       - name: Pub get + iOS pod install
         working-directory: .

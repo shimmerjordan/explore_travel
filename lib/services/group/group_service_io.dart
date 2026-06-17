@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import '../p2p/crypto.dart';
+import 'frp_engine.dart';
+import 'frp_group_service_io.dart';
 import 'group_diagnostics.dart';
 import 'group_types.dart';
 import 'multicast_lock_io.dart';
@@ -79,6 +81,7 @@ abstract class GroupService {
   ///   0 → lan         (mDNS + TCP, same wire format as ZT)
   ///   1 → zerotier    (also LAN mDNS + TCP — ZT is just the underlay)
   ///   2 → webrtc      (RTCDataChannel + WebDAV signaling)
+  ///   3 → frp         (embedded frpc XTCP hole punch + TCP mesh)
   static GroupService create({
     required int transport,
     required String selfId,
@@ -96,7 +99,34 @@ abstract class GroupService {
     String signalingPath = '/explore_journal/signaling',
     int pollSec = 5,
     String iceServers = 'stun:stun.l.google.com:19302',
+    // frp-only:
+    String frpServerAddr = '',
+    int frpServerPort = 7000,
+    String? frpToken,
+    String frpProtocol = 'quic',
+    String frpSecretKey = '',
+    String? frpDashboardUrl,
+    String? frpDashboardUser,
+    String? frpDashboardPass,
   }) {
+    if (transport == 3) {
+      return FrpGroupService(
+        selfId: selfId,
+        selfName: selfName,
+        groupId: groupId,
+        selfColor: selfColor,
+        crypto: crypto,
+        engine: FrpEngine.create(),
+        serverAddr: frpServerAddr,
+        serverPort: frpServerPort,
+        token: frpToken,
+        protocol: frpProtocol,
+        secretKey: frpSecretKey,
+        dashboardUrl: frpDashboardUrl,
+        dashboardUser: frpDashboardUser,
+        dashboardPass: frpDashboardPass,
+      );
+    }
     // Legacy: transport==1 (zerotier) is the same wire as lan.
     if (transport == 2) {
       if (!_webrtcSupported) {

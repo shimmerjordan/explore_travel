@@ -79,3 +79,14 @@ android {
 flutter {
     source = "../.."
 }
+
+dependencies {
+    // Embedded frpc, built by `gomobile bind` into app/libs/frpmobile.aar
+    // (see docs/frp_embed.md / CI). Included only when present so a bare
+    // checkout without the gomobile build still compiles — FrpBridge reaches
+    // it via reflection and degrades to "unsupported" when it's missing.
+    val frpAar = file("libs/frpmobile.aar")
+    if (frpAar.exists()) {
+        implementation(files(frpAar))
+    }
+}

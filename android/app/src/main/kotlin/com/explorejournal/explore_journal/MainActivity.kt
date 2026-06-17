@@ -22,6 +22,9 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        // Embedded frp client (frpc) channel — no-ops gracefully when the
+        // gomobile AAR isn't bundled (reflection-based, see FrpBridge).
+        FrpBridge.register(flutterEngine)
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             "explorejournal/multicast_lock"

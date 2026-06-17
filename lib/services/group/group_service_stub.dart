@@ -53,6 +53,14 @@ abstract class GroupService {
     String signalingPath = '/explore_journal/signaling',
     int pollSec = 5,
     String iceServers = 'stun:stun.l.google.com:19302',
+    String frpServerAddr = '',
+    int frpServerPort = 7000,
+    String? frpToken,
+    String frpProtocol = 'quic',
+    String frpSecretKey = '',
+    String? frpDashboardUrl,
+    String? frpDashboardUser,
+    String? frpDashboardPass,
   }) =>
       _NoopGroupService();
 }
