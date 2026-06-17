@@ -213,6 +213,19 @@ class AppDb extends _$AppDb {
       into(trackPoints).insert((p.uuid.present && p.uuid.value.isNotEmpty)
           ? p
           : p.copyWith(uuid: Value(_newUuid())));
+
+  /// Bulk-insert points in one batch (single transaction). Used by track-file
+  /// import where a GPX/KML can carry thousands of points — per-row inserts
+  /// would be far slower. Stamps a fresh UUID on any row lacking one.
+  Future<void> insertPoints(List<TrackPointsCompanion> pts) =>
+      batch((b) => b.insertAll(
+            trackPoints,
+            pts
+                .map((p) => (p.uuid.present && p.uuid.value.isNotEmpty)
+                    ? p
+                    : p.copyWith(uuid: Value(_newUuid())))
+                .toList(),
+          ));
   Future<List<TrackPoint>> pointsBetween(DateTime from, DateTime to) =>
       (select(trackPoints)..where((t) => t.time.isBetweenValues(from, to))).get();
   Future<List<TrackPoint>> pointsForLayer(int layerId) =>
