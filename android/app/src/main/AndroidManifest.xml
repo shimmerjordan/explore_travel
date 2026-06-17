@@ -28,6 +28,11 @@
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO"/>
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
+    <!-- Required so the photo picker / MediaStore returns the original
+         location EXIF instead of stripping it. Without this, GPS-based
+         photo import (light-up-trail / journal-from-photos) gets no
+         coordinates on Android 10+. Runtime-requested before reading EXIF. -->
+    <uses-permission android:name="android.permission.ACCESS_MEDIA_LOCATION"/>
     <application
         android:label="explore_journal"
         android:name="${applicationName}"

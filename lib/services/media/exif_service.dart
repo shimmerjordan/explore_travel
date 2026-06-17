@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'package:exif/exif.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 class ExifGps {
   final double lat;
@@ -11,6 +12,15 @@ class ExifGps {
 /// Reads GPS coordinates from a photo's EXIF metadata. Returns null if the
 /// file has no GPS tags or can't be parsed.
 class ExifService {
+  /// Android 10+ strips the GPS EXIF from gallery photos unless
+  /// ACCESS_MEDIA_LOCATION is granted. Call once before a batch EXIF read so
+  /// [readGps] actually sees coordinates. No-op on non-Android platforms.
+  static Future<void> ensureLocationMetadataAccess() async {
+    if (!Platform.isAndroid) return;
+    final status = await Permission.accessMediaLocation.status;
+    if (!status.isGranted) await Permission.accessMediaLocation.request();
+  }
+
   static Future<ExifGps?> readGps(String path) async {
     try {
       final bytes = await File(path).readAsBytes();

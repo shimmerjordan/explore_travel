@@ -21,25 +21,168 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
   String _query = '';
   int _refresh = 0;
 
+  /// Multi-select state for bulk management. Holds entry ids.
+  final Set<int> _selected = {};
+  bool _selectMode = false;
+
   void _bumpRefresh() => setState(() => _refresh++);
+
+  void _exitSelect() => setState(() {
+        _selectMode = false;
+        _selected.clear();
+      });
+
+  void _toggleSelect(int id) => setState(() {
+        if (!_selected.remove(id)) _selected.add(id);
+        if (_selected.isEmpty) _selectMode = false;
+      });
+
+  Future<void> _deleteSelected(AppDb db) async {
+    final ids = _selected.toList();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('删除手账'),
+        content: Text('确定删除所选的 ${ids.length} 条手账？此操作不可撤销。'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('取消')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final uploadQueue = ref.read(uploadQueueProvider);
+    for (final id in ids) {
+      await uploadQueue.deleteAllForJournal(id);
+      await (db.delete(db.journalEntries)..where((t) => t.id.equals(id))).go();
+      await db
+          .customStatement('DELETE FROM journal_fts WHERE rowid=?', [id]);
+    }
+    if (!mounted) return;
+    _exitSelect();
+    _bumpRefresh();
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text('已删除 ${ids.length} 条手账')));
+  }
+
+  /// Batch-create one journal entry per picked photo. Default title is the
+  /// capture time; location and time come from EXIF, falling back to a
+  /// one-shot current fix (for time: the file's last-modified) when absent.
+  Future<void> _importJournalsFromPhotos(AppDb db) async {
+    final files = await ImagePicker().pickMultiImage();
+    if (files.isEmpty || !mounted) return;
+    await ExifService.ensureLocationMetadataAccess();
+
+    // Lazily resolve a fallback location once for the whole batch — only
+    // hit GPS if at least one photo lacks EXIF coordinates.
+    ({double lat, double lng})? fallbackPos;
+    var fallbackResolved = false;
+    Future<({double lat, double lng})?> fallback() async {
+      if (!fallbackResolved) {
+        fallbackResolved = true;
+        final p = await ref.read(locationServiceProvider).currentOnce();
+        if (p != null) fallbackPos = (lat: p.latitude, lng: p.longitude);
+      }
+      return fallbackPos;
+    }
+
+    final layerId = ref.read(effectiveActiveLayerIdProvider);
+    final uploadQueue = ref.read(uploadQueueProvider);
+    final fmt = DateFormat('yyyy-MM-dd HH:mm');
+    var created = 0;
+    var skipped = 0;
+
+    for (final f in files) {
+      final gps = await ExifService.readGps(f.path);
+      DateTime time = gps?.time ?? DateTime.now();
+      if (gps?.time == null) {
+        try {
+          time = await File(f.path).lastModified();
+        } catch (_) {}
+      }
+      double? lat = gps?.lat;
+      double? lng = gps?.lng;
+      if (lat == null || lng == null) {
+        final fb = await fallback();
+        if (fb == null) {
+          skipped++; // no EXIF GPS and no current fix → can't place it
+          continue;
+        }
+        lat = fb.lat;
+        lng = fb.lng;
+      }
+      final id = await db.insertJournal(JournalEntriesCompanion.insert(
+        time: time,
+        lat: lat,
+        lng: lng,
+        title: fmt.format(time),
+        mediaPaths: Value(f.path),
+        layerId: layerId,
+      ));
+      await uploadQueue.enqueueForJournal(
+        journalId: id,
+        localPaths: [f.path],
+        richContent: '',
+      );
+      created++;
+    }
+
+    if (!mounted) return;
+    _bumpRefresh();
+    final msg = StringBuffer('已从照片创建 $created 条手账');
+    if (skipped > 0) msg.write('，$skipped 张无定位信息已跳过');
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(msg.toString())));
+  }
 
   @override
   Widget build(BuildContext context) {
     final db = ref.watch(dbProvider);
     return Scaffold(
       appBar: AppBar(
-        title: const Text('旅行手账',
-            style: TextStyle(fontWeight: FontWeight.w700)),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.add_rounded),
-            onPressed: () async {
-              final changed =
-                  await showJournalEditor(context, ref, entry: null);
-              if (changed && mounted) _bumpRefresh();
-            },
-          ),
-        ],
+        leading: _selectMode
+            ? IconButton(
+                icon: const Icon(Icons.close_rounded),
+                onPressed: _exitSelect,
+              )
+            : null,
+        title: Text(_selectMode ? '已选 ${_selected.length} 条' : '旅行手账',
+            style: const TextStyle(fontWeight: FontWeight.w700)),
+        actions: _selectMode
+            ? [
+                IconButton(
+                  tooltip: '删除所选',
+                  icon: const Icon(Icons.delete_outline_rounded),
+                  onPressed:
+                      _selected.isEmpty ? null : () => _deleteSelected(db),
+                ),
+              ]
+            : [
+                IconButton(
+                  tooltip: '从照片批量导入手账',
+                  icon: const Icon(Icons.photo_library_outlined),
+                  onPressed: () => _importJournalsFromPhotos(db),
+                ),
+                IconButton(
+                  tooltip: '多选管理',
+                  icon: const Icon(Icons.checklist_rounded),
+                  onPressed: () => setState(() => _selectMode = true),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.add_rounded),
+                  onPressed: () async {
+                    final changed =
+                        await showJournalEditor(context, ref, entry: null);
+                    if (changed && mounted) _bumpRefresh();
+                  },
+                ),
+              ],
         bottom: PreferredSize(
           preferredSize: const Size.fromHeight(56),
           child: Padding(
@@ -83,15 +226,27 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
               final paths =
                   e.mediaPaths.split('\n').where((p) => p.isNotEmpty).toList();
               final preview = quillToPreview(e.richContent);
+              final isSelected = _selected.contains(e.id);
               return Card(
                 margin:
                     const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                color: isSelected
+                    ? Theme.of(context).colorScheme.primaryContainer
+                    : null,
                 child: InkWell(
                   borderRadius: BorderRadius.circular(16),
                   onTap: () async {
+                    if (_selectMode) {
+                      _toggleSelect(e.id);
+                      return;
+                    }
                     final changed =
                         await showJournalViewer(context, ref, e);
                     if (changed && mounted) _bumpRefresh();
+                  },
+                  onLongPress: () {
+                    setState(() => _selectMode = true);
+                    _toggleSelect(e.id);
                   },
                   child: Padding(
                     padding: const EdgeInsets.all(14),
@@ -100,6 +255,21 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
                       children: [
                         Row(
                           children: [
+                            if (_selectMode)
+                              Padding(
+                                padding: const EdgeInsets.only(right: 8),
+                                child: Icon(
+                                  isSelected
+                                      ? Icons.check_circle_rounded
+                                      : Icons.radio_button_unchecked_rounded,
+                                  color: isSelected
+                                      ? Theme.of(context).colorScheme.primary
+                                      : Theme.of(context)
+                                          .colorScheme
+                                          .onSurface
+                                          .withValues(alpha: 0.4),
+                                ),
+                              ),
                             Expanded(
                               child: Text(e.title,
                                   style: Theme.of(context)
@@ -229,7 +399,16 @@ Future<bool> showJournalViewer(
                       itemCount: paths.length,
                       itemBuilder: (_, i) => Padding(
                         padding: const EdgeInsets.only(right: 6),
-                        child: JournalMediaThumb(path: paths[i], size: 80),
+                        child: GestureDetector(
+                          onTap: () => Navigator.of(ctx).push(
+                            MaterialPageRoute<void>(
+                              fullscreenDialog: true,
+                              builder: (_) => _FullscreenGallery(
+                                  paths: paths, initialIndex: i),
+                            ),
+                          ),
+                          child: JournalMediaThumb(path: paths[i], size: 80),
+                        ),
                       ),
                     ),
                   ),
@@ -605,6 +784,100 @@ class JournalMediaThumb extends ConsumerWidget {
         height: size,
         color: Colors.grey.shade300,
         child: child,
+      ),
+    );
+  }
+}
+
+/// Full-screen, swipeable, pinch-to-zoom image viewer. Opened by tapping a
+/// thumbnail in the journal detail popup. Handles all three media kinds the
+/// app stores: local files, plain http(s) URLs, and gh-private:// (decrypted
+/// on the fly by [PrivateAwareImage]).
+class _FullscreenGallery extends ConsumerStatefulWidget {
+  final List<String> paths;
+  final int initialIndex;
+  const _FullscreenGallery({required this.paths, required this.initialIndex});
+  @override
+  ConsumerState<_FullscreenGallery> createState() =>
+      _FullscreenGalleryState();
+}
+
+class _FullscreenGalleryState extends ConsumerState<_FullscreenGallery> {
+  late final PageController _pc =
+      PageController(initialPage: widget.initialIndex);
+  late int _index = widget.initialIndex;
+
+  @override
+  void dispose() {
+    _pc.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final s = ref.watch(settingsProvider);
+    const broken =
+        Icon(Icons.broken_image, color: Colors.white54, size: 48);
+    Widget fullImage(String path) {
+      if (path.startsWith('gh-private://')) {
+        return PrivateAwareImage(
+            url: path,
+            settings: s,
+            fit: BoxFit.contain,
+            errorBuilder: (_) => broken);
+      }
+      if (path.startsWith('http://') || path.startsWith('https://')) {
+        return Image.network(path,
+            fit: BoxFit.contain,
+            errorBuilder: (_, __, ___) => broken);
+      }
+      return Image.file(File(path),
+          fit: BoxFit.contain, errorBuilder: (_, __, ___) => broken);
+    }
+
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: Stack(
+        children: [
+          PageView.builder(
+            controller: _pc,
+            itemCount: widget.paths.length,
+            onPageChanged: (i) => setState(() => _index = i),
+            itemBuilder: (_, i) => InteractiveViewer(
+              minScale: 1,
+              maxScale: 5,
+              child: Center(child: fullImage(widget.paths[i])),
+            ),
+          ),
+          Positioned(
+            top: MediaQuery.of(context).padding.top + 8,
+            right: 8,
+            child: IconButton(
+              icon: const Icon(Icons.close_rounded,
+                  color: Colors.white, size: 28),
+              onPressed: () => Navigator.of(context).pop(),
+            ),
+          ),
+          if (widget.paths.length > 1)
+            Positioned(
+              bottom: MediaQuery.of(context).padding.bottom + 16,
+              left: 0,
+              right: 0,
+              child: Center(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: Colors.black54,
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Text('${_index + 1} / ${widget.paths.length}',
+                      style: const TextStyle(
+                          color: Colors.white, fontSize: 13)),
+                ),
+              ),
+            ),
+        ],
       ),
     );
   }

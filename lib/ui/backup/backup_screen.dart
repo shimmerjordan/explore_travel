@@ -3,10 +3,12 @@ import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import '../../app/providers.dart';
 import '../../core/prefs.dart';
 import '../../services/backup/backup_service.dart';
+import '../../services/fog/fow_compat.dart';
 
 /// 统一备份页：模块选择 + 本地导出/导入 + WebDAV 上传/恢复。
 /// 所有路径都走 [BackupService] 的模块化 JSON 格式 —— 本地文件和 WebDAV
@@ -41,7 +43,7 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('备份与导出',
+        title: const Text('备份与导入',
             style: TextStyle(fontWeight: FontWeight.w700)),
         actions: [
           IconButton(
@@ -153,6 +155,24 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
                 : '先填上面的 WebDAV 配置'),
             enabled: webdavReady && !_busy,
             onTap: (webdavReady && !_busy) ? _restoreFromWebdav : null,
+          ),
+
+          // ── Fog of World 兼容 ─────────────────────────────────────────
+          const _SectionHeader('Fog of World 兼容'),
+          ListTile(
+            leading: const Icon(Icons.file_download_rounded),
+            title: const Text('导入 FOW 数据'),
+            subtitle: const Text(
+                '把世界迷雾 Sync 文件夹的内容放进 documents/fow_import 后点此导入到当前图层'),
+            enabled: !_busy,
+            onTap: _busy ? null : _importFow,
+          ),
+          ListTile(
+            leading: const Icon(Icons.file_upload_rounded),
+            title: const Text('导出为 FOW 格式'),
+            subtitle: const Text('把可见图层的迷雾导出成世界迷雾瓦片到 documents/fow_export'),
+            enabled: !_busy,
+            onTap: _busy ? null : _exportFow,
           ),
 
           // ── 高级 ──────────────────────────────────────────────────────
@@ -354,6 +374,55 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
       setState(() => _status = '导入完成：\n${sum.describe()}');
     } catch (e) {
       setState(() => _status = '导入失败：$e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  // ── Fog of World ──────────────────────────────────────────────────────────
+
+  Future<void> _importFow() async {
+    setState(() {
+      _busy = true;
+      _status = null;
+    });
+    try {
+      final fog = ref.read(fogEngineProvider);
+      final layerId = ref.read(effectiveActiveLayerIdProvider);
+      final docsDir = await getApplicationDocumentsDirectory();
+      final fowDir = '${docsDir.path}/fow_import';
+      final count = await importFowDirectory(
+          dirPath: fowDir, engine: fog, layerId: layerId);
+      ref.read(fogRefreshProvider.notifier).state++;
+      setState(() => _status = count == 0
+          ? '没有读到 FOW 数据。请先把 Sync 文件放进：\n$fowDir'
+          : '已从 FOW 导入 $count 个 block 到当前图层');
+    } catch (e) {
+      setState(() => _status = 'FOW 导入失败：$e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _exportFow() async {
+    setState(() {
+      _busy = true;
+      _status = null;
+    });
+    try {
+      final fog = ref.read(fogEngineProvider);
+      final db = ref.read(dbProvider);
+      final layers = (await db.allLayers())
+          .where((l) => l.visible)
+          .map((l) => l.id)
+          .toList();
+      final docsDir = await getApplicationDocumentsDirectory();
+      final fowDir = '${docsDir.path}/fow_export';
+      final count = await exportFowDirectory(
+          dirPath: fowDir, engine: fog, layerIds: layers);
+      setState(() => _status = '已导出 $count 个 FOW tile 到：\n$fowDir');
+    } catch (e) {
+      setState(() => _status = 'FOW 导出失败：$e');
     } finally {
       if (mounted) setState(() => _busy = false);
     }

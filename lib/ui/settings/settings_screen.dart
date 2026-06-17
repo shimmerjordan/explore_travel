@@ -1,11 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:path_provider/path_provider.dart';
 import '../../app/providers.dart';
 import '../../models/models.dart';
 import '../../services/ai/ai_service.dart';
-import '../../services/fog/fow_compat.dart';
 
 class SettingsScreen extends ConsumerWidget {
   const SettingsScreen({super.key});
@@ -195,73 +193,11 @@ class SettingsScreen extends ConsumerWidget {
               _TextSetting(Icons.smart_toy_rounded, 'AI Model', s.aiModel,
                   (v) => n.update((p) => p.copyWith(aiModel: v))),
               const _AiTestTile(),
-              _SectionHeader('云端备份'),
+              _SectionHeader('备份与导入'),
               _ActionTile(
                 icon: Icons.cloud_sync_rounded,
-                title: 'WebDAV 备份与恢复',
+                title: '备份与导入（本地 / WebDAV / FOW 兼容）',
                 onTap: () => context.push('/backup'),
-              ),
-              _SectionHeader('Fog of World 兼容'),
-              _ActionTile(
-                icon: Icons.file_download_rounded,
-                title: '导入 FOW 数据（Sync 文件夹）',
-                onTap: () async {
-                  final fog = ref.read(fogEngineProvider);
-                  final activeLayer = ref.read(activeLayerIdProvider);
-                  final docsDir = await getApplicationDocumentsDirectory();
-                  final fowDir = '${docsDir.path}/fow_import';
-                  if (context.mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                        content: Text('请将 FOW Sync 文件放入: $fowDir')));
-                  }
-                  try {
-                    final count = await importFowDirectory(
-                      dirPath: fowDir,
-                      engine: fog,
-                      layerId: activeLayer,
-                    );
-                    if (context.mounted) {
-                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                          content: Text('已导入 $count 个 block')));
-                    }
-                    ref.read(fogRefreshProvider.notifier).state++;
-                  } catch (e) {
-                    if (context.mounted) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(content: Text('导入失败：$e')));
-                    }
-                  }
-                },
-              ),
-              _ActionTile(
-                icon: Icons.file_upload_rounded,
-                title: '导出为 FOW 格式',
-                onTap: () async {
-                  final fog = ref.read(fogEngineProvider);
-                  final db = ref.read(dbProvider);
-                  final layers = (await db.allLayers())
-                      .where((l) => l.visible)
-                      .map((l) => l.id)
-                      .toList();
-                  final docsDir = await getApplicationDocumentsDirectory();
-                  final fowDir = '${docsDir.path}/fow_export';
-                  try {
-                    final count = await exportFowDirectory(
-                      dirPath: fowDir,
-                      engine: fog,
-                      layerIds: layers,
-                    );
-                    if (context.mounted) {
-                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                          content: Text('已导出 $count 个 tile 到: $fowDir')));
-                    }
-                  } catch (e) {
-                    if (context.mounted) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(content: Text('导出失败：$e')));
-                    }
-                  }
-                },
               ),
               _SectionHeader('权限与后台'),
               ListTile(
@@ -346,24 +282,6 @@ class SettingsScreen extends ConsumerWidget {
       ),
     );
   }
-}
-
-Future<bool> _confirm(BuildContext context, String msg) async {
-  final r = await showDialog<bool>(
-    context: context,
-    builder: (_) => AlertDialog(
-      content: Text(msg),
-      actions: [
-        TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('取消')),
-        FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('确定')),
-      ],
-    ),
-  );
-  return r ?? false;
 }
 
 class _SectionHeader extends StatelessWidget {

@@ -25,6 +25,7 @@ import 'native_file_image_io.dart';
 import '../../services/map/fog_layer.dart';
 import '../../services/map/tile_providers.dart';
 import '../journal/journal_screen.dart' as journal_ui;
+import '../import/track_import_flow.dart';
 import '../widgets/top_toast.dart';
 
 /// NOTE on 3D tilt: flutter_map is a 2D raster-tile widget — it has
@@ -707,6 +708,17 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                       _editMode == _EditMode.add
                           ? _EditMode.none
                           : _EditMode.add),
+                ),
+                const SizedBox(height: 10),
+                // Import record points from photos' GPS — lights up the trail
+                // at each picked photo's location. Same flow as the layers
+                // page; lives here so it's reachable from the home map too.
+                Tooltip(
+                  message: '从照片定位点亮记录点',
+                  child: _MapFab(
+                    icon: Icons.add_photo_alternate_rounded,
+                    onTap: () => TrackImportFlow.fromPhotos(context, ref),
+                  ),
                 ),
                 const SizedBox(height: 10),
                 _MapFab(
