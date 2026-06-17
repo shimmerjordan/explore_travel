@@ -20,6 +20,19 @@ if (keystorePropertiesFile.exists()) {
 }
 val hasUploadKey = keystoreProperties.getProperty("storeFile") != null
 
+// Committed, stable release key (android/keystore/explore-release.jks). Its
+// whole point is that EVERY build — local and every CI run — signs release
+// APKs with the SAME signature, so users can upgrade in place ("覆盖安装")
+// without the "软件包冲突 / 应用未安装" error. Previously release builds with
+// no key.properties fell back to the *debug* key, which CI regenerates each
+// run → every CI APK had a different signature → no in-place upgrade.
+//
+// This is a sideload signing key (password is public, in-repo) — fine for
+// distributing APKs directly. For Play Store, set the ANDROID_KEYSTORE_*
+// secrets / android/key.properties instead; that path still takes precedence.
+val stableKeystoreFile = rootProject.file("keystore/explore-release.jks")
+val hasStableKey = stableKeystoreFile.exists()
+
 android {
     namespace = "com.explorejournal.explore_journal"
     // flutter_webrtc needs compileSdk >= 36. Take the max so IDE migrators
@@ -59,18 +72,29 @@ android {
                 keyPassword = keystoreProperties.getProperty("keyPassword")
             }
         }
+        if (hasStableKey) {
+            create("stable") {
+                storeFile = stableKeystoreFile
+                storePassword = "explorejournal"
+                keyAlias = "explore"
+                keyPassword = "explorejournal"
+            }
+        }
     }
 
     buildTypes {
         release {
-            // Picks up the upload keystore when CI / the dev provided
-            // one via `android/key.properties`; falls back to the
-            // debug keys so `flutter run --release` still works on a
-            // bare checkout.
-            signingConfig = if (hasUploadKey) {
-                signingConfigs.getByName("upload")
-            } else {
-                signingConfigs.getByName("debug")
+            // Signing precedence for in-place-upgradeable APKs:
+            //   1. android/key.properties  — your own Play Store upload key
+            //   2. committed stable key    — same signature everywhere, so
+            //      覆盖安装 works out of the box
+            //   3. debug key               — last resort (per-machine, NOT
+            //      upgrade-compatible across builds; only on a checkout that
+            //      somehow lacks the committed keystore)
+            signingConfig = when {
+                hasUploadKey -> signingConfigs.getByName("upload")
+                hasStableKey -> signingConfigs.getByName("stable")
+                else -> signingConfigs.getByName("debug")
             }
         }
     }

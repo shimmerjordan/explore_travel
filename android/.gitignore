@@ -13,6 +13,12 @@ key.properties
 **/*.keystore
 **/*.jks
 
+# EXCEPTION: the committed stable *sideload* release key. Intentionally in the
+# repo so every build signs identically and 覆盖安装 (in-place upgrade) works.
+# It is NOT a Play Store key — its password is public. For store uploads use
+# your own key via key.properties (takes precedence; see app/build.gradle.kts).
+!keystore/explore-release.jks
+
 # gomobile-built embedded frpc — produced by CI (docs/frp_embed.md), not
 # committed. Gradle links it only when present.
 app/libs/frpmobile.aar

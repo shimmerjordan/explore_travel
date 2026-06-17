@@ -119,7 +119,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${KEYSTORE_B64:-}" ]; then
-            echo "::notice::No ANDROID_KEYSTORE_BASE64 secret — will build a debug-signed APK."
+            echo "::notice::No ANDROID_KEYSTORE_BASE64 secret — release APK will be signed with the committed stable sideload key (android/keystore/explore-release.jks), so 覆盖安装 works across builds."
             exit 0
           fi
           mkdir -p android/app
@@ -424,9 +424,9 @@ jobs:
                 echo "- \`$bn\` — universal build, installs on every Android device (armv7 / arm64 / x86_64 all included)"
               done
               echo
-              echo "_Signing: production if you configured \`ANDROID_KEYSTORE_BASE64\`, otherwise debug-signed._"
+              echo "_Signing: your own upload key if you set \`ANDROID_KEYSTORE_BASE64\`, otherwise the committed stable sideload key — either way every build signs identically, so 覆盖安装（in-place upgrade）works._"
               echo
-              echo "> **遇到「软件包与现有软件包存在冲突」？** 这是签名不一致导致的（之前装过本地 dev 版，这次是 CI 版 / 反之）。卸载旧版本后重新安装即可。后续要彻底避免，在仓库 Secrets 里配好 \`ANDROID_KEYSTORE_BASE64\` 等四个值，所有 CI 产物都会用同一个上传密钥签名。"
+              echo "> **覆盖安装：** 现在所有 CI / 本地 release 包都用同一个固定密钥签名，可以直接覆盖升级、无需卸载。**仅有一次例外**：如果你机器上还装着本次改动之前的旧包（用的是临时 debug 密钥），那一次需要先卸载旧版再装新版；之后历次升级都不用再卸载了。"
               echo
             fi
 
