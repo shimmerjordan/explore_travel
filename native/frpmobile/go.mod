@@ -7,4 +7,7 @@ go 1.22
 // is stable across v0.52–v0.6x but DO verify against your pinned tag.
 require github.com/fatedier/frp v0.58.1
 
-// `gomobile bind` pulls the rest transitively; run `go mod tidy` in CI.
+// frp's deps are pulled transitively by `go mod tidy` in CI. `gomobile bind`
+// ALSO needs golang.org/x/mobile in the module graph, but frp.go doesn't import
+// it so tidy won't keep it — CI adds it with `go get golang.org/x/mobile@latest`
+// (after tidy) before binding.

@@ -82,7 +82,7 @@ jobs:
       - name: Set up Go (embedded frpc)
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.24'
       - name: Build embedded frpc (Android AAR)
         continue-on-error: true
         run: |
@@ -95,6 +95,11 @@ jobs:
           gomobile init
           cd native/frpmobile
           go mod tidy
+          # `gomobile bind` requires golang.org/x/mobile in the module graph,
+          # but frp.go doesn't import it so `go mod tidy` strips it. Add the
+          # module back explicitly (the module form avoids the host build-
+          # constraint error of `.../bind`). Must be AFTER tidy so it sticks.
+          go get golang.org/x/mobile@latest
           mkdir -p ../../android/app/libs
           gomobile bind -target=android -androidapi 23 -o ../../android/app/libs/frpmobile.aar .
           ls -lah ../../android/app/libs/ || true
@@ -203,7 +208,7 @@ jobs:
       - name: Set up Go (embedded frpc)
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.24'
       - name: Build embedded frpc (iOS XCFramework)
         continue-on-error: true
         run: |
@@ -213,6 +218,11 @@ jobs:
           gomobile init
           cd native/frpmobile
           go mod tidy
+          # `gomobile bind` requires golang.org/x/mobile in the module graph,
+          # but frp.go doesn't import it so `go mod tidy` strips it. Add the
+          # module back explicitly (the module form avoids the host build-
+          # constraint error of `.../bind`). Must be AFTER tidy so it sticks.
+          go get golang.org/x/mobile@latest
           gomobile bind -target=ios -o ../../ios/frpmobile/Frpmobile.xcframework .
           ls -lah ../../ios/frpmobile/ || true
 
