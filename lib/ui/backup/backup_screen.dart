@@ -1,13 +1,16 @@
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:latlong2/latlong.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import '../../app/providers.dart';
 import '../../core/prefs.dart';
 import '../../services/backup/backup_service.dart';
+import '../../services/fog/fog_engine.dart';
 import '../../services/fog/fow_compat.dart';
 
 /// 统一备份页：模块选择 + 本地导出/导入 + WebDAV 上传/恢复。
@@ -43,7 +46,7 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('备份与导入',
+        title: const Text('导出与导入',
             style: TextStyle(fontWeight: FontWeight.w700)),
         actions: [
           IconButton(
@@ -163,14 +166,14 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
             leading: const Icon(Icons.file_download_rounded),
             title: const Text('导入 FOW 数据'),
             subtitle: const Text(
-                '把世界迷雾 Sync 文件夹的内容放进 documents/fow_import 后点此导入到当前图层'),
+                '推荐选「Sync.zip」单个文件（最快）；也可多选 Sync 文件夹里的文件（可从 OneDrive 选，文件多时系统缓存会比较慢）'),
             enabled: !_busy,
             onTap: _busy ? null : _importFow,
           ),
           ListTile(
             leading: const Icon(Icons.file_upload_rounded),
             title: const Text('导出为 FOW 格式'),
-            subtitle: const Text('把可见图层的迷雾导出成世界迷雾瓦片到 documents/fow_export'),
+            subtitle: const Text('把可见图层的迷雾导出为世界迷雾 zip，可保存或分享到任意位置'),
             enabled: !_busy,
             onTap: _busy ? null : _exportFow,
           ),
@@ -371,6 +374,10 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
                 clearBeforeImport:
                     ref.read(settingsProvider).importClearBeforeImport,
               );
+      // A restore can replace journals, layers and fog — nudge the map so
+      // its pins and fog veil refresh without needing an app restart.
+      ref.read(journalRefreshProvider.notifier).state++;
+      ref.read(fogRefreshProvider.notifier).state++;
       setState(() => _status = '导入完成：\n${sum.describe()}');
     } catch (e) {
       setState(() => _status = '导入失败：$e');
@@ -382,26 +389,142 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
   // ── Fog of World ──────────────────────────────────────────────────────────
 
   Future<void> _importFow() async {
-    setState(() {
-      _busy = true;
-      _status = null;
-    });
-    try {
-      final fog = ref.read(fogEngineProvider);
-      final layerId = ref.read(effectiveActiveLayerIdProvider);
-      final docsDir = await getApplicationDocumentsDirectory();
-      final fowDir = '${docsDir.path}/fow_import';
-      final count = await importFowDirectory(
-          dirPath: fowDir, engine: fog, layerId: layerId);
-      ref.read(fogRefreshProvider.notifier).state++;
-      setState(() => _status = count == 0
-          ? '没有读到 FOW 数据。请先把 Sync 文件放进：\n$fowDir'
-          : '已从 FOW 导入 $count 个 block 到当前图层');
-    } catch (e) {
-      setState(() => _status = 'FOW 导入失败：$e');
-    } finally {
-      if (mounted) setState(() => _busy = false);
+    // Capture the long-lived services BEFORE the (possibly very slow) picker:
+    // picking many cloud files can take minutes, during which Android may
+    // destroy/recreate this screen. Holding the engine + providers directly
+    // means the import still completes even if this State is gone by the time
+    // the picker returns; setState is always behind a `mounted` check.
+    final fog = ref.read(fogEngineProvider);
+    final layerId = ref.read(effectiveActiveLayerIdProvider);
+    final fogRefresh = ref.read(fogRefreshProvider.notifier);
+    final fogImportFocus = ref.read(fogImportFocusProvider.notifier);
+    // Expand imported cells into the same penRadius corridors native recording
+    // paints, so FOW data looks/behaves like in-app data (not FoW's thin cells).
+    final penRadius = ref.read(settingsProvider).fogPenRadius;
+
+    // Same picker as "从本地 zip 导入" (reaches OneDrive). Pick the single
+    // Sync.zip for the fast path, or multi-select the loose Sync files.
+    final res = await FilePicker.platform.pickFiles(
+      allowMultiple: true,
+      type: FileType.any,
+      withData: true,
+    );
+    if (res == null || res.files.isEmpty) return;
+
+    final phase = ValueNotifier<String>('正在读取所选文件…');
+    final showUi = mounted;
+    if (mounted) {
+      setState(() => _status = null);
+      // Floating progress dialog. The parse runs in a background isolate and
+      // DB writes happen on drift's isolate, so the spinner actually animates
+      // — the UI thread is free (the old in-place parse froze it for ~10 s).
+      showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        useRootNavigator: true,
+        builder: (_) => PopScope(
+          canPop: false,
+          child: Dialog(
+            child: Padding(
+              padding: const EdgeInsets.all(22),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const SizedBox(
+                      width: 22,
+                      height: 22,
+                      child: CircularProgressIndicator(strokeWidth: 2.6)),
+                  const SizedBox(width: 18),
+                  Flexible(
+                    child: ValueListenableBuilder<String>(
+                      valueListenable: phase,
+                      builder: (_, v, __) => Text(v),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
     }
+
+    String result;
+    try {
+      result = await _runFowImport(
+        res.files,
+        fog: fog,
+        layerId: layerId,
+        penRadiusMeters: penRadius,
+        fogRefresh: fogRefresh,
+        fogImportFocus: fogImportFocus,
+        onPhase: (p) => phase.value = p,
+      );
+    } catch (e) {
+      result = 'FOW 导入失败：$e';
+    } finally {
+      if (showUi && mounted) {
+        Navigator.of(context, rootNavigator: true).pop(); // close the dialog
+      }
+      phase.dispose();
+    }
+    if (mounted) setState(() => _status = result);
+  }
+
+  /// Read → parse (in a background isolate) → batch-import the picked FOW
+  /// inputs, then fly the map to the revealed region. Returns a status string.
+  /// Uses only captured services + [compute], so it completes regardless of
+  /// this screen's lifecycle.
+  Future<String> _runFowImport(
+    List<PlatformFile> files, {
+    required FogEngine fog,
+    required int layerId,
+    required double penRadiusMeters,
+    required StateController<int> fogRefresh,
+    required StateController<LatLng?> fogImportFocus,
+    required void Function(String) onPhase,
+  }) async {
+    onPhase('正在读取所选文件…');
+    final inputs = <({String name, Uint8List bytes})>[];
+    for (final pf in files) {
+      final bytes = pf.bytes ??
+          (pf.path != null ? await File(pf.path!).readAsBytes() : null);
+      if (bytes != null) inputs.add((name: pf.name, bytes: bytes));
+    }
+    if (inputs.isEmpty) return '没有读到所选文件的内容';
+
+    onPhase('正在解析迷雾数据并生成走廊…（${inputs.length} 个文件）');
+    // Parse + expand to penRadius corridors off the UI isolate — ~45k blocks
+    // (and their dilation) would otherwise freeze the app for seconds.
+    final blocks = await compute(
+      parseAndExpandFowInputs,
+      (inputs: inputs, penRadiusMeters: penRadiusMeters),
+    );
+    if (blocks.isEmpty) {
+      return '没有读到 FOW 数据。请选世界迷雾（Fog of World）的 Sync.zip，'
+          '或多选 Sync 文件夹里的文件';
+    }
+
+    onPhase('正在写入 ${blocks.length} 个迷雾块…');
+    final written = await fog.importBlocks(layerId: layerId, blocks: blocks);
+    fogRefresh.state++;
+
+    // Fly the map to the centre of the imported fog (FoW has no track lines,
+    // so cleared fog far from the user is otherwise easy to miss).
+    var sx = 0.0, sy = 0.0;
+    for (final b in blocks) {
+      sx += (b.tileX * FogEngine.tileWidth + b.blockX) * FogEngine.bitmapWidth;
+      sy += (b.tileY * FogEngine.tileWidth + b.blockY) * FogEngine.bitmapWidth;
+    }
+    fogImportFocus.state = LatLng(
+      FogEngine.globalYToLat((sy / blocks.length).round()),
+      FogEngine.globalXToLng((sx / blocks.length).round()),
+    );
+
+    return '已点亮 $written 块迷雾（来自 ${inputs.length} 个文件），'
+        '并已按 ${penRadiusMeters.toStringAsFixed(0)}m 笔刷扩成与原生记录一致的走廊。\n'
+        '注意：FOW 数据只含迷雾、不含轨迹线——已为你跳转到点亮的区域，'
+        '在深色迷雾下最明显。';
   }
 
   Future<void> _exportFow() async {
@@ -416,11 +539,26 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
           .where((l) => l.visible)
           .map((l) => l.id)
           .toList();
-      final docsDir = await getApplicationDocumentsDirectory();
-      final fowDir = '${docsDir.path}/fow_export';
-      final count = await exportFowDirectory(
-          dirPath: fowDir, engine: fog, layerIds: layers);
-      setState(() => _status = '已导出 $count 个 FOW tile 到：\n$fowDir');
+      final bytes = await exportFowArchive(engine: fog, layerIds: layers);
+      if (bytes.isEmpty) {
+        setState(() =>
+            _status = '没有可导出的迷雾数据（请确认有可见且已探索的图层）');
+        return;
+      }
+      // Stage the zip in a temp file and hand it to the system share sheet —
+      // the user picks where to save it or which app to send it to.
+      final dir = await getTemporaryDirectory();
+      final ts = DateTime.now()
+          .toIso8601String()
+          .replaceAll(':', '-')
+          .split('.')
+          .first;
+      final f = File('${dir.path}/fow_export_$ts.zip');
+      await f.writeAsBytes(bytes);
+      if (!mounted) return;
+      setState(() => _status =
+          '已导出 FOW zip（${_fmtBytes(bytes.length)}）—— 选择保存位置或分享');
+      await Share.shareXFiles([XFile(f.path)], subject: 'Fog of World export');
     } catch (e) {
       setState(() => _status = 'FOW 导出失败：$e');
     } finally {

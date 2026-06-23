@@ -1,12 +1,13 @@
 # Explore Journal · 旅行探索
 
 > 一款受 **Fog of World** 启发的零后端旅行/探索 App。
-> 走过即点亮迷雾、WebDAV 备份、AI 旅行规划、ZeroTier 局域网实时同行共享、富文本旅行手账——
-> **所有数据完全在你自己手里。**
+> 走过即点亮迷雾、3D 地球俯瞰足迹、富文本旅行手账、AI 旅行规划、去中心化排行榜、
+> 多通道 P2P 实时同行共享、WebDAV / 本地一键备份——
+> **所有数据完全在你自己手里，没有任何自建后端。**
 
 ![flutter](https://img.shields.io/badge/Flutter-3.32+-02569B?logo=flutter)
-![平台](https://img.shields.io/badge/平台-Android%20%7C%20iOS%20%7C%20Linux%20%7C%20Web%E2%9A%A0-success)
-![license](https://img.shields.io/badge/license-MIT-blue)
+![平台](https://img.shields.io/badge/平台-Android%20%7C%20iOS%20%7C%20Linux%20%7C%20Web-success)
+![license](https://img.shields.io/badge/license-CC%20BY--NC--SA%204.0-lightgrey)
 
 [English README](README.md)
 
@@ -16,18 +17,66 @@
 
 | 模块 | 内容 |
 |------|------|
-| 🗺️ 地图 | OSM / 高德 / Google · 标准 / 卫星 / 混合 · 一键切换 |
-| 🌫️ 迷雾 | 64×64 位图瓦片 · 颜色/浓度/粗细可调 · 点击擦除或新增 |
-| 📍 轨迹 | Android 前台服务（`flutter_foreground_task`，锁屏继续记录） · 三档功耗 · 自动读取照片 EXIF GPS |
-| 🗂️ 图层 | 颜色 + 标签 + 可见性 + 合并 + GPX/KML 导出 |
-| 🌐 探索成就 | 30+ 国家 + 中国 34 省级行政区 + 美/英/日省级 · bbox 网格基础算法 · 可选 GeoJSON 多边形精确判定 |
-| ☁️ 同步 | 直连 **WebDAV**：SQLite + 媒体打包成 ZIP · 手动/自动备份 · 历史版本恢复 |
-| 🤖 AI | OpenAI 兼容协议（硅基流动/OpenAI/DeepSeek/OpenRouter…）· 随机旅行规划 · 根据位置+心情生成搜歌关键词 |
-| 🎵 音乐 | 网易 / QQ / 酷我 / 酷狗 / 咪咕 五大源搜索 · 播放 · 收藏带 GPS · AI 旅行歌单 · 收藏地图视图 |
-| 🖋️ 手账 | Quill 富文本 · 照片/视频附件 · SQLite FTS5 全文搜索 |
-| 🎞️ 回放 | 月度/年度/自定义时间段轨迹动画 · 里程/点数/天数总结 |
-| 🛰️ P2P | mDNS 发现（基于 ZeroTier 虚拟局域网） · 实时路径共享 · 文字聊天 · **AES-GCM-256 端到端加密**（PBKDF2 派生密钥） · WebDAV 信箱模式离线消息 |
-| 💾 数据可迁移 | 一个 SQLite 文件 + 一个 media 目录就是全部数据，标准格式（GPX/KML/GeoJSON），无任何厂商绑定 |
+| 🗺️ 地图 | OSM / 高德 / Google × 标准 / 卫星 / 混合，一键切换 · GCJ-02 ↔ WGS-84 自动换算 · 离线瓦片缓存（最多 10 万块 / 365 天）· 旋转锁定（默认关）+ 指北针 · 位置点在移动（>0.5 m/s）时显示朝向箭头 |
+| 🌫️ 迷雾 | 与 **Fog of World 兼容**的位图瓦片（512×512 网格、每格 128×128 块、每块 64×64 bit，赤道约 9.55 m/像素）· **矢量「扫掠圆盘」轨迹**：沿真实 GPS 点描边后用 dstOut 擦除迷雾，对角线/曲线丝滑无锯齿 · GPS 掉点自动断段（间隔 30s / 异常速度 / 精度 >150m）· 画笔半径(1–50m)/颜色/浓度可调 · 深色蒙版模式 |
+| 🌍 3D 地球 | 在最小缩放再捏一次即进入 · 昼夜纹理球（日照分界线按 UTC 实时计算）· 去过的足迹叠加成热力辉光 · 拖动旋转、捏合缩放、定位飞行 |
+| 📍 记录 | Android 前台服务（锁屏 / Doze 持续记录；进程被杀、重启后若在记录则自动恢复并补齐缓冲）· 三档模式 **高性能 1s/2m · 平衡 10s/15m · 省电 30s/40m** · 双流架构（实时 UI + JSONL 落盘缓冲，防止后台丢点）· 每行 UUID 跨设备去重 · **记录时相机自动跟随**（手动拖动/旋转即暂停，点定位键恢复居中）· GPS 信号格只看「能否拿到定位 + 精度」，静止不动不会掉格 |
+| 🗂️ 图层 | 增删改 / 合并 / 可见性 · 每图层独立线条颜色、浓度(0.1–1)、宽度(2–60m) · 颜色 + 标签 · GPX / KML 导出 |
+| 🖋️ 手账 | Quill 富文本 + 内嵌图片/视频 · 批量导入照片（每张一条，自动读 EXIF GPS 定位）· SQLite **FTS5 全文搜索** · 地图图钉（可单个 / 全局隐藏，**导入后即时刷新**）· 公开 / 私有 + 归属人 · 全屏画廊 |
+| 🧭 探索成就 | **真实面积**进度（已点亮 km² ÷ 地区真实面积，非 bbox 估算）· 190+ ISO 国家 + 省级行政区 · **最小 bbox 归属**避免一个点被多省/多国重复计数 · 访问中「学习」出更精细的地区边界 · 可选 GeoJSON 多边形 |
+| 🏆 排行榜 | **去中心化、仅追加、签名**（每台设备一对 Ed25519 密钥）· LWW 冲突合并 + TOFU 防伪 · 全球 km² + 逐月榜 · 通过 P2P 自动同步 / GitHub PR / 可选 REST 服务 |
+| 🤖 AI 规划 | OpenAI 兼容（硅基流动 / OpenAI / DeepSeek / OpenRouter…，可自定义 base URL）· 流式生成、可中途取消、30 分钟超时 · 历史保留 30 天、回屏自动续上 · 从返回 JSON 渲染迷你地图 + 能量（千卡 / 步数 / 时长）估算 · 生成搜歌关键词 |
+| 🎵 音乐 | **网易 / 酷我 / JOOX 直连后端 + GD聚合兜底** · WebView 抓登录 cookie · 按「地点 + 心情」生成 AI 歌单 · 收藏带 GPS · 收藏地图 · 可向同行广播同步播放 |
+| 🛰️ P2P 同行 | **四种通道**：局域网 UDP 组播 (239.42.42.42) + 子网 TCP 扫描、ZeroTier 等虚拟局域网、WebRTC（WebDAV 信令）、frp XTCP 内网穿透 · 实时位置 / 轨迹共享 · 群聊 + 1:1 私聊 · 对讲(PTT) · 同步放歌 · **AES-GCM-256 端到端**（PBKDF2-SHA256 5 万轮）· WebDAV 离线信箱 · 群组诊断 |
+| ☁️ 导出与导入 | 统一页：**12 个模块**可勾选 · **分块 zip**（迷雾按瓦片、轨迹按月、聊天按对端）· 本地导出/导入 + WebDAV 上传/恢复，同一份字节互通 · 按 UUID **增量合并** · 导出会**剔除密钥字段** |
+| 🌫️ FOW 兼容 | 导入：用系统文件选择器**多选**世界迷雾 Sync 文件夹里的文件（**支持 OneDrive 等云盘**，按文件魔数自动识别 zip / 瓦片）· 导出：打包成 zip 走系统分享，存到任意位置 |
+| 🖼️ 图床 | GitHub 直传（公开 / 私有库）+ jsDelivr / Statically CDN · 自定义图床（URL 模板）· 私有图走 `gh-private://` + PAT 加载器 + LRU 缓存 · 异步上传队列 + 自动重试 · 路径 `traveler/年/月/洲/国/省/市/标题-id/uuid` |
+| 🎞️ 回放 | 按「记录会话」分组（间隔 ≥10 分钟自动断、≥10 点）· 年 / 月筛选 + 区间统计 · 多会话拼接回放 · 1–16× 倍速 · 同行轨迹 + 手账气泡（可隐藏） |
+| 👤 个人资料 | 头像（256×256 JPEG ≤30 KB，base64）· 昵称内联编辑 · peerId 复制 · 头像内嵌进排行榜与同行标记 |
+| 🐞 调试模式 | 隐藏入口（首页版本号连点 10 次）· 1000 条环形日志缓冲 + 过滤 / 分享 · 迷雾 / 记录诊断 · 模拟行走面板（Release 版也可用） |
+| 🔒 安全 | 密钥（PAT / 令牌 / WebDAV 密码 / 同行口令）存 `flutter_secure_storage`（Android Keystore / iOS Keychain）· 备份导出**剔除密钥** · 运行时 HTTP 守卫拒绝**明文连公网**（局域网 HTTP 仍可）· 无埋点、无遥测、无第三方分析 SDK |
+| 💾 数据可迁移 | 全部数据 = 一个 SQLite（schema v6、全表 UUID、FTS5）+ 一个 `media/` 目录 · 标准 GPX / KML / GeoJSON · 无任何厂商绑定 |
+
+---
+
+## 功能详解
+
+下面挑几个不是一句话能讲清、但很影响体验的模块展开说明。
+
+### 🌫️ 迷雾引擎与轨迹渲染
+
+迷雾按 **Fog of World 的瓦片格式**存储：全球 512×512 个瓦片（zoom 9），每个瓦片 128×128 个 block，每个 block 是 64×64 bit 的位图（512 字节，MSB 在前），赤道处约 **9.55 m/像素**。这套格式既用于统计与同步，也保证能和世界迷雾互导。
+
+轨迹**不是**直接画在位图上（那样对角线会有锯齿）。记录时把真实 GPS 点连成折线在 Canvas 上描边，再用 `BlendMode.dstOut` 从深色蒙版里「擦」出走过的走廊，于是对角线和曲线都丝滑。掉点保护：相邻两点间隔 >30 秒、速度异常（≈70 m/s）或精度 >150m 就**断段**，不会在两次定位之间凭空连一条直线。点亮采用「扫掠圆盘」沿线逐像素推进（不是按半径跳步），避免对角线出现扇贝状缺口；单段最多 8192 步以防失控写入。
+
+### 📍 记录与定位的可靠性设计
+
+- **双流**：前台 `LocationService` 喂实时 UI，后台 isolate 把样本落到 `pending_track.jsonl`（`SampleBuffer`）。即便主 isolate 被系统挂起、锁屏、Doze，后台仍在攒点；回到前台 / 冷启动 / 重新开始记录时把缓冲**去重后灌库**。
+- **自动恢复**：若上次在记录中被杀进程或重启，冷启动会自动重新挂起前台服务并补齐缓冲，无需手动再点开始。
+- **去重**：样本按 200ms 时间取整 + 6 位经纬度去重；每行带 UUID，跨设备备份导入也不会重复。
+- **相机跟随**：记录中默认居中跟随你的位置；手动拖动 / 旋转 / 缩放会暂停跟随（定位键图标变为「搜索」样式），点定位键即恢复居中并跟随；开始一次新记录会自动重新打开跟随。
+- **GPS 信号格**：只取决于「这次会话有没有拿到过定位」以及该定位的精度（≤10m 满格、≤30m、≤80m、更差 1 格）。**位置长时间不变不代表没信号**——静止时不会因为「没更新」而掉格。
+
+### 🏆 排行榜的信任模型
+
+完全去中心化：每台设备生成一对 **Ed25519** 密钥，每条榜单记录用规范化 JSON（键排序、无空白）签名。合并时按 `statsAt` 时间戳 **LWW（后写覆盖）**，对同一 peerId 采用 **TOFU**（首次见到的公钥即锁定，拒绝换钥）。同步有三条路：① 经 P2P 通道自动八卦（`lb_hello` 哈希 → `lb_pull` → `lb_batch`）；② 向社区注册仓库提 GitHub PR；③ 可选的 REST 服务（见 [docs/leaderboard-server-api.md](docs/leaderboard-server-api.md)）。逐月榜的 km² 由当月轨迹点数按比例分摊得到。
+
+### 🛰️ P2P 同行的四种通道
+
+App 不依赖任何中心服务器，发现 / 连接同伴有四条独立通道，全部走同一套「换行分隔的 JSON」线协议：
+
+1. **局域网 UDP 组播**：`239.42.42.42:47829` 广播 + 子网 TCP 扫描（端口 47830–47834），Android 加 `MulticastLock`。
+2. **ZeroTier 等虚拟局域网**：ZeroTier / Tailscale / 家庭 Wi-Fi 只是「网络底座」，App 在其上用同样的组播 + TCP 网格发现彼此。
+3. **WebRTC**：用 WebDAV 上的文件交换 SDP/ICE 信令，建立 `RTCDataChannel`。
+4. **frp XTCP 内网穿透**：内置 gomobile 版 frpc，按口令派生的 `secretKey` 校验，自动分配访客端口。
+
+消息可选 **AES-GCM-256** 端到端加密：口令经 **PBKDF2-SHA256（5 万轮 + 固定盐）**派生 256 位密钥，每条消息一个随机 nonce。能力涵盖实时位置 / 轨迹共享、群聊、1:1 私聊、对讲（24kHz AAC、350ms 一块）、同步放歌；对方不在线时走 WebDAV 信箱离线投递。
+
+### ☁️ 导出与导入 / FOW 兼容
+
+「导出与导入」页把数据打成一份**分块 zip**：12 个模块（手账、图层、迷雾瓦片、收藏、轨迹点、聊天、AI 历史、设置、图床记录、地理编码缓存、学习地区、排行榜——排行榜为必含）各自成目录，迷雾按瓦片、轨迹按月、聊天按对端分文件。本地文件、WebDAV 上传是**同一份字节**，可互相搬。导入按 UUID **增量合并**（跳过已存在的行），导出时自动**剔除所有密钥字段**，泄露的归档不会泄露凭据。
+
+**FOW（世界迷雾）兼容**：导入用系统文件选择器**多选**——这个弹窗能进 **OneDrive 等云盘**（SAF 的「选文件夹」反而看不到 OneDrive），进到世界迷雾的 `Sync` 文件夹里多选文件即可；程序按文件魔数自动区分 zip 与原始瓦片。导出则把可见图层的迷雾打包成 zip 走系统分享，存到任意位置或丢进世界迷雾的 Sync 目录。
 
 ---
 
@@ -35,7 +84,7 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  UI · 11 个屏幕 · go_router · Material 3                    │
+│  UI · 20+ 屏幕 · go_router · Material 3                     │
 ├─────────────────────────────────────────────────────────────┤
 │  状态管理：Riverpod 2                                       │
 ├──────────┬─────────────┬─────────────┬──────────────────────┤
@@ -166,7 +215,7 @@ cd build/web && python3 -m http.server 8000
 | Android AAB（上架 Play） | `flutter build appbundle --release` | `build/app/outputs/bundle/release/app-release.aab` |
 | iOS IPA | `flutter build ipa --release` | `build/ios/ipa/explore_journal.ipa` |
 | Linux | `flutter build linux --release` | `build/linux/x64/release/bundle/` |
-| Web | `flutter build web --release` | （暂不可用，见 Roadmap） |
+| Web | `flutter build web --release` | `build/web/`（Drift 用 `sqlite3.wasm`；P2P 与前台服务在浏览器为 no-op，其余可用） |
 
 ### Android Release 签名
 
@@ -289,7 +338,7 @@ PBKDF2-SHA256（5 万轮）从共享口令派生。
 | WebDAV 报 530 / InRelease 错误 | 确认 URL 以 WebDAV 根结尾（如 `https://dav.jianguoyun.com/dav/`） |
 | `pub get` 报 `Could not find package _macros` | 移除 `custom_lint` / `riverpod_lint`（与当前 Dart SDK 不兼容） |
 | iOS `pod install` 失败 | `cd ios && pod repo update && pod install` |
-| Web 构建报 `dart:ffi` 错 | Web 暂不支持，参见 Roadmap |
+| Web 构建卡在 `tree-shake-icons` | 加 `--no-tree-shake-icons` 参数 |
 | `flutter run` 一直卡在 `Running Gradle task 'assembleDebug'…` | 先按上面"加速"步骤预热缓存 |
 
 ### 关于 `flutter run` 慢
@@ -309,46 +358,37 @@ PBKDF2-SHA256（5 万轮）从共享口令派生。
 
 ```
 lib/
-├── main.dart                     入口 + go_router
+├── main.dart / main_native.dart / main_web.dart   入口 + go_router（平台分流）
 ├── app/
 │   ├── providers.dart            Riverpod 全局服务
 │   └── recording_controller.dart 记录管线
 ├── core/prefs.dart               全局设置 + SharedPreferences
-├── models/models.dart            DTO
+├── models/models.dart            DTO（含 RecordingMode 等枚举）
 ├── data/db/
-│   ├── database.dart             Drift schema + helper
+│   ├── database.dart             Drift schema(v6) + helper + FTS5
 │   └── database.g.dart           自动生成
 ├── services/
-│   ├── ai/ai_service.dart        OpenAI 兼容客户端
-│   ├── export/track_export.dart  GPX/KML 进出
-│   ├── fog/fog_engine.dart       迷雾位图算法
-│   ├── geo/geojson_loader.dart   多边形 PIP
-│   ├── location/
-│   │   ├── location_service.dart    前台 GPS
-│   │   └── background_task.dart     前台服务
-│   ├── map/
-│   │   ├── tile_providers.dart   OSM/高德/Google × 标/卫/混
-│   │   └── fog_layer.dart        CustomPainter 叠加层
+│   ├── ai/                       OpenAI 兼容客户端（流式 + 行程 JSON）
+│   ├── export/                   GPX/KML/GeoJSON/FOW 进出
+│   ├── fog/                      迷雾位图引擎 + FOW 兼容 + 扫掠圆盘渲染
+│   ├── geo/                      坐标换算 · 分层地理编码 · 学习地区 · GeoJSON
+│   ├── leaderboard/              Ed25519 签名榜单 + LWW 合并 + 同步
+│   ├── location/                 前台 GPS · 前台服务 · 落盘缓冲
+│   ├── map/                      瓦片源 · 离线缓存 · 迷雾 CustomPainter
 │   ├── media/exif_service.dart   照片 GPS 读取
-│   ├── music/music_service.dart  gdstudio API
-│   ├── p2p/
-│   │   ├── p2p_service.dart      mDNS + Socket
-│   │   └── crypto.dart           AES-GCM via cryptography 包
+│   ├── music/                    网易/酷我/JOOX 直连 + GD 兜底
+│   ├── imghost/                  GitHub/自定义图床 · 上传队列 · 私图加载
+│   ├── group/                    LAN/ZeroTier/WebRTC/frp · 对讲 · 同步
+│   ├── p2p/                      AES-GCM 加密 + 线协议
+│   ├── security/                 安全存储 · HTTP 明文守卫
+│   ├── backup/backup_service.dart 分块 zip 备份 / 恢复
 │   └── webdav/webdav_service.dart
-└── ui/
-    ├── home/         九宫格首页
-    ├── map/          地图 + 迷雾 + 画笔
-    ├── layers/       图层 CRUD + 合并 + 导出
-    ├── settings/     全部配置
-    ├── journal/      Quill 编辑器 + 媒体
-    ├── playback/     轨迹回放 + 统计
-    ├── explore/      国家/行政区进度
-    ├── ai_planner/   AI 旅行规划
-    ├── music/        搜索 · AI 歌单 · 收藏地图
-    └── chat/         P2P 实时聊天
+└── ui/                           home · map · globe · layers · journal ·
+    explore · leaderboard · playback · ai_planner · music · chat ·
+    group_setup · imghost · backup · settings · permissions · debug · about
 ```
 
-总计约 **8200 行 Dart**，单一功能模块单一目录。
+总计约 **2.8 万行 Dart / 103 个文件**，单一功能模块单一目录。
 
 ---
 
@@ -363,9 +403,13 @@ lib/
 - [x] GPX / KML 导出
 - [x] 收藏歌曲地图视图
 - [x] Web 目标：迁移 `NativeDatabase` → `WasmDatabase` + 打包 `sqlite3.wasm` + `drift_worker.js`
-- [ ] 所有内置国家都配上 GeoJSON 多边形（目前仅支持框架）
-- [ ] Quill 工具栏支持图片内嵌（目前是侧栏附件）
-- [ ] 地图瓦片离线缓存
+- [x] 3D 地球俯瞰 + 足迹热力
+- [x] 去中心化签名排行榜（P2P / GitHub PR / 可选 REST）
+- [x] GitHub / 自定义图床 + 私有图加载
+- [x] 多通道 P2P：局域网组播 / WebRTC / frp 内网穿透
+- [x] 地图瓦片离线缓存
+- [x] Quill 富文本内嵌图片
+- [ ] 为所有内置国家配上 GeoJSON 多边形（loader 已就绪，探索页目前仍用 bbox 网格）
 - [ ] Apple Watch / Wear OS 配套
 - [ ] 实时共享地图中显示其他人的移动光标
 
@@ -373,7 +417,9 @@ lib/
 
 ## 协议
 
-MIT — 见 `LICENSE`。
+[**CC BY-NC-SA 4.0**](https://creativecommons.org/licenses/by-nc-sa/4.0/) — 见 `LICENSE`。
+
+可自由使用、修改、分享，**仅限非商业用途**，且衍生作品须以相同协议发布（署名—非商业—相同方式共享）。商业使用需另获作者授权。
 
 ---
 

@@ -215,7 +215,7 @@ class GroupSetupScreen extends ConsumerWidget {
               icon: Icons.cloud_sync_rounded,
               title: '工作方式',
               body:
-                  '所有成员配置同一个 WebDAV 账户（在云端备份页设置）。\n'
+                  '所有成员配置同一个 WebDAV 账户（在导出与导入页设置）。\n'
                   'App 在 WebDAV 上一个共享目录里互投 SDP/ICE 信令文件，'
                   '握手后切换为 P2P 直连（UDP）。\n'
                   '注意：坚果云这类对短间隔请求有限制，把轮询间隔调到 10-15 秒。',

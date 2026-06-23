@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:crypto/crypto.dart' as crypto_hash;
 import 'package:drift/drift.dart' show Value;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:latlong2/latlong.dart';
 import 'package:uuid/uuid.dart';
 import '../core/prefs.dart';
 import '../models/models.dart' show GroupTransportX;
@@ -403,6 +404,21 @@ final effectiveActiveLayerIdProvider = Provider<int>((ref) {
 
 /// Counter that bumps whenever fog tiles are written; used to invalidate cache.
 final fogRefreshProvider = StateProvider<int>((ref) => 0);
+
+/// Counter that bumps whenever journal entries are created, imported, edited
+/// or deleted. The map listens to this to refresh its journal pins — without
+/// it, entries added from another screen (the journal list's photo import, a
+/// backup restore) land in the DB but the map's cached pin list goes stale
+/// and they silently never appear as pins.
+final journalRefreshProvider = StateProvider<int>((ref) => 0);
+
+/// When a FOW import finishes, the centre (WGS-84) of the imported fog. The
+/// map watches this and flies there so the freshly-revealed region is on
+/// screen. FoW Sync data carries ONLY the fog bitmap (no GPS tracks), so the
+/// only visible effect of an import is cleared fog — which is otherwise easy
+/// to miss when it's far from the user's current location. Reset to null
+/// after the map has moved.
+final fogImportFocusProvider = StateProvider<LatLng?>((ref) => null);
 
 /// Last position rendered as the user's "current location pin" on the map.
 /// Updated by [MapScreen]'s location-stream listener (and by the debug

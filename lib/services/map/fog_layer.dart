@@ -7,7 +7,6 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import '../../data/db/database.dart';
 import '../../models/models.dart';
-import '../fog/fog_engine.dart';
 import '../geo/coord_converter.dart';
 
 /// A GPS fix worse than this (in metres) is treated as junk and dropped.
@@ -16,19 +15,20 @@ const double _kMaxAccuracyMeters = 150.0;
 /// Implied speed (m/s) above which two consecutive fixes can't be one walk.
 const double _kMaxSpeedMps = 70.0;
 
-/// Fallback corridor width (metres) for points with a null `width`.
+/// Fallback line width (metres) for points with a null `width`.
 const double _kDefaultTrailWidthMeters = 14.0;
 
 typedef _P = ({LatLng pt, double w});
 
-/// Per-layer style. The single dark veil ("fog") is global; each layer
-/// reveals its own corridor (width [widthMeters]) and, if [lineColor] is
-/// non-null, draws a translucent coloured line along that corridor — a
-/// "line drawn in the fog". [lineColor] already bakes its opacity into the
-/// alpha channel; null = no coloured line (plain reveal).
+/// Per-layer style for the optional translucent COLOURED LINE drawn along a
+/// recorded trail — "a line drawn in the fog". The explored-area fog itself is
+/// rendered as baked map tiles ([FogTileLayer] in `fog_tile_provider.dart`);
+/// this widget only draws the decorative coloured line for layers that set
+/// [lineColor]. Imported Fog-of-World data has no TrackPoints, so it draws
+/// nothing for imports.
 class FogLayerStyle {
   final int layerId;
-  final Color? lineColor;
+  final Color? lineColor; // opacity baked into alpha; null = no line
   final double widthMeters;
   const FogLayerStyle({
     required this.layerId,
@@ -46,25 +46,21 @@ class FogLayerStyle {
   int get hashCode => Object.hash(layerId, lineColor, widthMeters);
 }
 
+/// Screen-space overlay that draws each layer's optional coloured trail line on
+/// top of the fog tiles. Pure decoration — the explored-area reveal lives in
+/// [FogTileLayer].
 class FogLayer extends StatefulWidget {
-  final FogEngine engine;
   final AppDb db;
   final List<FogLayerStyle> layers;
 
-  /// The single fog veil colour (alpha baked in). Light mode = the global
-  /// fog colour/opacity; dark mode = a strong dark scrim. The veil covers
-  /// the map and is erased along every layer's trail to reveal it.
-  final Color veil;
-
+  /// Drives the trail-session split distance (mirrors recording's gap gate).
   final double penRadiusMeters;
   final Object? refreshKey;
   final MapProvider mapProvider;
   const FogLayer({
     super.key,
-    required this.engine,
     required this.db,
     required this.layers,
-    required this.veil,
     required this.penRadiusMeters,
     required this.mapProvider,
     this.refreshKey,
@@ -75,10 +71,16 @@ class FogLayer extends StatefulWidget {
 }
 
 class _FogLayerState extends State<FogLayer> {
+  // Recorded trails grouped into continuous sessions, per layer.
   Map<int, List<List<_P>>> _sessionsByLayer = const {};
   String _trailKey = '';
 
   List<int> get _layerIds => widget.layers.map((l) => l.layerId).toList();
+
+  /// True when at least one layer actually wants a coloured line — avoids
+  /// querying TrackPoints when nothing would be drawn (e.g. pure FOW imports).
+  bool get _anyLine =>
+      widget.layers.any((l) => l.lineColor != null && l.lineColor!.a != 0);
 
   @override
   void didChangeDependencies() {
@@ -93,14 +95,14 @@ class _FogLayerState extends State<FogLayer> {
   }
 
   void _maybeReloadTrail() {
-    final key = '${_layerIds.join(",")}|${widget.refreshKey}';
+    final key = '${_layerIds.join(",")}|${widget.refreshKey}|$_anyLine';
     if (key == _trailKey) return;
     _trailKey = key;
     _loadTrail();
   }
 
   Future<void> _loadTrail() async {
-    final layerIds = _layerIds;
+    final layerIds = _anyLine ? _layerIds : const <int>[];
     if (layerIds.isEmpty) {
       if (mounted && _sessionsByLayer.isNotEmpty) {
         setState(() => _sessionsByLayer = const {});
@@ -155,10 +157,9 @@ class _FogLayerState extends State<FogLayer> {
       child: IgnorePointer(
         child: CustomPaint(
           size: Size(camera.size.x, camera.size.y),
-          painter: _FogPainter(
+          painter: _FogLinePainter(
             camera: camera,
             layers: widget.layers,
-            veil: widget.veil,
             mapProvider: widget.mapProvider,
             sessionsByLayer: _sessionsByLayer,
           ),
@@ -168,33 +169,22 @@ class _FogLayerState extends State<FogLayer> {
   }
 }
 
-class _FogPainter extends CustomPainter {
+class _FogLinePainter extends CustomPainter {
   final MapCamera camera;
   final List<FogLayerStyle> layers;
-  final Color veil;
   final MapProvider mapProvider;
   final Map<int, List<List<_P>>> sessionsByLayer;
 
-  _FogPainter({
+  _FogLinePainter({
     required this.camera,
     required this.layers,
-    required this.veil,
     required this.mapProvider,
     required this.sessionsByLayer,
   });
 
   @override
   void paint(Canvas canvas, Size size) {
-    // Pad for rotation so a rotated viewport's corners stay covered.
-    final c = math.cos(camera.rotationRad).abs();
-    final s = math.sin(camera.rotationRad).abs();
-    final halfW = size.width / 2, halfH = size.height / 2;
-    final padX = (halfW * c + halfH * s) - halfW + 1;
-    final padY = (halfW * s + halfH * c) - halfH + 1;
-    final rect = Rect.fromLTRB(
-        -padX, -padY, size.width + padX, size.height + padY);
-
-    if (layers.isEmpty && veil.a == 0) return;
+    if (layers.isEmpty || sessionsByLayer.isEmpty) return;
 
     final needsGcj = CoordConverter.needsGcj02(mapProvider);
     Offset project(LatLng p) {
@@ -216,8 +206,6 @@ class _FogPainter extends CustomPainter {
         refM;
     double strokePx(double m) => (m * pxPerMeter).clamp(1.0, 600.0);
 
-    // Build a polyline path (in screen space) for a layer's sessions, and a
-    // separate list of single-sample dots.
     void forEachStroke(
       List<List<_P>> sessions,
       void Function(ui.Path path) onPath,
@@ -240,36 +228,6 @@ class _FogPainter extends CustomPainter {
       }
     }
 
-    // ── 1. Fog veil + reveal corridors ──────────────────────────────
-    // One dark veil over the whole map; each layer's trail is erased out of
-    // it (dstOut) so the walked corridor reveals the map beneath.
-    canvas.saveLayer(rect, Paint());
-    canvas.drawRect(rect, Paint()..color = veil);
-    final eraser = Paint()
-      ..blendMode = BlendMode.dstOut
-      ..color = const Color(0xFFFFFFFF)
-      ..strokeCap = StrokeCap.round
-      ..strokeJoin = StrokeJoin.round
-      ..isAntiAlias = true;
-    for (final st in layers) {
-      final w = strokePx(st.widthMeters);
-      forEachStroke(
-        sessionsByLayer[st.layerId] ?? const [],
-        (path) => canvas.drawPath(
-            path,
-            eraser
-              ..style = PaintingStyle.stroke
-              ..strokeWidth = w),
-        (dot) => canvas.drawCircle(
-            dot, w / 2, eraser..style = PaintingStyle.fill),
-      );
-    }
-    canvas.restore();
-
-    // ── 2. Coloured line in the fog ─────────────────────────────────
-    // For layers with a line colour, draw a translucent coloured line along
-    // the same corridor — the "line drawn in the fog". Opacity is baked into
-    // the colour's alpha; transparent / null = no line (plain reveal).
     for (final st in layers) {
       final col = st.lineColor;
       if (col == null || col.a == 0) continue;
@@ -291,9 +249,8 @@ class _FogPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant _FogPainter old) =>
+  bool shouldRepaint(covariant _FogLinePainter old) =>
       old.camera != camera ||
-      old.veil != veil ||
       old.mapProvider != mapProvider ||
       !listEquals(old.layers, layers) ||
       !identical(old.sessionsByLayer, sessionsByLayer);

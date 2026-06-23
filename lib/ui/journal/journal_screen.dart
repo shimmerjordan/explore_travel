@@ -25,7 +25,13 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
   final Set<int> _selected = {};
   bool _selectMode = false;
 
-  void _bumpRefresh() => setState(() => _refresh++);
+  void _bumpRefresh() {
+    setState(() => _refresh++);
+    // Mirror the change to the map so its journal pins stay in sync — this
+    // is the path that was missing for photo-imported entries (they showed
+    // up in this list but never as pins).
+    ref.read(journalRefreshProvider.notifier).state++;
+  }
 
   void _exitSelect() => setState(() {
         _selectMode = false;

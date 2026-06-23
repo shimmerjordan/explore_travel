@@ -124,6 +124,9 @@ class PeerLocations extends Table {
 class AppDb extends _$AppDb {
   AppDb() : super(openConnection());
 
+  /// Test-only: build against an injected executor (e.g. `NativeDatabase.memory()`).
+  AppDb.forTesting(super.e);
+
   @override
   int get schemaVersion => 6;
 
@@ -257,10 +260,39 @@ class AppDb extends _$AppDb {
   Future<void> upsertFogTile(FogTilesCompanion data) =>
       into(fogTiles).insertOnConflictUpdate(data);
 
+  /// Bulk-upsert fog tiles in a single transaction. The composite primary key
+  /// (tileX, tileY, zoom, layerId) makes `insertOrReplace` an upsert, so each
+  /// row must already carry the FINAL merged bitmap. Used by FOW import, where
+  /// a Fog of World "Sync" folder can be ~45k blocks — per-row upserts would be
+  /// tens of thousands of separate transactions (minutes on a phone).
+  Future<void> batchUpsertFogTiles(List<FogTilesCompanion> rows) =>
+      batch((b) =>
+          b.insertAll(fogTiles, rows, mode: InsertMode.insertOrReplace));
+
   Future<List<FogTile>> fogTilesForLayers(List<int> layerIds, int zoom) =>
       (select(fogTiles)
             ..where(
                 (t) => t.layerId.isIn(layerIds) & t.zoom.equals(zoom)))
+          .get();
+
+  /// Fog tiles for [layerIds] at [zoom] whose block-grid coords fall within an
+  /// inclusive (minX..maxX, minY..maxY) window. The map uses this to render
+  /// only the on-screen fog bitmap — imported Fog of World data can be ~45k
+  /// tiles, so drawing them all every frame is hopeless.
+  Future<List<FogTile>> fogTilesInRange(
+    List<int> layerIds,
+    int zoom,
+    int minX,
+    int maxX,
+    int minY,
+    int maxY,
+  ) =>
+      (select(fogTiles)
+            ..where((t) =>
+                t.layerId.isIn(layerIds) &
+                t.zoom.equals(zoom) &
+                t.tileX.isBetweenValues(minX, maxX) &
+                t.tileY.isBetweenValues(minY, maxY)))
           .get();
 
   Future<int> insertJournal(JournalEntriesCompanion j) async {

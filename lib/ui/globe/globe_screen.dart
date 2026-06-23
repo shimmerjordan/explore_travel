@@ -8,6 +8,7 @@ import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart' show Position;
 import '../../app/providers.dart';
+import '../../services/fog/fog_engine.dart';
 
 /// A 3D globe (Google-Earth style) reached by trying to zoom the 2D map out
 /// past its minimum. Real day (Blue-Marble) + night (city-lights) textures
@@ -246,11 +247,35 @@ class _GlobeScreenState extends ConsumerState<GlobeScreen>
     final counts = <int, int>{};
     var total = 0;
     for (final id in ids) {
-      for (final p in await db.pointsForLayer(id)) {
-        final li = ((p.lat + 90) / _cellDeg).floor();
-        final gi = ((p.lng + 180) / _cellDeg).floor();
-        counts[li * mul + gi] = (counts[li * mul + gi] ?? 0) + 1;
-        total++;
+      final pts = await db.pointsForLayer(id);
+      if (pts.isNotEmpty) {
+        for (final p in pts) {
+          final li = ((p.lat + 90) / _cellDeg).floor();
+          final gi = ((p.lng + 180) / _cellDeg).floor();
+          counts[li * mul + gi] = (counts[li * mul + gi] ?? 0) + 1;
+          total++;
+        }
+      } else {
+        // No GPS track for this layer — e.g. a Fog-of-World fog-tile import,
+        // which writes only explored cells (no TrackPoints, no path/time). The
+        // globe is a "where you've explored" heat map and the explored area
+        // *is* the fog, so bin the fog instead. Each fog block (~0.6 km) bins
+        // at its centre, weighted by how many of its 64×64 cells are explored,
+        // so denser exploration still reads brighter.
+        const bw = FogEngine.bitmapWidth;
+        for (final t in await db.fogTilesForLayers([id], FogEngine.tileZoom)) {
+          var c = 0;
+          for (final b in t.bitmap) {
+            if (b != 0) c += _popcount8(b);
+          }
+          if (c == 0) continue;
+          final lat = FogEngine.globalYToLat(t.tileY * bw + bw ~/ 2);
+          final lng = FogEngine.globalXToLng(t.tileX * bw + bw ~/ 2);
+          final li = ((lat + 90) / _cellDeg).floor();
+          final gi = ((lng + 180) / _cellDeg).floor();
+          counts[li * mul + gi] = (counts[li * mul + gi] ?? 0) + c;
+          total += c;
+        }
       }
     }
     _rawCount = total;
@@ -521,6 +546,14 @@ class _Cell {
   const _Cell(this.v, this.intensity);
 }
 
+/// Number of set bits in a byte (0..255) — used to weight a fog block by how
+/// many of its cells are explored when lighting the globe from fog tiles.
+int _popcount8(int b) {
+  b = b - ((b >> 1) & 0x55);
+  b = (b & 0x33) + ((b >> 2) & 0x33);
+  return (b + (b >> 4)) & 0x0F;
+}
+
 class _GlobePainter extends CustomPainter {
   final List<_Cell> cells;
   final ui.Image? glow;
@@ -771,9 +804,12 @@ class _GlobePainter extends CustomPainter {
       if (z2 <= 0) continue;
       final t = cells[ci].intensity;
       final edge = z2.clamp(0.0, 1.0);
-      // Very fine: a lone footprint is ~1 px; density (many overlapping
-      // points), not size, is what builds a big bright area.
-      final diam = (r * (0.003 + 0.003 * t)).clamp(1.0, 4.0);
+      // Very fine: a lone footprint is well under 1 px; density (many
+      // overlapping points), not size, is what builds a big bright area. diam
+      // scales with the globe radius r (= …·zoom); the low floor lets footprints
+      // THIN as you zoom the globe out instead of staying a fixed fat dot —
+      // sparse points fade, dense clusters stay bright via additive blending.
+      final diam = (r * (0.0012 + 0.0012 * t)).clamp(0.3, 1.5);
       final scl = diam / s;
       final b = i * 4;
       rstt[b] = scl; // scos (rotation 0)

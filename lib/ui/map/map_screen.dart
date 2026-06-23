@@ -23,6 +23,7 @@ import '../../services/group/group_service.dart';
 import '../../services/group/group_sync_controller.dart';
 import 'native_file_image_io.dart';
 import '../../services/map/fog_layer.dart';
+import '../../services/map/fog_tile_provider.dart';
 import '../../services/map/tile_providers.dart';
 import '../journal/journal_screen.dart' as journal_ui;
 import '../import/track_import_flow.dart';
@@ -60,6 +61,14 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   /// the map exists).
   double _mapRotation = 0.0;
 
+  /// While recording, the camera auto-follows the user's location, keeping
+  /// it centred. Starts on (the default "always centred" behaviour). Any
+  /// manual pan/rotate gesture flips it off so the user can look around
+  /// without the map yanking back; tapping the locate FAB (or starting a
+  /// fresh recording) turns it back on. Outside of recording it has no
+  /// effect — the camera only ever moves on explicit user action.
+  bool _followCamera = true;
+
   // Raw WGS-84 position — always stored in WGS-84
   double? _wgsLat;
   double? _wgsLng;
@@ -73,10 +82,11 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   /// chip top-center on the map. `null` = we've never received a fix
   /// in this session (cold-start or indoors with no GPS lock).
   double? _accuracyMeters;
-  /// When the last accuracy update arrived. Used by the signal chip to
-  /// switch from "active" colour to "stale" grey when the GPS hasn't
-  /// reported anything for 30 s+ (typically means we're indoors and
-  /// the OS gave up trying).
+  /// When the last accuracy update arrived. Non-null means "we have had at
+  /// least one fix this session", which is all the signal chip needs to
+  /// distinguish "located" from "无定位". It deliberately does NOT decay
+  /// into a "no signal" state over time — a missing update means the user
+  /// is stationary, not that GPS reception was lost.
   DateTime? _accuracyAt;
 
   // ─── Debug simulation ───
@@ -170,6 +180,14 @@ class _MapScreenState extends ConsumerState<MapScreen> {
       if (mounted) setState(_reloadJournalPins);
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      // If a FOW import finished while this screen wasn't mounted (the common
+      // case — import runs from the backup page), fly to the revealed region
+      // now that the map exists.
+      if (!mounted) return;
+      final focus = ref.read(fogImportFocusProvider);
+      if (focus != null) _consumeFogImportFocus(focus);
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
       // If a recording was in progress when the app was last killed (or the
       // service was auto-restarted after a reboot), re-attach the pipeline
       // and fold in whatever the background service buffered while away.
@@ -261,6 +279,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
             _accuracyAt = DateTime.now();
           });
           _publishDisplayPos();
+          _maybeFollowCamera();
         },
         onError: (_) {},
       );
@@ -333,6 +352,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
       _wgsLng = lng;
     });
     _publishDisplayPos();
+    _maybeFollowCamera();
     _feedSimToRecording(lat, lng);
   }
 
@@ -370,6 +390,17 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     final layersAsync = ref.watch(layersProvider);
     final fogRefresh = ref.watch(fogRefreshProvider);
     final recording = ref.watch(recordingActiveProvider);
+    // Re-query journal pins whenever an entry is added/imported/removed from
+    // anywhere (the journal list, a backup restore). Without this the map's
+    // cached pin future goes stale and imported entries never get pins.
+    ref.listen<int>(journalRefreshProvider, (_, __) {
+      if (mounted) setState(_reloadJournalPins);
+    });
+    // After a FOW import, fly to the freshly-revealed region (FoW has no track
+    // lines, so cleared fog far from the user is otherwise easy to miss).
+    ref.listen<LatLng?>(fogImportFocusProvider, (_, next) {
+      if (next != null) _consumeFogImportFocus(next);
+    });
     // Use the EFFECTIVE active id so manual reveals also go to a visible
     // layer — see provider docs for the why.
     final activeLayerId = ref.watch(effectiveActiveLayerIdProvider);
@@ -419,6 +450,12 @@ class _MapScreenState extends ConsumerState<MapScreen> {
           } else {
             final err = await ctrl.start();
             if (!mounted) return;
+            if (err == null) {
+              // Each fresh recording starts in centred-follow mode and snaps
+              // the camera onto the user, regardless of where they'd panned.
+              setState(() => _followCamera = true);
+              _recenterOnUser(zoom: 16);
+            }
             TopToast.show(
               context,
               err ?? '已开始记录，走动几步看看迷雾',
@@ -490,6 +527,15 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                     : InteractiveFlag.all & ~InteractiveFlag.rotate,
                 rotationThreshold: 25.0,
               ),
+              onPositionChanged: (camera, hasGesture) {
+                // A user-driven pan/zoom/rotate breaks auto-follow so the
+                // map stops yanking back to centre while they look around.
+                // Programmatic moves (our own follow re-centring, the locate
+                // FAB) report hasGesture == false, so they don't disarm it.
+                if (hasGesture && _followCamera) {
+                  setState(() => _followCamera = false);
+                }
+              },
               onMapEvent: (e) {
                 // Mirror the camera's rotation into local state so
                 // build() can render the compass chip without ever
@@ -544,15 +590,24 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                 googleKey: settings.googleMapKey,
                 customOsmUrl: settings.customOsmTileUrl,
               ),
-              // Render the veil whenever there are visible layers OR dark
-              // mode is on — in dark mode with no layers it's just a solid
-              // dark scrim over the bright map.
+              // Explored-area fog, baked into real map tiles so it pans/zooms
+              // pixel-for-pixel with the base map (fixed thickness, no custom
+              // per-zoom re-rasterisation). Rendered whenever there are visible
+              // layers OR dark mode is on (empty data → a solid dark scrim).
               if (visibleLayerIds.isNotEmpty || settings.darkMap)
+                FogTileLayer(
+                  db: ref.read(dbProvider),
+                  layerIds: visibleLayerIds,
+                  veil: fogVeil,
+                  mapProvider: settings.mapProvider,
+                  refreshKey: fogRefresh,
+                ),
+              // Optional decorative coloured line along recorded trails (drawn
+              // over the fog tiles). No-op for imported data (no TrackPoints).
+              if (visibleLayerIds.isNotEmpty)
                 FogLayer(
-                  engine: ref.read(fogEngineProvider),
                   db: ref.read(dbProvider),
                   layers: fogStyles,
-                  veil: fogVeil,
                   penRadiusMeters: settings.fogPenRadius,
                   refreshKey: fogRefresh,
                   mapProvider: settings.mapProvider,
@@ -722,7 +777,15 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                 ),
                 const SizedBox(height: 10),
                 _MapFab(
-                  icon: Icons.my_location_rounded,
+                  // Highlighted while actively following during a recording.
+                  // If you've panned away mid-recording it switches to the
+                  // hollow "searching" icon — a cue that one tap re-centres
+                  // and resumes following. Unchanged when not recording.
+                  icon: (recording && !_followCamera)
+                      ? Icons.location_searching_rounded
+                      : Icons.my_location_rounded,
+                  active: recording && _followCamera,
+                  activeColor: const Color(0xFF26A69A),
                   onTap: _gotoCurrent,
                 ),
               ],
@@ -973,7 +1036,53 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     if (go == true && mounted) context.push('/permissions');
   }
 
+  /// Read the live camera zoom, falling back to [fallback] before the map
+  /// has rendered its first frame (reading `_mapCtrl.camera` then throws).
+  double _safeZoom([double fallback = 16]) {
+    try {
+      return _mapCtrl.camera.zoom;
+    } catch (_) {
+      return fallback;
+    }
+  }
+
+  /// Re-centre the camera on the user's current position. Keeps the current
+  /// zoom unless [zoom] is given (the locate FAB passes a fixed zoom so a
+  /// deliberate tap always frames the user nicely).
+  void _recenterOnUser({double? zoom}) {
+    if (_wgsLat == null || _wgsLng == null) return;
+    _mapCtrl.move(_toDisplay(_wgsLat!, _wgsLng!), zoom ?? _safeZoom());
+  }
+
+  /// Fly the camera to the centre of a just-imported FOW region and clear the
+  /// one-shot focus provider. Disarms follow so a live fix doesn't immediately
+  /// yank the camera back off the imported area.
+  void _consumeFogImportFocus(LatLng wgs) {
+    _followCamera = false;
+    final display = _toDisplay(wgs.latitude, wgs.longitude);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      try {
+        _mapCtrl.move(display, 10);
+      } catch (_) {
+        // Map controller not attached yet — safe to ignore; the user can
+        // still pan there manually.
+      }
+    });
+    ref.read(fogImportFocusProvider.notifier).state = null;
+  }
+
+  /// Called on every position update. While recording and follow is armed,
+  /// the camera tracks the user. A no-op otherwise, so panning the map when
+  /// not recording (or after a manual gesture) stays put.
+  void _maybeFollowCamera() {
+    if (!_followCamera) return;
+    if (!ref.read(recordingActiveProvider)) return;
+    _recenterOnUser();
+  }
+
   Future<void> _gotoCurrent() async {
+    // Tapping locate always restores the default centred-follow behaviour.
+    if (!_followCamera) setState(() => _followCamera = true);
     if (_wgsLat != null && _wgsLng != null) {
       final display = _toDisplay(_wgsLat!, _wgsLng!);
       _mapCtrl.move(display, 16);
@@ -2616,35 +2725,17 @@ class _SignalChip extends StatefulWidget {
 }
 
 class _SignalChipState extends State<_SignalChip> {
-  Timer? _tick;
-  @override
-  void initState() {
-    super.initState();
-    // Rebuild every 5 s so the "stale after 30 s" colour change is
-    // accurate without needing a position update to trigger setState.
-    _tick = Timer.periodic(const Duration(seconds: 5), (_) {
-      if (mounted) setState(() {});
-    });
-  }
-
-  @override
-  void dispose() {
-    _tick?.cancel();
-    super.dispose();
-  }
-
-  /// Map accuracy in metres to "bars" (1-4) + colour.
+  /// Map the LAST KNOWN fix accuracy to "bars" (1-4) + colour.
+  ///
+  /// Signal strength depends ONLY on whether the GPS can produce a fix and
+  /// how accurate that fix is — NOT on how recently the position changed.
+  /// A stationary user (or one whose distanceFilter suppresses identical
+  /// updates) still has a perfectly good fix, so we no longer downgrade to
+  /// "信号弱" just because no fresh sample arrived. "No fix at all" is the
+  /// only no-signal state, and that's keyed off [reportedAt] being null.
   ({int bars, Color color, String label}) _classify() {
     if (widget.reportedAt == null) {
       return (bars: 0, color: Colors.grey, label: '无定位');
-    }
-    final age = DateTime.now().difference(widget.reportedAt!);
-    if (age > const Duration(seconds: 30)) {
-      return (
-        bars: 1,
-        color: Colors.orange.shade400,
-        label: '信号弱 · ${age.inSeconds}s 未更新'
-      );
     }
     final acc = widget.accuracyMeters ?? 9999;
     if (acc <= 10) return (bars: 4, color: const Color(0xFF66BB6A), label: '强 · ±${acc.toStringAsFixed(0)} m');

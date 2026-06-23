@@ -17,24 +17,82 @@
 
 | Area | What you get |
 |------|--------------|
-| 🗺️ Maps | OSM / 高德 / Google · standard / satellite · live switching · GCJ-02 ↔ WGS-84 conversion · heading-aware location dot |
+| 🗺️ Maps | OSM / 高德 / Google × standard / satellite / hybrid · live switching · GCJ-02 ↔ WGS-84 conversion · **offline tile cache** (100k tiles / 365 days) · opt-in rotation + compass chip · location dot grows a heading arrow when moving (>0.5 m/s) · **3D globe** (pinch past min zoom → textured day/night sphere with footprint heat-map) |
 | 🌫️ Fog of war | Fog of World–compatible 64×64 bitmap tiles for storage / stats / sync · **vector swept-disk trail rendering**: anti-aliased canvas stroke through actual GPS samples → silky diagonals and curves with no raster aliasing · per-segment GPS-dropout split (no false straight lines across drops) · single-pass gaussian-feathered clear with continuous alpha gradient · brush radius / color / opacity tunable · per-layer |
 | 👤 Profile & avatar | Tap right-top chip → bottom sheet with base64 avatar editor (256×256 / ≤30 KB) · nickname inline edit · peerId copy · avatar inlined into leaderboard entries + peer markers · M3 ripple + scale animations on home tiles |
 | 🏆 Leaderboard | **Decentralised, append-only, signed** · Ed25519 keypair per device · LWW by `statsAt` per peerId · TOFU on publicKey · global km² + month-by-month tabs · auto-merge over the same P2P transport as chat/voice (`lb_hello / lb_pull / lb_batch`) · always-included in backup module · optional GitHub PR to a community registry repo · optional REST server backend ([API spec](docs/leaderboard-server-api.md)) |
-| 📍 Tracking | Android foreground service (`flutter_foreground_task`) · 3 power modes · per-row UUID for cross-device dedup · EXIF GPS auto-tagging |
+| 📍 Tracking | Android foreground service (`flutter_foreground_task`) — survives screen-off / Doze / process-kill and auto-resumes · 3 power modes: **High 1 s / 2 m · Balanced 10 s / 15 m · Saver 30 s / 40 m** · dual-stream (live UI + on-disk JSONL buffer so background points aren't lost) · per-row UUID cross-device dedup · **camera auto-follows while recording** (manual pan opts out; locate FAB re-arms) · GPS signal chip keyed to fix + accuracy, not staleness · EXIF GPS auto-tagging |
 | 🗂️ Layers | Color-coded, taggable, per-layer visibility · in-map dropdown chip · auto-fallback when active layer is hidden/missing |
 | 🌐 Exploration | Real-area progress — revealed km² ÷ region km² (UN country areas) · 10-decimal precision · **smallest-bbox attribution** so a point in Shanghai doesn't double-count into Jiangsu/Zhejiang · global "incl. ocean" + per-country + per-province + learned-from-visits regions |
-| ☁️ Backup | Unified backup page · 11 modules independently selectable · **chunked zip archive** (per-tile fog like Fog of World, per-month track points, per-peer chat) · WebDAV upload / restore · local export & share · all paths share one zip schema · **UUID-based incremental import** |
+| ☁️ Export & Import (导出与导入) | Unified page · **12 modules** independently selectable (leaderboard always included) · **chunked zip archive** (per-tile fog like Fog of World, per-month track points, per-peer chat) · WebDAV upload / restore · local export & share · all destinations share one interchangeable zip schema · **UUID-based incremental import** · secret fields stripped from exports |
+| 🌫️ FOW compat | **Import** via the system file picker — multi-select the files inside a Fog of World "Sync" folder (**reaches OneDrive & other cloud providers**; zip vs raw tiles auto-detected by magic bytes) · **export** packs visible-layer fog into a zip handed to the system share sheet |
 | 🖼️ Image host | Per-journal `public` / `private` level · GitHub direct (Contents API) + jsDelivr/Statically CDN · private repo via raw-with-PAT + in-app authenticated image loader · generic custom host (Chevereto/兰空/EasyImage…) via URL templates · async upload queue + retry · path hierarchy `traveler/yyyy/mm/continent/country/province/city/title-id/uuid.ext` |
 | 🤖 AI | OpenAI-compatible (SiliconFlow / OpenAI / DeepSeek…) · streaming trip planning with manual cancel · 30-min timeout · persistent chat history (30-day retention) · mini-map + energy estimates from emitted JSON · context-aware music keyword generation |
 | 🎵 Music | NetEase / Kuwo / JOOX direct backends + GD聚合 fallback · cookie capture via WebView · AI playlist (place + mood → songs) · favorites map |
 | 🖋️ Journal | Quill rich text with inline image embed · view-first + edit-mode dialog · level / owner picker · map pins with per-pin & global hide · uses current display pin (simulator-aware) as creation location |
 | 🌍 Geocoding | Layered: 0.01° grid cache → 高德 reverse (if key) → system `geocoding` → bbox fallback · learned-regions table grows bbox with every confirmed visit · optional **background prewarm** as map pans |
 | 🎞️ Playback | Per-recording **session** list (auto-split on 10-min gap, ≥10 pts) · year/month filter · period summary · stitched multi-session playback · 1-16× speed · time-clipped peer trails (persisted) · journal bubbles (hideable) |
-| 🛰️ P2P | UDP multicast LAN discovery (`MulticastLock` on Android) + manual peer add · live route sharing · text chat · push-to-talk · music broadcast · **AES-GCM-256 end-to-end** via PBKDF2 · WebDAV mailbox for offline · WebRTC fallback transport |
+| 🛰️ P2P | **4 transports**: LAN UDP multicast + subnet TCP scan (`MulticastLock` on Android) · ZeroTier / virtual-LAN underlay · WebRTC (WebDAV signaling) · frp XTCP hole-punch · live route sharing · group + 1:1 private chat · push-to-talk voice · music broadcast · **AES-GCM-256 end-to-end** via PBKDF2-SHA256 (50k iters) · WebDAV mailbox for offline · group diagnostics |
 | 🐞 Debug mode | Hidden — tap version label on home 10× · log buffer (ring of 1000) with filter/share · fog & recording diagnostics · simulator panel in release builds · "fire test reveal" button |
 | 💾 Portability | Everything in one SQLite + a `media/` folder. Schema v4 with UUIDs. Standard zip backups. No vendor lock-in. |
 | 🔒 Security | Credentials (PATs, tokens, WebDAV password, p2p passphrase) live in **flutter_secure_storage** → Android Keystore / iOS Keychain · backup exports **strip secret fields** so leaked archives don't leak creds · runtime HTTP guard refuses **cleartext to non-private hosts** (LAN HTTP still works) · no analytics, no remote logging, no telemetry, no third-party SDK ad/analytics call |
+
+---
+
+## Features in depth
+
+A few modules that don't fit in one table row:
+
+### 🌫️ Fog engine & trail rendering
+Fog is stored in **Fog of World's tile format** — a 512×512 global tile grid (zoom 9),
+128×128 blocks per tile, each block a 64×64-bit bitmap (512 bytes, MSB-first), ≈9.55 m per
+pixel at the equator. The visible trail is **not** rasterised: live GPS points are stroked
+as a polyline on a Canvas and erased from a dark veil with `BlendMode.dstOut`, so diagonals
+and curves stay crisp with no aliasing. A new segment starts (so no false straight line is
+drawn) whenever the gap exceeds 30 s, the implied speed is absurd, or accuracy is worse than
+150 m. Reveal sweeps a disk pixel-by-pixel along each segment (capped at 8192 steps) to
+avoid scalloping on diagonals. Brush radius (1–50 m), colour, and opacity are tunable per
+layer.
+
+### 📍 Recording reliability
+A foreground `LocationService` feeds the live UI while a background isolate appends samples
+to an on-disk `pending_track.jsonl` buffer — so screen-off, Doze, or a suspended main isolate
+don't drop points. On cold start (or after a process kill / reboot while recording), the
+service re-attaches and drains the buffer, de-duplicated (200 ms-rounded time + 6-decimal
+lat/lng, plus per-row UUIDs for cross-device merges). The camera centres on you while
+recording; a manual pan/rotate/zoom pauses follow (the locate icon switches to "searching"),
+and the locate FAB — or starting a fresh recording — re-arms it. The signal chip reflects
+only whether a fix exists and its accuracy, never how long since the last update.
+
+### 🏆 Leaderboard trust model
+Fully decentralised: each device holds an **Ed25519** keypair and signs every entry over
+canonical JSON. Merges are **last-writer-wins** by `statsAt`, with **trust-on-first-use** per
+peerId (a rotated key for the same id is rejected). Three sync paths: peer-to-peer gossip over
+the same transport as chat (`lb_hello → lb_pull → lb_batch`), a GitHub PR to a community
+registry, or an optional REST server ([API spec](docs/leaderboard-server-api.md)). Monthly
+standings distribute cumulative km² across months in proportion to per-month track-point
+counts.
+
+### 🛰️ P2P transports
+No central server — peers are discovered and connected over any of four interchangeable
+transports, all speaking the same newline-framed JSON protocol: **LAN UDP multicast**
+(`239.42.42.42:47829`) + subnet TCP scan (`MulticastLock` on Android); a **virtual-LAN
+underlay** (ZeroTier / Tailscale / home Wi-Fi — peers are found the same way on all of them);
+**WebRTC** with WebDAV-file SDP/ICE signaling; and **frp XTCP** hole-punching via an embedded
+`frpc`. Messages are optionally sealed with **AES-GCM-256** using a key derived from the
+shared passphrase via PBKDF2-SHA256 (50 000 iterations). Capabilities: live location/trail
+sharing, group + 1:1 chat, push-to-talk (24 kHz AAC, 350 ms chunks), synchronised playback,
+and a WebDAV mailbox for offline delivery.
+
+### ☁️ Export & Import / FOW compat
+The unified page packs everything into one **chunked zip**: 12 modules (journal, layers, fog
+tiles, favorites, track points, chat, AI history, settings, image-host records, geocode cache,
+learned regions, and leaderboard — always included), with fog split per tile, tracks per
+month, chat per peer. Local files and WebDAV uploads are byte-identical and interchangeable;
+import merges by UUID (skipping rows already present) and exports strip every secret field.
+**Fog of World** interop: import multi-selects files via the system picker (which reaches
+**OneDrive** and other cloud providers — unlike the SAF folder picker), auto-detecting zip vs
+raw tiles by magic bytes; export bundles visible-layer fog into a zip handed to the share sheet.
 
 ---
 
@@ -42,7 +100,7 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  UI · 11 screens · go_router · Material 3                   │
+│  UI · 20+ screens · go_router · Material 3                  │
 ├─────────────────────────────────────────────────────────────┤
 │  State management: Riverpod 2                               │
 ├──────────┬─────────────┬─────────────┬──────────────────────┤
@@ -223,8 +281,11 @@ but slightly approximate. To use precise polygons:
    `countries.json` exactly — e.g. `assets/boundaries/中国.geojson`).
 3. Re-run `flutter pub get` (the asset glob picks up new files automatically).
 
-`GeoJsonLoader.tryLoad()` will be called for every country at app startup. Polygon files
-take precedence over bbox; if no polygon is found, bbox grid is used.
+`GeoJsonLoader.tryLoad()` (ray-casting point-in-polygon for Polygon / MultiPolygon /
+FeatureCollection) is ready to consume these files. Note: the exploration screen currently
+scores progress from the **bbox grid**; full per-country polygon scoring is still on the
+roadmap, so dropping in polygons today sharpens point lookups but doesn't yet replace the
+bbox area maths everywhere.
 
 ---
 
@@ -298,20 +359,33 @@ lib/
 │   │   ├── p2p_service.dart     mDNS + sockets
 │   │   └── crypto.dart          AES-GCM via cryptography pkg
 │   └── webdav/webdav_service.dart
+│   ├── leaderboard/   Ed25519-signed, LWW-merged standings
+│   ├── imghost/        GitHub / custom host + upload queue
+│   ├── group/          LAN / ZeroTier / WebRTC / frp + PTT + sync
+│   ├── security/       Secure storage + cleartext-HTTP guard
+│   └── backup/backup_service.dart  Chunked-zip export / import
 └── ui/
     ├── home/         Grid launcher
-    ├── map/          Map + fog + brush
+    ├── map/          Map + fog + brush + recording
+    ├── globe/        3D textured globe + footprint heat-map
     ├── layers/       CRUD + merge + export
-    ├── settings/     Everything configurable
-    ├── journal/      Quill editor + media
-    ├── playback/     Animated replay + stats
+    ├── journal/      Quill editor + media + FTS search
     ├── explore/      Country / region progress
-    ├── ai_planner/   Random trip generator
+    ├── leaderboard/  Global + monthly standings
+    ├── playback/     Animated replay + stats
+    ├── ai_planner/   AI trip generator
     ├── music/        Search · AI playlist · favorites map
-    └── chat/         P2P live chat
+    ├── chat/         P2P group + private chat + PTT
+    ├── group_setup/  Transport picker + diagnostics
+    ├── imghost/      Image-host settings
+    ├── backup/       Export & import (导出与导入)
+    ├── permissions/  Background-location walkthrough
+    ├── settings/     Everything configurable
+    ├── debug/        Hidden log buffer + simulator
+    └── about/        Version, license, contributors
 ```
 
-Total: ~8 000 lines of Dart, organised so a single feature lives in one folder.
+Total: ~28,000 lines of Dart across ~103 files, organised so a single feature lives in one folder.
 
 ---
 
@@ -326,9 +400,13 @@ Total: ~8 000 lines of Dart, organised so a single feature lives in one folder.
 - [x] GPX / KML export
 - [x] Favorites map view
 - [x] Web target: `WasmDatabase` + bundled `sqlite3.wasm` + `drift_worker.js`
-- [ ] GeoJSON polygon support for **all** bundled countries (currently bbox + optional polygon)
-- [ ] Full Quill toolbar with image embed (currently text + side-attached media)
-- [ ] Offline tile cache for maps
+- [x] 3D globe overview with footprint heat-map
+- [x] Decentralised, signed leaderboard (P2P / GitHub PR / optional REST)
+- [x] GitHub / custom image host + private-image loader
+- [x] Multi-transport P2P: LAN multicast / WebRTC / frp hole-punch
+- [x] Offline map-tile cache
+- [x] Quill inline image embed
+- [ ] GeoJSON polygon scoring wired into the exploration screen (loader ready; screen still uses the bbox grid)
 - [ ] Apple Watch / Wear OS companion
 - [ ] Real-time peer cursors on shared map
 

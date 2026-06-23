@@ -1,4 +1,4 @@
-import 'dart:io';
+import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:convert';
 import 'package:archive/archive.dart';
@@ -144,59 +144,56 @@ Uint8List buildFowTile(int tileX, int tileY, Map<(int, int), Uint8List> blocks) 
   return compressed is Uint8List ? compressed : Uint8List.fromList(compressed);
 }
 
-/// Import all FOW tile files from a directory into the engine.
-Future<int> importFowDirectory({
-  required String dirPath,
-  required FogEngine engine,
-  required int layerId,
-}) async {
-  final dir = Directory(dirPath);
-  if (!await dir.exists()) return 0;
-  int imported = 0;
+/// True if [name] could be a FOW tile filename (obfuscated, no extension).
+/// A cheap pre-filter so callers can skip reading non-FOW files; the real
+/// validation is [filenameToTile].
+bool looksLikeFowTileName(String name) =>
+    !name.contains('.') && name.length >= 6 && filenameToTile(name) != null;
 
-  await for (final entity in dir.list()) {
-    if (entity is! File) continue;
-    final name = entity.uri.pathSegments.last;
-    if (name.contains('.') || name.length < 6) continue;
-    final coords = filenameToTile(name);
-    if (coords == null) continue;
+/// A FOW block ready to feed [FogEngine.importBlocks]. A structural record so
+/// fow_compat and fog_engine don't have to import each other's types.
+typedef FowBlockImport = ({
+  int tileX,
+  int tileY,
+  int blockX,
+  int blockY,
+  Uint8List bitmap,
+});
 
-    try {
-      final bytes = await entity.readAsBytes();
-      final tile = parseFowTile(name, Uint8List.fromList(bytes));
-      for (final block in tile.blocks) {
-        await engine.importBlock(
-          tileX: tile.tileX,
-          tileY: tile.tileY,
-          blockX: block.bx,
-          blockY: block.by,
-          bitmap: block.bitmap,
-          layerId: layerId,
-        );
-        imported++;
-      }
-    } catch (_) {
-      // skip corrupt files
-    }
-  }
-  return imported;
+/// Parse one FOW tile file — raw [bytes] keyed by its obfuscated [filename] —
+/// into engine-ready blocks. Returns `[]` if it isn't a valid FOW tile.
+///
+/// This does NOT write to the DB. Callers collect blocks across many files and
+/// hand them to a single batched [FogEngine.importBlocks] — a Fog of World
+/// "Sync" folder is ~45k blocks, so per-block DB writes are unusably slow.
+List<FowBlockImport> fowBlocksFromFile(String filename, Uint8List bytes) {
+  if (!looksLikeFowTileName(filename)) return const [];
+  final tile = parseFowTile(filename, bytes);
+  return [
+    for (final b in tile.blocks)
+      (
+        tileX: tile.tileX,
+        tileY: tile.tileY,
+        blockX: b.bx,
+        blockY: b.by,
+        bitmap: b.bitmap,
+      ),
+  ];
 }
 
-/// Export fog data to FOW tile files in a directory.
-Future<int> exportFowDirectory({
-  required String dirPath,
-  required FogEngine engine,
-  required List<int> layerIds,
-}) async {
-  final dir = Directory(dirPath);
-  if (!await dir.exists()) await dir.create(recursive: true);
-
+/// Build the FOW-format tile files (filename → bytes) for [layerIds].
+/// Shared by both the directory and zip-archive exporters so the tile
+/// grouping/merging logic lives in exactly one place.
+Future<Map<String, Uint8List>> _buildFowFiles(
+  FogEngine engine,
+  List<int> layerIds,
+) async {
   final db = engine.db;
   final allTiles = await db.fogTilesForLayers(layerIds, FogEngine.tileZoom);
-  if (allTiles.isEmpty) return 0;
+  final out = <String, Uint8List>{};
+  if (allTiles.isEmpty) return out;
 
   final tileGroups = <(int, int), Map<(int, int), Uint8List>>{};
-
   for (final t in allTiles) {
     final blockGlobalX = t.tileX;
     final blockGlobalY = t.tileY;
@@ -219,15 +216,211 @@ Future<int> exportFowDirectory({
     }
   }
 
-  int exported = 0;
   for (final entry in tileGroups.entries) {
     final (tileX, tileY) = entry.key;
-    final blocks = entry.value;
     final tileId = tileY * 512 + tileX;
-    final filename = tileIdToFilename(tileId);
-    final data = buildFowTile(tileX, tileY, blocks);
-    await File('$dirPath/$filename').writeAsBytes(data);
-    exported++;
+    out[tileIdToFilename(tileId)] = buildFowTile(tileX, tileY, entry.value);
   }
-  return exported;
+  return out;
+}
+
+/// Export fog data for [layerIds] as a Fog of World-compatible zip archive.
+/// Each visible tile becomes one obfuscated-name file at the archive root —
+/// extract the zip into a Fog of World "Sync" folder to import it there, or
+/// re-import it here via [fowBlocksFromArchive]. Returns an empty list when
+/// there's nothing explored to export.
+Future<Uint8List> exportFowArchive({
+  required FogEngine engine,
+  required List<int> layerIds,
+}) async {
+  final files = await _buildFowFiles(engine, layerIds);
+  if (files.isEmpty) return Uint8List(0);
+  final archive = Archive();
+  for (final entry in files.entries) {
+    archive.addFile(ArchiveFile(entry.key, entry.value.length, entry.value));
+  }
+  final encoded = ZipEncoder().encode(archive);
+  return encoded == null ? Uint8List(0) : Uint8List.fromList(encoded);
+}
+
+/// Parse every FOW tile inside a user-picked zip's [zipBytes] into engine-ready
+/// blocks. Entries may sit at any path inside the zip — only the basename
+/// matters, matching how Fog of World names its Sync files — so both our own
+/// exports and a raw FoW "Sync" folder zipped up will import. Non-FOW/corrupt
+/// entries are skipped.
+List<FowBlockImport> fowBlocksFromArchive(Uint8List zipBytes) {
+  final archive = ZipDecoder().decodeBytes(zipBytes);
+  final out = <FowBlockImport>[];
+  for (final file in archive) {
+    if (!file.isFile) continue;
+    final name = file.name.split('/').last;
+    if (!looksLikeFowTileName(name)) continue;
+    try {
+      out.addAll(
+          fowBlocksFromFile(name, Uint8List.fromList(file.content as List<int>)));
+    } catch (_) {
+      // skip corrupt entries
+    }
+  }
+  return out;
+}
+
+/// Parse a batch of picked inputs (each a `(name, bytes)`) into engine-ready
+/// blocks, expanding any zip (detected by its PK magic bytes) into its tiles.
+///
+/// Pure and top-level so it can run in a background isolate via `compute` — a
+/// full Fog of World "Sync" folder is ~45k blocks and parsing it on the UI
+/// thread freezes the app for ~10 s.
+List<FowBlockImport> parseFowInputs(
+    List<({String name, Uint8List bytes})> inputs) {
+  final out = <FowBlockImport>[];
+  for (final inp in inputs) {
+    final b = inp.bytes;
+    final isZip = b.length >= 4 &&
+        b[0] == 0x50 &&
+        b[1] == 0x4B &&
+        b[2] == 0x03 &&
+        b[3] == 0x04;
+    try {
+      out.addAll(isZip ? fowBlocksFromArchive(b) : fowBlocksFromFile(inp.name, b));
+    } catch (_) {
+      // skip a corrupt input
+    }
+  }
+  return out;
+}
+
+/// Parse FOW inputs AND expand every explored cell into a [penRadiusMeters]
+/// disk, so imported fog matches NATIVELY-recorded corridors instead of FoW's
+/// thin raw cells. Native recording reveals a penRadius disk per GPS fix
+/// (FogEngine.revealPoint); a FoW tile only stores the bare explored cells, so
+/// without this an import looks much thinner than data recorded in-app. Pure +
+/// top-level so the whole thing runs in one `compute` isolate. A
+/// [penRadiusMeters] <= 0 skips expansion (raw cells, the old behaviour).
+List<FowBlockImport> parseAndExpandFowInputs(
+    ({
+      List<({String name, Uint8List bytes})> inputs,
+      double penRadiusMeters
+    }) arg) {
+  final raw = parseFowInputs(arg.inputs);
+  if (arg.penRadiusMeters <= 0 || raw.isEmpty) return raw;
+  return _expandToCorridors(raw, arg.penRadiusMeters);
+}
+
+/// Dilate every set cell in [blocks] by a [penRadiusMeters] disk — the exact
+/// shape [FogEngine.revealPoint] paints — so the result is indistinguishable
+/// from native corridors. The disk radius in PIXELS is derived per source block
+/// from its centre latitude (Web-Mercator metres-per-pixel shrinks toward the
+/// poles), so the GROUND radius stays uniform, matching revealPoint. Dilation
+/// that spills past a block/tile edge is routed to the correct neighbour via
+/// the global block grid. Pure + isolate-safe.
+List<FowBlockImport> _expandToCorridors(
+    List<FowBlockImport> blocks, double penRadiusMeters) {
+  const full = FogEngine.full; // 2^22 px per axis
+  const bw = FogEngine.bitmapWidth; // 64
+  const tw = FogEngine.tileWidth; // 128
+  const earthCirc = 40075016.686;
+
+  // Disk offsets are reused across blocks at the same latitude band.
+  final offsetsByR = <int, List<(int, int)>>{};
+  List<(int, int)> diskOffsets(int r) => offsetsByR.putIfAbsent(r, () {
+        final o = <(int, int)>[];
+        final r2 = r * r;
+        for (int dy = -r; dy <= r; dy++) {
+          for (int dx = -r; dx <= r; dx++) {
+            if (dx * dx + dy * dy <= r2) o.add((dx, dy));
+          }
+        }
+        return o;
+      });
+
+  // Output keyed by global block index: key = (dbY << 16) | dbX, each < 2^16
+  // (full / bw = 2^16). Value is one 512-byte (64×64) block bitmap.
+  final out = <int, Uint8List>{};
+
+  for (final b in blocks) {
+    final blockGx = (b.tileX * tw + b.blockX) * bw;
+    final blockGy = (b.tileY * tw + b.blockY) * bw;
+    final centreLat = FogEngine.globalYToLat(blockGy + bw ~/ 2);
+    final mpp = earthCirc * math.cos(centreLat * math.pi / 180.0) / full;
+    // Cap so a near-pole block can't queue an enormous disk.
+    final rPx = (penRadiusMeters / mpp).ceil().clamp(1, 32);
+    final offs = diskOffsets(rPx);
+    final bm = b.bitmap;
+
+    // Most disk samples for one source cell land in the same target block —
+    // cache it so we hit the map only when the target block changes.
+    int lastDbX = -1, lastDbY = -1;
+    Uint8List? lastBm;
+    for (int py = 0; py < bw; py++) {
+      final rowBase = py * 8;
+      for (int byteCol = 0; byteCol < 8; byteCol++) {
+        final bval = bm[rowBase + byteCol];
+        if (bval == 0) continue;
+        for (int bit = 0; bit < 8; bit++) {
+          if (((bval >> (7 - bit)) & 1) == 0) continue;
+          final gx0 = blockGx + (byteCol << 3) + bit;
+          final gy0 = blockGy + py;
+          for (final (dx, dy) in offs) {
+            final gx = gx0 + dx, gy = gy0 + dy;
+            if (gx < 0 || gy < 0 || gx >= full || gy >= full) continue;
+            final dbX = gx >> 6, dbY = gy >> 6;
+            Uint8List tbm;
+            if (dbX == lastDbX && dbY == lastDbY) {
+              tbm = lastBm!;
+            } else {
+              tbm = out.putIfAbsent(
+                  (dbY << 16) | dbX, () => Uint8List(_bitmapSize));
+              lastDbX = dbX;
+              lastDbY = dbY;
+              lastBm = tbm;
+            }
+            final tpx = gx & 63, tpy = gy & 63;
+            tbm[(tpx >> 3) + (tpy << 3)] |= 1 << (7 - (tpx & 7));
+          }
+        }
+      }
+    }
+  }
+
+  return [
+    for (final e in out.entries)
+      (
+        tileX: (e.key & 0xFFFF) ~/ tw,
+        tileY: (e.key >> 16) ~/ tw,
+        blockX: (e.key & 0xFFFF) % tw,
+        blockY: (e.key >> 16) % tw,
+        bitmap: e.value,
+      ),
+  ];
+}
+
+/// Like [fowBlocksFromArchive], but reports progress as it decompresses/parses
+/// each entry and yields to the event loop between batches so a progress bar
+/// can repaint. Used for the single-`Sync.zip` import path (hundreds of entries
+/// in one file). [onProgress] is called as (done, total) over FOW entries.
+Future<List<FowBlockImport>> fowBlocksFromArchiveProgress(
+  Uint8List zipBytes, {
+  void Function(int done, int total)? onProgress,
+}) async {
+  final archive = ZipDecoder().decodeBytes(zipBytes);
+  final entries = [
+    for (final f in archive)
+      if (f.isFile && looksLikeFowTileName(f.name.split('/').last)) f,
+  ];
+  final out = <FowBlockImport>[];
+  for (var i = 0; i < entries.length; i++) {
+    final f = entries[i];
+    try {
+      out.addAll(fowBlocksFromFile(
+          f.name.split('/').last, Uint8List.fromList(f.content as List<int>)));
+    } catch (_) {
+      // skip corrupt entries
+    }
+    if (onProgress != null && (i % 8 == 0 || i == entries.length - 1)) {
+      onProgress(i + 1, entries.length);
+      await Future<void>.delayed(Duration.zero); // let the UI repaint
+    }
+  }
+  return out;
 }

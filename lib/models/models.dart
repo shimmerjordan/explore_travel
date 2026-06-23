@@ -4,13 +4,13 @@ enum RecordingMode { highPerformance, balanced, batterySaver }
 
 extension RecordingModeX on RecordingMode {
   Duration get interval => switch (this) {
-        RecordingMode.highPerformance => const Duration(seconds: 2),
+        RecordingMode.highPerformance => const Duration(seconds: 1),
         RecordingMode.balanced => const Duration(seconds: 10),
         RecordingMode.batterySaver => const Duration(seconds: 30),
       };
 
   double get distanceFilter => switch (this) {
-        RecordingMode.highPerformance => 5,
+        RecordingMode.highPerformance => 2,
         RecordingMode.balanced => 15,
         RecordingMode.batterySaver => 40,
       };

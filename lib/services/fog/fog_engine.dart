@@ -673,6 +673,66 @@ class FogEngine {
       updatedAt: DateTime.now(),
     ));
   }
+
+  /// Bulk-import FOW blocks into [layerId] in ONE transaction.
+  ///
+  /// Reads the layer's existing tiles once, OR-merges every incoming block in
+  /// memory, then writes the lot with a single batched upsert. A full Fog of
+  /// World "Sync" folder is ~45k blocks; the per-block [importBlock] path fires
+  /// ~90k awaited DB round-trips (minutes of frozen spinner on a phone), which
+  /// is why FOW import looked broken. Returns the number of block-tiles written.
+  Future<int> importBlocks({
+    required int layerId,
+    required List<
+            ({
+              int tileX,
+              int tileY,
+              int blockX,
+              int blockY,
+              Uint8List bitmap
+            })>
+        blocks,
+  }) async {
+    if (blocks.isEmpty) return 0;
+
+    // One read for the whole layer, keyed by DB (x, y).
+    final tiles = <(int, int), Uint8List>{};
+    for (final t in await db.fogTilesForLayers([layerId], tileZoom)) {
+      tiles[(t.tileX, t.tileY)] = Uint8List.fromList(t.bitmap);
+    }
+
+    // OR-merge every incoming block in memory; track touched keys so we only
+    // rewrite tiles that actually changed.
+    final touched = <(int, int)>{};
+    for (final b in blocks) {
+      final key = (_dbX(b.tileX, b.blockX), _dbY(b.tileY, b.blockY));
+      touched.add(key);
+      final cur = tiles[key];
+      if (cur == null) {
+        tiles[key] = Uint8List.fromList(b.bitmap);
+      } else {
+        final n = math.min(cur.length, b.bitmap.length);
+        for (int i = 0; i < n; i++) {
+          cur[i] |= b.bitmap[i];
+        }
+      }
+    }
+
+    final now = DateTime.now();
+    final rows = [
+      for (final key in touched)
+        FogTilesCompanion.insert(
+          tileX: key.$1,
+          tileY: key.$2,
+          zoom: tileZoom,
+          layerId: layerId,
+          bitmap: tiles[key]!,
+          updatedAt: now,
+        ),
+    ];
+    await db.batchUpsertFogTiles(rows);
+    return touched.length;
+  }
 }
 
 class _BlockEdit {

@@ -193,10 +193,10 @@ class SettingsScreen extends ConsumerWidget {
               _TextSetting(Icons.smart_toy_rounded, 'AI Model', s.aiModel,
                   (v) => n.update((p) => p.copyWith(aiModel: v))),
               const _AiTestTile(),
-              _SectionHeader('备份与导入'),
+              _SectionHeader('导出与导入'),
               _ActionTile(
                 icon: Icons.cloud_sync_rounded,
-                title: '备份与导入（本地 / WebDAV / FOW 兼容）',
+                title: '导出与导入（本地 / WebDAV / FOW 兼容）',
                 onTap: () => context.push('/backup'),
               ),
               _SectionHeader('权限与后台'),

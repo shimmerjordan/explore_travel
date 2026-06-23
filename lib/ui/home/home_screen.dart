@@ -29,7 +29,7 @@ class HomeScreen extends ConsumerWidget {
           gradient: const [Color(0xFFEC407A), Color(0xFFD81B60)]),
       _HomeTile('排行榜', Icons.leaderboard_rounded, '/leaderboard',
           gradient: const [Color(0xFF5C6BC0), Color(0xFF3949AB)]),
-      _HomeTile('备份与导出', Icons.cloud_sync_rounded, '/backup',
+      _HomeTile('导出与导入', Icons.cloud_sync_rounded, '/backup',
           gradient: const [Color(0xFF26C6DA), Color(0xFF00ACC1)]),
       _HomeTile('手账图床', Icons.image_outlined, '/imghost',
           gradient: const [Color(0xFF9CCC65), Color(0xFF7CB342)]),
