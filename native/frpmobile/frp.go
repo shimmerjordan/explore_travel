@@ -138,13 +138,39 @@ func (e *Engine) Running() bool {
 }
 
 // parse loads the TOML into frp's typed config + validates it.
-func parse(toml string) (*v1.ClientCommonConfig, []v1.ProxyConfigurer, []v1.VisitorConfigurer, error) {
-	common, proxies, visitors, err := config.LoadClientConfig([]byte(toml), false)
-	if err != nil {
+//
+// frp's public config.LoadClientConfig only reads from a FILE PATH (and on
+// mobile there is no reliable writable temp dir), so we replicate its body
+// using the byte-based config.LoadConfigure: unmarshal into a v1.ClientConfig,
+// split out the common/proxy/visitor configurers, then run the same Complete()
+// pass. This mirrors frp v0.58.1's LoadClientConfig exactly — re-verify against
+// the pinned tag if you bump frp (the embedding API has shifted across minors).
+func parse(tomlStr string) (*v1.ClientCommonConfig, []v1.ProxyConfigurer, []v1.VisitorConfigurer, error) {
+	allCfg := v1.ClientConfig{}
+	if err := config.LoadConfigure([]byte(tomlStr), &allCfg, false); err != nil {
 		return nil, nil, nil, err
 	}
-	if _, err := validation.ValidateAllClientConfig(common, proxies, visitors); err != nil {
+
+	cliCfg := &allCfg.ClientCommonConfig
+	proxyCfgs := make([]v1.ProxyConfigurer, 0, len(allCfg.Proxies))
+	for _, c := range allCfg.Proxies {
+		proxyCfgs = append(proxyCfgs, c.ProxyConfigurer)
+	}
+	visitorCfgs := make([]v1.VisitorConfigurer, 0, len(allCfg.Visitors))
+	for _, c := range allCfg.Visitors {
+		visitorCfgs = append(visitorCfgs, c.VisitorConfigurer)
+	}
+
+	cliCfg.Complete()
+	for _, c := range proxyCfgs {
+		c.Complete(cliCfg.User)
+	}
+	for _, c := range visitorCfgs {
+		c.Complete(cliCfg)
+	}
+
+	if _, err := validation.ValidateAllClientConfig(cliCfg, proxyCfgs, visitorCfgs); err != nil {
 		return nil, nil, nil, err
 	}
-	return common, proxies, visitors, nil
+	return cliCfg, proxyCfgs, visitorCfgs, nil
 }
