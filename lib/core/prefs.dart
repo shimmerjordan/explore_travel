@@ -25,6 +25,13 @@ class AppSettings {
   final String? webdavUser;
   final String? webdavPass;
   final bool autoBackup;
+  /// OneDrive (Microsoft Graph) OAuth. [oneDriveClientId] is your Azure app
+  /// registration's Application (client) ID. [oneDriveRefreshToken] is the
+  /// long-lived credential obtained after login (scrubbed from backups);
+  /// [oneDriveAccount] is a human label (email/name) for the UI.
+  final String? oneDriveClientId;
+  final String? oneDriveRefreshToken;
+  final String? oneDriveAccount;
   final String? zerotierNetworkId;
   final String displayName;
   final String? p2pPassphrase;
@@ -194,6 +201,9 @@ class AppSettings {
     this.webdavUser,
     this.webdavPass,
     this.autoBackup = false,
+    this.oneDriveClientId,
+    this.oneDriveRefreshToken,
+    this.oneDriveAccount,
     this.zerotierNetworkId,
     this.displayName = '旅人',
     this.p2pPassphrase,
@@ -273,6 +283,9 @@ class AppSettings {
     String? webdavUser,
     String? webdavPass,
     bool? autoBackup,
+    String? oneDriveClientId,
+    String? oneDriveRefreshToken,
+    String? oneDriveAccount,
     String? zerotierNetworkId,
     String? displayName,
     String? p2pPassphrase,
@@ -350,6 +363,9 @@ class AppSettings {
         webdavUser: webdavUser ?? this.webdavUser,
         webdavPass: webdavPass ?? this.webdavPass,
         autoBackup: autoBackup ?? this.autoBackup,
+        oneDriveClientId: oneDriveClientId ?? this.oneDriveClientId,
+        oneDriveRefreshToken: oneDriveRefreshToken ?? this.oneDriveRefreshToken,
+        oneDriveAccount: oneDriveAccount ?? this.oneDriveAccount,
         zerotierNetworkId: zerotierNetworkId ?? this.zerotierNetworkId,
         displayName: displayName ?? this.displayName,
         p2pPassphrase: p2pPassphrase ?? this.p2pPassphrase,
@@ -443,6 +459,9 @@ class AppSettings {
         'webdavUser': webdavUser,
         'webdavPass': webdavPass,
         'autoBackup': autoBackup,
+        'oneDriveClientId': oneDriveClientId,
+        'oneDriveRefreshToken': oneDriveRefreshToken,
+        'oneDriveAccount': oneDriveAccount,
         'zerotierNetworkId': zerotierNetworkId,
         'displayName': displayName,
         'p2pPassphrase': p2pPassphrase,
@@ -522,6 +541,9 @@ class AppSettings {
         webdavUser: j['webdavUser'],
         webdavPass: j['webdavPass'],
         autoBackup: j['autoBackup'] ?? false,
+        oneDriveClientId: j['oneDriveClientId'],
+        oneDriveRefreshToken: j['oneDriveRefreshToken'],
+        oneDriveAccount: j['oneDriveAccount'],
         zerotierNetworkId: j['zerotierNetworkId'],
         displayName: j['displayName'] ?? '旅人',
         p2pPassphrase: j['p2pPassphrase'],

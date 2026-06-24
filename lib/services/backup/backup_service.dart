@@ -689,6 +689,9 @@ const _kSecretSettingsKeys = <String>{
   'customAuthHeader',
   'leaderboardRepoPat',
   'leaderboardServerToken',
+  // OneDrive refresh token — a long-lived bearer-equivalent for the user's
+  // whole drive (app folder); must never ride along in an exported backup.
+  'oneDriveRefreshToken',
   // Music cookies / OAuth tokens — also bearer-equivalents.
   'musicCredentials',
 };

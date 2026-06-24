@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'dart:typed_data';
+import 'package:dio/dio.dart' show CancelToken;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/material.dart';
@@ -10,6 +11,8 @@ import 'package:share_plus/share_plus.dart';
 import '../../app/providers.dart';
 import '../../core/prefs.dart';
 import '../../services/backup/backup_service.dart';
+import '../../services/sync/onedrive_service.dart';
+import '../../services/sync/onedrive_sync_engine.dart';
 import '../../services/fog/fog_engine.dart';
 import '../../services/fog/fow_compat.dart';
 
@@ -43,6 +46,9 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
     final webdavReady = (s.webdavUrl ?? '').isNotEmpty &&
         (s.webdavUser ?? '').isNotEmpty &&
         (s.webdavPass ?? '').isNotEmpty;
+    final oneDriveHasClientId = OneDriveService.defaultClientId.isNotEmpty ||
+        (s.oneDriveClientId ?? '').isNotEmpty;
+    final oneDriveConnected = (s.oneDriveRefreshToken ?? '').isNotEmpty;
 
     return Scaffold(
       appBar: AppBar(
@@ -160,6 +166,53 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
             onTap: (webdavReady && !_busy) ? _restoreFromWebdav : null,
           ),
 
+          // ── OneDrive（微软账号登录）────────────────────────────────────
+          const _SectionHeader('OneDrive（微软账号登录）'),
+          ListTile(
+            leading: Icon(oneDriveConnected
+                ? Icons.cloud_done_rounded
+                : Icons.login_rounded),
+            title: Text(oneDriveConnected
+                ? '已连接：${s.oneDriveAccount ?? 'OneDrive'}'
+                : '连接 OneDrive（跳转微软登录）'),
+            subtitle: Text(oneDriveConnected
+                ? '点此断开连接'
+                : (oneDriveHasClientId
+                    ? '点击直接打开微软登录页授权'
+                    : '未配置客户端 ID（见 docs/onedrive_setup.md）')),
+            enabled: oneDriveHasClientId && !_busy,
+            onTap: (!oneDriveHasClientId || _busy)
+                ? null
+                : (oneDriveConnected ? _disconnectOneDrive : _connectOneDrive),
+          ),
+          // The client ID is normally baked into the build (OneDriveService
+          // .defaultClientId / --dart-define), so users just tap Connect. Only
+          // surface the manual-override field when nothing is baked in.
+          if (OneDriveService.defaultClientId.isEmpty)
+            _TextSetting(Icons.vpn_key_outlined, 'Azure 客户端 ID（可选覆盖）',
+                s.oneDriveClientId ?? '',
+                (v) => n.update(
+                    (p) => p.copyWith(oneDriveClientId: v.isEmpty ? null : v)),
+                hint: '构建时已内置 client ID 则可留空；否则在此粘贴（见 docs）'),
+          ListTile(
+            leading: const Icon(Icons.cloud_upload_outlined),
+            title: const Text('立即同步到 OneDrive'),
+            subtitle: Text(oneDriveConnected
+                ? '增量同步到 App 专属 Sync 文件夹：只传有变化的文件，按 MD5 跳过未变的'
+                : '先连接 OneDrive'),
+            enabled: oneDriveConnected && !_busy,
+            onTap: (oneDriveConnected && !_busy) ? _oneDriveSyncUp : null,
+          ),
+          ListTile(
+            leading: const Icon(Icons.cloud_download_outlined),
+            title: const Text('从 OneDrive 恢复'),
+            subtitle: Text(oneDriveConnected
+                ? '拉取 Sync 文件夹并按勾选模块合并（UUID 去重）'
+                : '先连接 OneDrive'),
+            enabled: oneDriveConnected && !_busy,
+            onTap: (oneDriveConnected && !_busy) ? _oneDriveSyncDown : null,
+          ),
+
           // ── Fog of World 兼容 ─────────────────────────────────────────
           const _SectionHeader('Fog of World 兼容'),
           ListTile(
@@ -221,27 +274,134 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
   // Local and WebDAV share the same archive bytes — only the destination
   // differs. The archive is built once via [BackupService.exportToArchive].
 
+  /// Runs [op] behind a non-dismissible floating dialog with a progress bar +
+  /// live phase text. The dialog blocks the back button, so the screen can't be
+  /// disposed mid-operation (which previously caused setState-after-dispose
+  /// crashes). Progress is driven via ValueNotifiers, not setState. Returns the
+  /// op's result, or null if it threw (in which case _status shows the error).
+  Future<T?> _withProgress<T>(
+    String title,
+    Future<T> Function(
+            void Function(double? value, String phase) report, CancelToken cancel)
+        op,
+  ) async {
+    final value = ValueNotifier<double?>(null);
+    final phase = ValueNotifier<String>('准备中…');
+    final cancel = CancelToken();
+    if (mounted) setState(() => _busy = true);
+    void requestCancel() {
+      if (!cancel.isCancelled) {
+        cancel.cancel('用户中断');
+        phase.value = '正在中断…';
+      }
+    }
+
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      useRootNavigator: true,
+      // canPop:false but the back press requests cancellation — the op aborts
+      // and the dialog is then dismissed programmatically.
+      builder: (_) => PopScope(
+        canPop: false,
+        onPopInvokedWithResult: (didPop, _) {
+          if (!didPop) requestCancel();
+        },
+        child: AlertDialog(
+          title: Text(title),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              ValueListenableBuilder<double?>(
+                valueListenable: value,
+                builder: (_, v, __) => Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(4),
+                      child: LinearProgressIndicator(value: v),
+                    ),
+                    if (v != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Text('${(v * 100).round()}%',
+                            style: const TextStyle(fontSize: 11)),
+                      ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 12),
+              ValueListenableBuilder<String>(
+                valueListenable: phase,
+                builder: (_, v, __) => Text(v,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 12)),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: requestCancel, child: const Text('中断')),
+          ],
+        ),
+      ),
+    );
+    T? result;
+    Object? error;
+    try {
+      result = await op((v, p) {
+        value.value = v;
+        phase.value = p;
+      }, cancel);
+    } catch (e) {
+      error = e;
+    } finally {
+      if (mounted) Navigator.of(context, rootNavigator: true).pop();
+      value.dispose();
+      phase.dispose();
+      if (mounted) setState(() => _busy = false);
+    }
+    if (cancel.isCancelled) {
+      if (mounted) setState(() => _status = '$title已取消');
+      return null;
+    }
+    if (error != null) {
+      if (mounted) setState(() => _status = '$title失败：$error');
+      return null;
+    }
+    return result;
+  }
+
+  /// Import an archive (no UI) — used inside [_withProgress]. Returns a status
+  /// line and refreshes the map.
+  Future<String> _runImport(Uint8List bytes) async {
+    final sum = await ref.read(backupServiceProvider).importFromArchive(
+          bytes,
+          modules: _selectedModules(ref.read(settingsProvider)),
+          clearBeforeImport: ref.read(settingsProvider).importClearBeforeImport,
+        );
+    ref.read(journalRefreshProvider.notifier).state++;
+    ref.read(fogRefreshProvider.notifier).state++;
+    return '导入完成：\n${sum.describe()}';
+  }
+
   Future<void> _exportAndShare() async {
     if (_selectedModules(ref.read(settingsProvider)).isEmpty) {
       setState(() => _status = '至少选一个模块');
       return;
     }
-    setState(() {
-      _busy = true;
-      _status = null;
+    final path = await _withProgress<String>('导出备份', (report, _) async {
+      report(null, '打包数据…');
+      final f = await ref
+          .read(backupServiceProvider)
+          .exportToFile(_selectedModules(ref.read(settingsProvider)));
+      return f.path;
     });
-    try {
-      final f =
-          await ref.read(backupServiceProvider).exportToFile(_selectedModules(ref.read(settingsProvider)));
-      final size = await f.length();
-      setState(() => _status = '已写入：${f.path}\n大小：${_fmtBytes(size)}');
-      await Share.shareXFiles([XFile(f.path)],
-          subject: 'Explore Journal backup');
-    } catch (e) {
-      setState(() => _status = '导出失败：$e');
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
+    if (path == null || !mounted) return;
+    final size = await File(path).length();
+    setState(() => _status = '已写入：$path\n大小：${_fmtBytes(size)}');
+    await Share.shareXFiles([XFile(path)], subject: 'Explore Journal backup');
   }
 
   Future<void> _pickAndImport() async {
@@ -255,28 +415,26 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
       withData: false,
     );
     if (res == null || res.files.single.path == null) return;
-    final bytes = await File(res.files.single.path!).readAsBytes();
-    await _doImport(bytes);
+    final status = await _withProgress<String>('导入备份', (report, _) async {
+      report(null, '读取文件…');
+      final bytes = await File(res.files.single.path!).readAsBytes();
+      report(null, '合并导入…');
+      return _runImport(bytes);
+    });
+    if (status != null && mounted) setState(() => _status = status);
   }
 
   // ── WebDAV ──────────────────────────────────────────────────────────────
 
   Future<void> _testWebdav() async {
-    setState(() {
-      _busy = true;
-      _status = null;
+    // Force-reload the provider so any URL/credential typed seconds ago is
+    // reflected even before the widget tree has settled.
+    ref.invalidate(webdavServiceProvider);
+    final status = await _withProgress<String>('测试 WebDAV', (report, _) async {
+      report(null, '连接中…');
+      return await ref.read(webdavServiceProvider).testConnection() ?? 'ok';
     });
-    try {
-      // Force-reload the provider so any URL/credential typed seconds ago
-      // is reflected even before the widget tree has settled.
-      ref.invalidate(webdavServiceProvider);
-      final res = await ref.read(webdavServiceProvider).testConnection();
-      setState(() => _status = res ?? 'ok');
-    } catch (e) {
-      setState(() => _status = '测试失败：$e');
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
+    if (status != null && mounted) setState(() => _status = status);
   }
 
   Future<void> _uploadToWebdav() async {
@@ -284,12 +442,8 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
       setState(() => _status = '至少选一个模块');
       return;
     }
-    setState(() {
-      _busy = true;
-      _status = null;
-    });
-    try {
-      final dav = ref.read(webdavServiceProvider);
+    final status = await _withProgress<String>('上传到 WebDAV', (report, _) async {
+      report(null, '打包数据…');
       final bytes = await ref
           .read(backupServiceProvider)
           .exportToArchive(_selectedModules(ref.read(settingsProvider)));
@@ -299,91 +453,116 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
           .split('.')
           .first;
       final filename = 'explore_journal_backup_$ts.zip';
-      await dav.uploadArchive(filename, bytes);
-      setState(() => _status =
-          '已上传：$filename\n大小：${_fmtBytes(bytes.length)}');
-    } catch (e) {
-      setState(() => _status = '上传失败：$e');
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
+      report(null, '上传 $filename…');
+      await ref.read(webdavServiceProvider).uploadArchive(filename, bytes);
+      return '已上传：$filename\n大小：${_fmtBytes(bytes.length)}';
+    });
+    if (status != null && mounted) setState(() => _status = status);
   }
 
   Future<void> _restoreFromWebdav() async {
-    setState(() {
-      _busy = true;
-      _status = null;
+    final dav = ref.read(webdavServiceProvider);
+    final list = await _withProgress<List<String>>('读取 WebDAV', (report, _) async {
+      report(null, '列出云端备份…');
+      return dav.listArchives();
     });
-    try {
-      final dav = ref.read(webdavServiceProvider);
-      final list = await dav.listArchives();
-      if (list.isEmpty) {
-        try {
-          final bytes = await dav.downloadArchive('latest.zip');
-          await _doImport(Uint8List.fromList(bytes));
-          return;
-        } catch (_) {
-          setState(() => _status = '云端没有找到任何 zip 备份');
-          return;
-        }
-      }
-      if (!mounted) return;
-      final picked = await showDialog<String>(
+    if (list == null || !mounted) return; // error already surfaced
+    String? picked;
+    if (list.isEmpty) {
+      picked = 'latest.zip';
+    } else {
+      picked = await showDialog<String>(
         context: context,
         builder: (ctx) => SimpleDialog(
           title: const Text('选择要恢复的备份'),
           children: [
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(ctx, 'latest.zip'),
+              child: const Text('最新（latest.zip）'),
+            ),
+            const Divider(),
             for (final name in list)
               SimpleDialogOption(
                 onPressed: () => Navigator.pop(ctx, name),
                 child: Text(name),
               ),
-            const Divider(),
-            SimpleDialogOption(
-              onPressed: () => Navigator.pop(ctx, 'latest.zip'),
-              child: const Text('最新（latest.zip）'),
-            ),
           ],
         ),
       );
-      if (picked == null) {
-        setState(() => _busy = false);
-        return;
-      }
-      final bytes = await dav.downloadArchive(picked);
-      await _doImport(Uint8List.fromList(bytes));
-    } catch (e) {
-      setState(() => _status = '恢复失败：$e');
-    } finally {
-      if (mounted) setState(() => _busy = false);
+      if (picked == null) return;
     }
+    final chosen = picked;
+    final status = await _withProgress<String>('从 WebDAV 恢复', (report, _) async {
+      report(null, '下载 $chosen…');
+      final bytes = await dav.downloadArchive(chosen);
+      report(null, '合并导入…');
+      return _runImport(Uint8List.fromList(bytes));
+    });
+    if (status != null && mounted) setState(() => _status = status);
   }
 
-  // ── Shared import path ──────────────────────────────────────────────────
+  // ── OneDrive (Microsoft Graph) ──────────────────────────────────────────
 
-  Future<void> _doImport(Uint8List bytes) async {
+  Future<void> _connectOneDrive() async {
     setState(() {
       _busy = true;
       _status = null;
     });
     try {
-      final sum =
-          await ref.read(backupServiceProvider).importFromArchive(
-                bytes,
-                modules: _selectedModules(ref.read(settingsProvider)),
-                clearBeforeImport:
-                    ref.read(settingsProvider).importClearBeforeImport,
-              );
-      // A restore can replace journals, layers and fog — nudge the map so
-      // its pins and fog veil refresh without needing an app restart.
-      ref.read(journalRefreshProvider.notifier).state++;
-      ref.read(fogRefreshProvider.notifier).state++;
-      setState(() => _status = '导入完成：\n${sum.describe()}');
+      final label = await ref.read(oneDriveServiceProvider).connect();
+      setState(() => _status = '已连接 OneDrive：$label');
     } catch (e) {
-      setState(() => _status = '导入失败：$e');
+      setState(() => _status = '连接失败：$e');
     } finally {
       if (mounted) setState(() => _busy = false);
     }
+  }
+
+  Future<void> _disconnectOneDrive() async {
+    await ref.read(oneDriveServiceProvider).disconnect();
+    if (mounted) setState(() => _status = '已断开 OneDrive 连接');
+  }
+
+  Future<void> _oneDriveSyncUp() async {
+    if (_selectedModules(ref.read(settingsProvider)).isEmpty) {
+      setState(() => _status = '至少选一个模块');
+      return;
+    }
+    final res =
+        await _withProgress<SyncUpResult>('同步到 OneDrive', (report, cancel) {
+      return ref.read(oneDriveSyncEngineProvider).syncUp(
+            modules: _selectedModules(ref.read(settingsProvider)),
+            cancelToken: cancel,
+            onProgress: (done, total, label) =>
+                report(total == 0 ? null : done / total, label),
+          );
+    });
+    if (res != null && mounted) {
+      setState(() => _status =
+          '增量同步完成：上传 ${res.uploaded} · 删除 ${res.deleted} · 未变 ${res.unchanged}');
+    }
+  }
+
+  Future<void> _oneDriveSyncDown() async {
+    final status =
+        await _withProgress<String>('从 OneDrive 恢复', (report, cancel) async {
+      final summary = await ref.read(oneDriveSyncEngineProvider).syncDown(
+            modules: _selectedModules(ref.read(settingsProvider)),
+            clearBeforeImport:
+                ref.read(settingsProvider).importClearBeforeImport,
+            cancelToken: cancel,
+            onProgress: (done, total, label) =>
+                report(total == 0 ? null : done / total, label),
+          );
+      if (summary == null) {
+        return 'OneDrive 的 Sync 文件夹还是空的（先同步一次上去）';
+      }
+      // A restore can replace journals, layers and fog — refresh the map.
+      ref.read(journalRefreshProvider.notifier).state++;
+      ref.read(fogRefreshProvider.notifier).state++;
+      return '已从 OneDrive 恢复：\n${summary.describe()}';
+    });
+    if (status != null && mounted) setState(() => _status = status);
   }
 
   // ── Fog of World ──────────────────────────────────────────────────────────

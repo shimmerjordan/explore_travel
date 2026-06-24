@@ -82,6 +82,10 @@ dependencies:
   flutter_webrtc: ^1.4.1
   url_launcher: ^6.3.0
   android_intent_plus: ^5.1.0
+  # OneDrive (Microsoft Graph) OAuth: opens the Microsoft login page in an
+  # in-app browser tab / ASWebAuthenticationSession and returns the auth code
+  # via a custom-scheme redirect. We do the PKCE token exchange ourselves.
+  flutter_web_auth_2: ^4.1.0
 
   # Stores high-risk credentials (PATs, tokens, passphrases) outside of
   # SharedPreferences — Android Keystore-backed on device, Keychain on

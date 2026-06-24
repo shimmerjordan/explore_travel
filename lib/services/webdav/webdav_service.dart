@@ -25,7 +25,9 @@ class WebDavService {
       debug: false,
     );
     _client!.setHeaders({'Accept': '*/*'});
-    _client!.setConnectTimeout(15000);
+    // Fail fast on an unreachable server instead of hanging the UI: a dead
+    // network should surface a connect error in ~3s, not spin indefinitely.
+    _client!.setConnectTimeout(3000);
     _client!.setSendTimeout(60000);
     _client!.setReceiveTimeout(60000);
   }
