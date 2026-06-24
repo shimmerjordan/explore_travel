@@ -17,8 +17,23 @@ class ImgHostSettingsScreen extends ConsumerStatefulWidget {
 
 class _ImgHostSettingsScreenState
     extends ConsumerState<ImgHostSettingsScreen> {
-  String? _testStatus;
-  bool _testing = false;
+  // Per-level connectivity-test state ('public' / 'private'). GitHub exposes
+  // both; the custom host is level-agnostic and uses the 'public' slot.
+  final Map<String, String?> _testStatus = {};
+  final Set<String> _testing = {};
+
+  /// 1×1 transparent PNG uploaded by the connectivity test (then deleted).
+  static const _testPng = <int>[
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, //
+    0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+    0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
+    0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41,
+    0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00,
+    0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+    0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE,
+    0x42, 0x60, 0x82,
+  ];
 
   @override
   Widget build(BuildContext context) {
@@ -96,63 +111,84 @@ class _ImgHostSettingsScreenState
           if (s.imgHostKind == 'github') ..._buildGithubFields(s, n),
           if (s.imgHostKind == 'custom') ..._buildCustomFields(s, n),
           const _SectionHeader('连通性测试'),
-          ListTile(
-            leading: const Icon(Icons.upload_outlined),
-            title: const Text('上传一张测试图'),
-            subtitle: Text(_testStatus ?? '尚未测试',
-                style: TextStyle(
-                    color: _testStatus == null
-                        ? Theme.of(context).hintColor
-                        : (_testStatus!.startsWith('ok')
-                            ? Colors.green
-                            : Colors.redAccent))),
-            trailing: _testing
-                ? const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2))
-                : null,
-            onTap: _testing ? null : _runTest,
-          ),
+          if (s.imgHostKind == 'none')
+            const ListTile(
+              leading: Icon(Icons.info_outline),
+              title: Text('请先在上面选择图床来源'),
+            )
+          else if (s.imgHostKind == 'github') ...[
+            _testTile('public', '测试公开图床（上传后自动删除）'),
+            _testTile('private', '测试私有图床（上传后自动删除）'),
+          ] else
+            _testTile('public', '测试图床（上传后自动删除）'),
         ],
       ),
     );
   }
 
-  Future<void> _runTest() async {
+  Widget _testTile(String level, String label) {
+    final status = _testStatus[level];
+    final busy = _testing.contains(level);
+    return ListTile(
+      leading: const Icon(Icons.upload_outlined),
+      title: Text(label),
+      subtitle: Text(status ?? '尚未测试',
+          style: TextStyle(
+              color: status == null
+                  ? Theme.of(context).hintColor
+                  : (status.startsWith('ok')
+                      ? Colors.green
+                      : Colors.redAccent))),
+      trailing: busy
+          ? const SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(strokeWidth: 2))
+          : null,
+      onTap: busy ? null : () => _runTest(level),
+    );
+  }
+
+  /// Uploads a 1×1 PNG to the [level] backend, then DELETES it so the
+  /// connectivity test never leaves a stray file on the host.
+  Future<void> _runTest(String level) async {
     setState(() {
-      _testing = true;
-      _testStatus = null;
+      _testing.add(level);
+      _testStatus[level] = null;
     });
+    File? local;
     try {
-      final backend = backendFromSettings(ref.read(settingsProvider));
-      // Public test path is fine — private repos get tested via the same
-      // test image but you'd need to pass level='private' to switch repos.
-      // 1x1 transparent PNG.
-      const bytes = <int>[
-        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, //
-        0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
-        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-        0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
-        0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41,
-        0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00,
-        0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
-        0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE,
-        0x42, 0x60, 0x82,
-      ];
-      final tmp = await getTemporaryDirectory();
-      final f = File('${tmp.path}/imghost_test.png');
-      await f.writeAsBytes(bytes);
-      final res = await backend.upload(f,
-          ctx: const UploadContext(
-              journalId: 0, level: 'public', titleSlug: 'test'));
-      if (mounted) {
-        setState(() => _testStatus = 'ok · ${res.displayUrl}');
+      final backend =
+          backendFromSettings(ref.read(settingsProvider), level: level);
+      if (backend is NoopBackend) {
+        if (mounted) {
+          setState(() => _testStatus[level] =
+              level == 'private' ? 'error: 私有图床未配置' : 'error: 图床未配置');
+        }
+        return;
       }
+      final tmp = await getTemporaryDirectory();
+      local = File('${tmp.path}/imghost_test_$level.png');
+      await local.writeAsBytes(_testPng);
+      final res = await backend.upload(local,
+          ctx: UploadContext(
+              journalId: 0, level: level, titleSlug: 'connectivity-test'));
+      // Clean up the just-uploaded image — a test must not pollute the repo.
+      String note;
+      try {
+        await backend.delete(res.displayUrl, res.deleteToken);
+        note = 'ok · 上传并已自动删除，连通正常';
+      } catch (e) {
+        note = 'ok · 上传成功，但自动删除失败（请手动清理）：$e';
+      }
+      if (mounted) setState(() => _testStatus[level] = note);
     } catch (e) {
-      if (mounted) setState(() => _testStatus = 'error: $e');
+      if (mounted) setState(() => _testStatus[level] = 'error: $e');
     } finally {
-      if (mounted) setState(() => _testing = false);
+      try {
+        if (local != null && local.existsSync()) await local.delete();
+      } catch (_) {}
+      if (mounted) setState(() => _testing.remove(level));
     }
   }
 

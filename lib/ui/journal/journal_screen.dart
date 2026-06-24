@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'package:drift/drift.dart' show Value;
 import 'package:flutter/material.dart';
@@ -419,7 +420,7 @@ Future<bool> showJournalViewer(
                     ),
                   ),
                 ],
-                _UploadStatusBar(journalId: entry.id),
+                _UploadStatusBar(entry: entry),
               ],
             ),
           ),
@@ -889,21 +890,26 @@ class _FullscreenGalleryState extends ConsumerState<_FullscreenGallery> {
   }
 }
 
-/// Compact upload-status row shown in the viewer when the image host is
-/// enabled for this entry. Polls the queue every 2s (cheap — it's just a
+/// Compact upload-status row shown in the viewer.
+///
+/// Shows the queue's done/pending/failed counts AND — crucially for entries
+/// created BEFORE the image host was turned on — how many of the entry's
+/// images are still local files, with a manual "上传到图床" button. Once an
+/// image uploads, the queue rewrites the entry to the remote URL, so anything
+/// still non-http here is genuinely un-hosted. Polls every 2s (a cheap
 /// SharedPreferences read).
 class _UploadStatusBar extends ConsumerStatefulWidget {
-  final int journalId;
-  const _UploadStatusBar({required this.journalId});
+  final JournalEntry entry;
+  const _UploadStatusBar({required this.entry});
   @override
-  ConsumerState<_UploadStatusBar> createState() =>
-      _UploadStatusBarState();
+  ConsumerState<_UploadStatusBar> createState() => _UploadStatusBarState();
 }
 
 class _UploadStatusBarState extends ConsumerState<_UploadStatusBar> {
   List<dynamic> _records = const [];
   // Avoid importing dart:async here; use a periodic via post-frame chain.
   bool _disposed = false;
+  bool _busy = false;
 
   @override
   void initState() {
@@ -920,20 +926,95 @@ class _UploadStatusBarState extends ConsumerState<_UploadStatusBar> {
   Future<void> _tick() async {
     if (_disposed) return;
     final q = ref.read(uploadQueueProvider);
-    final list = await q.recordsForJournal(widget.journalId);
+    final list = await q.recordsForJournal(widget.entry.id);
     if (!mounted) return;
     setState(() => _records = list);
     await Future.delayed(const Duration(seconds: 2));
     if (mounted && !_disposed) _tick();
   }
 
+  static bool _isRemote(String s) =>
+      s.startsWith('http://') || s.startsWith('https://');
+
+  /// Image refs in the entry that are still local files (not yet hosted) —
+  /// from both mediaPaths and the Quill rich body.
+  List<String> _localImages() {
+    final e = widget.entry;
+    final out = <String>{};
+    for (final raw in e.mediaPaths.split('\n')) {
+      final s = raw.trim();
+      if (s.isEmpty || _isRemote(s)) continue;
+      out.add(s);
+    }
+    if (e.richContent.isNotEmpty) {
+      try {
+        final delta = jsonDecode(e.richContent);
+        if (delta is List) {
+          for (final op in delta) {
+            if (op is Map &&
+                op['insert'] is Map &&
+                (op['insert'] as Map)['image'] is String) {
+              final s = (op['insert'] as Map)['image'] as String;
+              if (!_isRemote(s)) out.add(s);
+            }
+          }
+        }
+      } catch (_) {/* non-Quill body — ignore */}
+    }
+    return out.toList();
+  }
+
+  Future<void> _uploadNow(int localCount) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final enabled = ref.read(settingsProvider).imgHostKind != 'none';
+    if (!enabled) {
+      messenger.showSnackBar(const SnackBar(
+        content: Text('图床未开启：请到「设置 → 图床」选择 GitHub 或自定义后再上传'),
+      ));
+      return;
+    }
+    setState(() => _busy = true);
+    try {
+      final q = ref.read(uploadQueueProvider);
+      await q.enqueueForJournal(
+        journalId: widget.entry.id,
+        localPaths: widget.entry.mediaPaths
+            .split('\n')
+            .where((p) => p.isNotEmpty)
+            .toList(),
+        richContent: widget.entry.richContent,
+      );
+      // Also flip any lingering failed/pending records back to pending.
+      if (_records.any((r) => r.status == 'failed' || r.status == 'pending')) {
+        await q.retryAllForJournal(widget.entry.id);
+      }
+      messenger.showSnackBar(
+          SnackBar(content: Text('已加入上传队列（$localCount 张）')));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+      await _tick();
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    if (_records.isEmpty) return const SizedBox.shrink();
+    final localImages = _localImages();
     final pending = _records.where((r) => r.status == 'pending').length;
     final failed = _records.where((r) => r.status == 'failed').length;
     final done = _records.where((r) => r.status == 'done').length;
+    final hasRecords = _records.isNotEmpty;
+
+    // Nothing to show: no queue history and no local images to offer.
+    if (!hasRecords && localImages.isEmpty) return const SizedBox.shrink();
+
     final cs = Theme.of(context).colorScheme;
+    final enabled = ref.watch(settingsProvider).imgHostKind != 'none';
+
+    final parts = <String>[];
+    if (hasRecords) parts.add('$done 已传 / $pending 待传 / $failed 失败');
+    if (localImages.isNotEmpty) parts.add('${localImages.length} 张本地图未上传');
+    final showUpload = localImages.isNotEmpty || failed > 0;
+
     return Padding(
       padding: const EdgeInsets.only(top: 12),
       child: Container(
@@ -947,30 +1028,36 @@ class _UploadStatusBarState extends ConsumerState<_UploadStatusBar> {
             Icon(
               failed > 0
                   ? Icons.error_outline
-                  : (pending > 0
+                  : (localImages.isNotEmpty || pending > 0
                       ? Icons.cloud_upload_outlined
                       : Icons.cloud_done_outlined),
               size: 16,
               color: failed > 0
                   ? Colors.redAccent
-                  : (pending > 0 ? cs.primary : Colors.green),
+                  : (localImages.isNotEmpty || pending > 0
+                      ? cs.primary
+                      : Colors.green),
             ),
             const SizedBox(width: 6),
             Expanded(
               child: Text(
-                '图床：${done} 已传 / ${pending} 待传 / ${failed} 失败',
+                '图床：${parts.join(' · ')}${enabled ? '' : '（未开启）'}',
                 style: const TextStyle(fontSize: 12),
               ),
             ),
-            if (failed > 0 || pending > 0)
+            if (_busy)
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 10),
+                child: SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2)),
+              )
+            else if (showUpload)
               TextButton(
-                onPressed: () async {
-                  await ref
-                      .read(uploadQueueProvider)
-                      .retryAllForJournal(widget.journalId);
-                  await _tick();
-                },
-                child: const Text('重试'),
+                onPressed: () => _uploadNow(localImages.length),
+                child: Text(
+                    failed > 0 && localImages.isEmpty ? '重试' : '上传到图床'),
               ),
           ],
         ),
