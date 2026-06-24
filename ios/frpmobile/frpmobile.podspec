@@ -17,4 +17,10 @@ Pod::Spec.new do |s|
   s.source           = { :path => '.' }
   s.platform         = :ios, '13.0'
   s.vendored_frameworks = 'Frpmobile.xcframework'
+  # The gomobile framework's Go `net` package calls Darwin's DNS resolver
+  # (res_9_ninit / res_9_nsearch / res_9_nclose), which live in libresolv. The
+  # static frp framework leaves them undefined, so the Runner target must link
+  # libresolv or the build fails with "Undefined symbol: _res_9_n*". CocoaPods
+  # propagates this to the consumer's OTHER_LDFLAGS as `-lresolv`.
+  s.libraries = 'resolv'
 end
