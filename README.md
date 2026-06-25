@@ -4,9 +4,15 @@
 > Track your trips, light up the world's fog of war, sync via WebDAV, plan trips with AI,
 > share live routes with friends via ZeroTier, and build a rich travel journal — all
 > while owning every byte of your data.
+>
+> The **same Flutter codebase** also ships a read-only **web "memory" version** for
+> reminiscing in the browser, with optional per-user login backed by a tiny self-hosted
+> **NAS backend** (Rust + Docker) that stores only your settings inside a
+> **zero-knowledge encrypted vault** — never your raw travel data.
 
 ![flutter](https://img.shields.io/badge/Flutter-3.32+-02569B?logo=flutter)
 ![platforms](https://img.shields.io/badge/platforms-Android%20%7C%20iOS%20%7C%20Linux%20%7C%20Web-success)
+![backend](https://img.shields.io/badge/optional%20backend-Rust%20%2B%20Docker-orange?logo=rust)
 ![license](https://img.shields.io/badge/license-CC%20BY--NC--SA%204.0-lightgrey)
 
 [中文 README](README.zh.md)
@@ -36,6 +42,7 @@
 | 🐞 Debug mode | Hidden — tap version label on home 10× · log buffer (ring of 1000) with filter/share · fog & recording diagnostics · simulator panel in release builds · "fire test reveal" button |
 | 💾 Portability | Everything in one SQLite + a `media/` folder. Schema v4 with UUIDs. Standard zip backups. No vendor lock-in. |
 | 🔒 Security | Credentials (PATs, tokens, WebDAV password, p2p passphrase) live in **flutter_secure_storage** → Android Keystore / iOS Keychain · backup exports **strip secret fields** so leaked archives don't leak creds · runtime HTTP guard refuses **cleartext to non-private hosts** (LAN HTTP still works) · no analytics, no remote logging, no telemetry, no third-party SDK ad/analytics call |
+| 🌐 Web 回忆版 | Same codebase built for the browser as a **read-only** display/reminiscing app · drift `WasmDatabase` (IndexedDB) · import a backup zip → relive your map, fog, journal, globe · optional **login** via a self-hosted Rust+Docker **NAS backend** that stores *only settings* inside a **zero-knowledge vault** (your data stays on your own WebDAV/GitHub) · PWA-installable · debug-mode backdoor unlocks editing · [deploy guide](docs/web-display-deploy.md) |
 
 ---
 
@@ -106,17 +113,73 @@ raw tiles by magic bytes; export bundles visible-layer fog into a zip handed to 
 ├──────────┬─────────────┬─────────────┬──────────────────────┤
 │ Location │  Database   │     P2P     │   External APIs      │
 │ • bg svc │  • Drift    │  • mDNS     │  • OpenAI-compat AI  │
-│ • EXIF   │  • FTS5     │  • Sockets  │  • gdstudio music    │
-│          │             │  • AES-GCM  │  • Map tile servers  │
+│ • EXIF   │  • (Wasm    │  • Sockets  │  • gdstudio music    │
+│          │     on web) │  • AES-GCM  │  • Map tile servers  │
 ├──────────┴─────────────┴─────────────┴──────────────────────┤
 │  Fog engine (custom): 64×64 bitmap tiles, RLE-friendly      │
 ├─────────────────────────────────────────────────────────────┤
-│  Persistence boundary: SQLite + files → WebDAV (.zip)       │
+│  SyncStorage (transport-agnostic): WebDAV · GitHub · OneDrive│
+├─────────────────────────────────────────────────────────────┤
+│  Persistence boundary: SQLite + files → backup .zip         │
+└─────────────────────────────────────────────────────────────┘
+        web build (read-only) ┄┄┄ optional ┄┄┄┐
+┌─────────────────────────────────────────────────────────────┐
+│  NAS backend (Rust + Docker, self-hosted, tiny)             │
+│  • argon2 login + JWT  • stores ONLY a zero-knowledge vault  │
+│  • SSRF-guarded WebDAV proxy   (never sees your raw data)    │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**No backend.** The only true "server" you talk to is the WebDAV provider of your choice
-(Nextcloud, AList, Seafile, 坚果云, jianguoyun, infinicloud, your own dav.sh, …).
+**Backendless by default.** On mobile/desktop the only "server" you talk to is the WebDAV
+provider of your choice (Nextcloud, AList, Seafile, 坚果云, jianguoyun, infinicloud, your own
+dav.sh, …). The **NAS backend is optional** and exists only so the web version can log users
+in and remember *their settings* (sync URLs, keys) inside a zero-knowledge vault — your actual
+travel data never lives on it. See the [Web memory version](#web-memory-version-web-回忆版) below.
+
+---
+
+## Web memory version (web 回忆版)
+
+The browser build is a **read-only "memory" face** of the same app — for reliving trips on a
+big screen, not recording them. The Android phone stays the recording battlefield; the web is
+import → display.
+
+- **What works on web:** map · fog-of-war · 3D globe · journal · exploration stats · playback.
+  Recording, the Android foreground service, and P2P chat are no-ops in the browser.
+- **Storage:** drift runs on `WasmDatabase` (IndexedDB) — bundled `sqlite3.wasm` + `drift_worker.js`.
+- **Getting data in:** import a backup `.zip` (same schema as mobile), or log in and let the
+  app pull from your own sync target.
+- **Read-only by design:** editing tools are hidden; turning on **debug mode** is the backdoor
+  that re-enables them.
+- **PWA:** installable to the home screen / desktop.
+
+### Optional NAS backend (Rust + Docker)
+
+Login & per-user isolation are served by a tiny self-hosted backend in [`nas-backend/`](nas-backend/)
+(tiny_http + rusqlite + argon2 + JWT). Its **only** job is to remember each user's *settings*
+— sync URLs, provider keys — inside a **zero-knowledge encrypted vault**:
+
+- Password → PBKDF2-HMAC-SHA256 (600k iters) → HKDF → an in-memory `vaultKey` (never sent) +
+  an `authVerifier` (sent for login). Settings are sealed with AES-GCM-256 before upload.
+- The server stores only ciphertext + an auth verifier; it **cannot read your settings**, and
+  it **never stores your raw travel data** (that stays on your WebDAV/GitHub/OneDrive).
+- It also exposes an **SSRF-guarded WebDAV proxy** so the browser can reach a WebDAV host that
+  lacks CORS, without the server being usable to probe your LAN.
+
+```bash
+cd nas-backend
+cp .env.example .env          # set EJ_JWT_SECRET (≥32 bytes) and a port
+docker compose up -d          # listens on :48080 by default
+```
+
+### Deploying the web build
+
+`scripts/build-site.sh` assembles one static site — promo landing at `/`, the Flutter app at
+`/app/` — into `./dist`. CI ([`.github/workflows/deploy-web.yml`](.github/workflows/deploy-web.yml))
+builds it on every push to `main` and publishes the output to a `web-build` branch, which
+Vercel / Cloudflare Pages deploy directly (no Flutter SDK needed on the host).
+
+📖 **Full deploy & test walkthrough:** [docs/web-display-deploy.md](docs/web-display-deploy.md)
 
 ---
 
@@ -163,15 +226,16 @@ cd ios && pod install && cd ..
 open ios/Runner.xcworkspace            # set signing team, then ⌘R
 ```
 
-Web:
+Web (read-only memory version — see [Web memory version](#web-memory-version-web-回忆版)):
 
 ```bash
-# Drift uses sqlite3.wasm on web (bundled under web/). P2P chat and the
-# Android foreground service are no-ops in the browser; everything else
-# (map, fog, journal, AI, music, WebDAV, exports) works.
+# Plain app build (served at site root):
 flutter build web --release
-# Serve build/web/ with any static host:
 cd build/web && python3 -m http.server 8000
+
+# Or the integrated site (promo landing at /, app at /app/) → ./dist :
+bash scripts/build-site.sh
+cd dist && python3 -m http.server 8080
 ```
 
 Linux desktop:
@@ -382,10 +446,15 @@ lib/
     ├── permissions/  Background-location walkthrough
     ├── settings/     Everything configurable
     ├── debug/        Hidden log buffer + simulator
+    ├── auth/         Web login / register (NAS vault)
     └── about/        Version, license, contributors
+
+services/sync/      SyncStorage abstraction: WebDAV · GitHub · OneDrive · NAS
+services/vault/     Zero-knowledge settings vault (PBKDF2 → HKDF → AES-GCM)
+nas-backend/        Optional Rust + Docker backend (auth + vault + WebDAV proxy)
 ```
 
-Total: ~28,000 lines of Dart across ~103 files, organised so a single feature lives in one folder.
+Organised so a single feature lives in one folder.
 
 ---
 
@@ -406,6 +475,10 @@ Total: ~28,000 lines of Dart across ~103 files, organised so a single feature li
 - [x] Multi-transport P2P: LAN multicast / WebRTC / frp hole-punch
 - [x] Offline map-tile cache
 - [x] Quill inline image embed
+- [x] Read-only web "memory" version (import → display, PWA)
+- [x] Zero-knowledge settings vault + optional Rust/Docker NAS backend
+- [x] CI: build web on push → `web-build` branch → Vercel / Cloudflare Pages
+- [ ] Mobile-side "push settings to NAS" UI (web pull loop is in place)
 - [ ] GeoJSON polygon scoring wired into the exploration screen (loader ready; screen still uses the bbox grid)
 - [ ] Apple Watch / Wear OS companion
 - [ ] Real-time peer cursors on shared map
@@ -415,7 +488,7 @@ Total: ~28,000 lines of Dart across ~103 files, organised so a single feature li
 ## Going to production
 
 Shipping a build to friends, putting it on a store, or running it under your own brand?
-Two docs are tailored for that journey:
+These docs are tailored for that journey:
 
 - **[docs/security-data-safety.md](docs/security-data-safety.md)** — threat model, what lives in
   secure storage vs. SharedPreferences, what gets scrubbed from backups, the HTTPS-guard
@@ -423,6 +496,9 @@ Two docs are tailored for that journey:
 - **[docs/publishing.md](docs/publishing.md)** — step-by-step for Google Play, Chinese Android
   stores (Xiaomi / OPPO / vivo / Huawei / 应用宝), Apple App Store + TestFlight, plus signing,
   ProGuard, version-bump checklist, and review-rejection playbook.
+- **[docs/web-display-deploy.md](docs/web-display-deploy.md)** — deploying & testing the web
+  memory version: building `./dist`, the GitHub Actions → `web-build` → Vercel/Cloudflare flow,
+  running the NAS backend in Docker, and troubleshooting.
 
 ---
 

@@ -124,4 +124,6 @@ flutter:
   assets:
     - assets/boundaries/
     - assets/textures/
-    - docs/
+    # Only the doc the in-app viewer actually reads (关于页 → 文档). The rest of
+    # docs/ are developer/repo docs — don't bundle them into the app binary.
+    - docs/leaderboard-server-api.md
