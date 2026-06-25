@@ -72,6 +72,9 @@ class RecordingController with WidgetsBindingObserver {
 
   /// Returns null on success, or a user-facing error string on failure.
   Future<String?> start() async {
+    // Source gate: a read-only (web/回忆) build must never record, even if a
+    // record affordance somehow surfaces. Native is viewOnly=false.
+    if (ref.read(viewOnlyProvider)) return '展示模式下不可记录轨迹';
     final settings = ref.read(settingsProvider);
     final loc = ref.read(locationServiceProvider);
     final ok = await loc.start(settings.recordingMode);
@@ -112,6 +115,7 @@ class RecordingController with WidgetsBindingObserver {
   /// pipeline and drain whatever it captured while we were gone, so the
   /// trail picks up seamlessly without the user having to tap record again.
   Future<void> resumeIfRecording() async {
+    if (ref.read(viewOnlyProvider)) return; // read-only build never records
     if (ref.read(recordingActiveProvider)) return; // already wired up
     if (!await BackgroundLocation.wasRecording()) return;
     final loc = ref.read(locationServiceProvider);

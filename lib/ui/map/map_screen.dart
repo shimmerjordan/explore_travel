@@ -104,6 +104,8 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   bool _atMinZoom = false;
   int _zoomOutTries = 0; // pinch-in attempts while already fully zoomed out
   Timer? _zoomTriesReset;
+  double _prevZoom = 13.0; // last zoom seen in onMapEvent (web wheel detection)
+  bool _geoWarnedWeb = false; // one-shot "web location needs https" toast
   final Map<int, Offset> _ptrs = {}; // live pointers for pinch detection
   double? _pinchStartDist; // two-finger distance at the start of a pinch
   bool _pinchCounted = false; // already counted this two-finger gesture?
@@ -155,6 +157,25 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     _zoomTriesReset = Timer(const Duration(seconds: 4), () {
       if (mounted) setState(() => _zoomOutTries = 0);
     });
+  }
+
+  /// Zoom by [delta] levels via the +/- buttons (clamped to the map's range).
+  void _zoomBy(double delta) {
+    final cam = _mapCtrl.camera;
+    final z = (cam.zoom + delta).clamp(_kMinZoom, 19.0);
+    _mapCtrl.move(cam.center, z);
+  }
+
+  /// The "−" button. Deterministic globe path on web (where the wheel gesture
+  /// is unreliable): once at the zoom floor, each press counts toward the 3D
+  /// globe (3 presses, same as the mobile pinch). Above the floor it just
+  /// zooms out one level.
+  void _zoomOutOrGlobe() {
+    if (_mapCtrl.camera.zoom <= _kMinZoom + 0.05) {
+      _registerZoomOutTry();
+    } else {
+      _zoomBy(-1);
+    }
   }
 
   // Cached journal-pin future: rebuilt only when entries change, so we don't
@@ -242,6 +263,11 @@ class _MapScreenState extends ConsumerState<MapScreen> {
           final display = _toDisplay(pos.latitude, pos.longitude);
           _center = display;
           _mapCtrl.move(_center, 15);
+        } else if (mounted && kIsWeb) {
+          // No fix on web → almost always an insecure context (http LAN IP)
+          // or a denied browser permission. Surface it instead of silently
+          // showing the default centre with no marker.
+          _warnGeoOnceWeb(ref.read(locationServiceProvider).lastError);
         }
         _startLocationStream();
       } catch (_) {
@@ -251,9 +277,24 @@ class _MapScreenState extends ConsumerState<MapScreen> {
             _wgsLat = _simLat;
             _wgsLng = _simLng;
           });
+          if (kIsWeb) {
+            _warnGeoOnceWeb(ref.read(locationServiceProvider).lastError);
+          }
         }
       }
     });
+  }
+
+  /// One-shot web-only toast explaining why there's no location: the browser
+  /// Geolocation API only works in a secure context (https or localhost).
+  void _warnGeoOnceWeb(String? detail) {
+    if (!kIsWeb || _geoWarnedWeb || !mounted) return;
+    _geoWarnedWeb = true;
+    final extra = (detail != null && detail.isNotEmpty) ? '（$detail）' : '';
+    TopToast.show(
+      context,
+      'Web 定位失败：需用 HTTPS 或 localhost 打开，并允许浏览器定位权限$extra',
+    );
   }
 
   void _startLocationStream() {
@@ -281,10 +322,11 @@ class _MapScreenState extends ConsumerState<MapScreen> {
           _publishDisplayPos();
           _maybeFollowCamera();
         },
-        onError: (_) {},
+        onError: (_) => _warnGeoOnceWeb(null),
       );
     } catch (_) {
       // Geolocator stream not available on this platform
+      _warnGeoOnceWeb(null);
     }
   }
 
@@ -436,6 +478,8 @@ class _MapScreenState extends ConsumerState<MapScreen> {
         ? _toDisplay(_wgsLat!, _wgsLng!)
         : null;
 
+    final viewOnly = ref.watch(viewOnlyProvider);
+
     return Scaffold(
       extendBody: true,
       floatingActionButtonLocation:
@@ -560,6 +604,16 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                   _zoomTriesReset?.cancel();
                   if (mounted) setState(() => _zoomOutTries = 0);
                 }
+                // Web has no two-finger pinch — count mouse-wheel zoom-out
+                // ticks while pressed against the floor as the path into the
+                // 3D globe (parity with the 3× pinch gesture on mobile).
+                if (kIsWeb &&
+                    e is MapEventScrollWheelZoom &&
+                    atMin &&
+                    e.camera.zoom <= _prevZoom + 0.001) {
+                  _registerZoomOutTry();
+                }
+                _prevZoom = e.camera.zoom;
               },
               onTap: (tapPos, latlng) => _onMapTap(latlng, activeLayerId),
               onLongPress: (kDebugMode || ref.read(settingsProvider).debugMode)
@@ -636,14 +690,18 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                         .where((j) => !_hiddenJournalIds.contains(j.id))
                         .toList();
                     if (list.isEmpty) return const SizedBox.shrink();
-                    // Pins scale with the map: the tile scale doubles per
-                    // zoom level, so we track that 2^(zoom-ref) relative to
-                    // a reference zoom, clamped so a pin never gets absurd.
-                    // Reading the camera here makes the layer rebuild (and
-                    // rescale) live as the user zooms.
-                    final zoom = MapCamera.of(ctx).zoom;
-                    final scale =
-                        math.pow(2.0, zoom - 16.0).toDouble().clamp(0.5, 3.0);
+                    // Pin size. On NATIVE pins scale live with zoom — reading
+                    // MapCamera.zoom subscribes this layer to the camera so it
+                    // rebuilds (and rescales) every frame. On WEB that per-frame
+                    // rebuild of every journal marker (O(entries)/frame) is the
+                    // main zoom jank, so we use a FIXED size and DON'T read the
+                    // camera here — flutter_map still repositions the markers
+                    // smoothly each frame without rebuilding them.
+                    final double scale = kIsWeb
+                        ? 1.0
+                        : math.pow(2.0, MapCamera.of(ctx).zoom - 16.0)
+                            .toDouble()
+                            .clamp(0.5, 3.0);
                     return MarkerLayer(
                       markers: list.map((j) {
                         final p = _toDisplay(j.lat, j.lng);
@@ -745,37 +803,53 @@ class _MapScreenState extends ConsumerState<MapScreen> {
             bottom: 168,
             child: Column(
               children: [
-                _MapFab(
-                  icon: Icons.cleaning_services_rounded,
-                  active: _editMode == _EditMode.erase,
-                  activeColor: Colors.redAccent,
-                  onTap: () => setState(() => _editMode =
-                      _editMode == _EditMode.erase
-                          ? _EditMode.none
-                          : _EditMode.erase),
-                ),
+                // Explicit zoom controls — the only reliable way to zoom on a
+                // desktop browser (and the −, at the floor, is the path into
+                // the 3D globe where the scroll-wheel gesture is unreliable).
+                _MapFab(icon: Icons.add_rounded, onTap: () => _zoomBy(1)),
                 const SizedBox(height: 10),
                 _MapFab(
-                  icon: Icons.add_location_alt_rounded,
-                  active: _editMode == _EditMode.add,
+                  icon: Icons.remove_rounded,
+                  active: _atMinZoom && _zoomOutTries > 0,
                   activeColor: const Color(0xFF26A69A),
-                  onTap: () => setState(() => _editMode =
-                      _editMode == _EditMode.add
-                          ? _EditMode.none
-                          : _EditMode.add),
+                  onTap: _zoomOutOrGlobe,
                 ),
                 const SizedBox(height: 10),
-                // Import record points from photos' GPS — lights up the trail
-                // at each picked photo's location. Same flow as the layers
-                // page; lives here so it's reachable from the home map too.
-                Tooltip(
-                  message: '从照片定位点亮记录点',
-                  child: _MapFab(
-                    icon: Icons.add_photo_alternate_rounded,
-                    onTap: () => TrackImportFlow.fromPhotos(context, ref),
+                // Editing tools (modify fog / add points) — hidden in the
+                // read-only web viewer.
+                if (!viewOnly) ...[
+                  _MapFab(
+                    icon: Icons.cleaning_services_rounded,
+                    active: _editMode == _EditMode.erase,
+                    activeColor: Colors.redAccent,
+                    onTap: () => setState(() => _editMode =
+                        _editMode == _EditMode.erase
+                            ? _EditMode.none
+                            : _EditMode.erase),
                   ),
-                ),
-                const SizedBox(height: 10),
+                  const SizedBox(height: 10),
+                  _MapFab(
+                    icon: Icons.add_location_alt_rounded,
+                    active: _editMode == _EditMode.add,
+                    activeColor: const Color(0xFF26A69A),
+                    onTap: () => setState(() => _editMode =
+                        _editMode == _EditMode.add
+                            ? _EditMode.none
+                            : _EditMode.add),
+                  ),
+                  const SizedBox(height: 10),
+                  // Import record points from photos' GPS — lights up the trail
+                  // at each picked photo's location. Same flow as the layers
+                  // page; lives here so it's reachable from the home map too.
+                  Tooltip(
+                    message: '从照片定位点亮记录点',
+                    child: _MapFab(
+                      icon: Icons.add_photo_alternate_rounded,
+                      onTap: () => TrackImportFlow.fromPhotos(context, ref),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                ],
                 _MapFab(
                   // Highlighted while actively following during a recording.
                   // If you've panned away mid-recording it switches to the
@@ -973,6 +1047,28 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                 }),
               ),
             ),
+          // Read-only badge (web / 展示模式). Enable debug mode to unlock
+          // recording — see viewOnlyProvider (the backdoor).
+          if (ref.watch(viewOnlyProvider))
+            Positioned(
+              top: MediaQuery.of(context).padding.top + 8,
+              left: 0,
+              right: 0,
+              child: IgnorePointer(
+                child: Center(
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 5),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.55),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: const Text('只读 · 展示模式',
+                        style: TextStyle(color: Colors.white, fontSize: 12)),
+                  ),
+                ),
+              ),
+            ),
           // Hint that appears once the user starts pinching at the zoom
           // floor, guiding them into the 3D globe.
           if (_atMinZoom && _zoomOutTries > 0)
@@ -990,7 +1086,9 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                       borderRadius: BorderRadius.circular(20),
                     ),
                     child: Text(
-                      '🌐 再捏合缩小 ${3 - _zoomOutTries} 次进入 3D 地球',
+                      kIsWeb
+                          ? '🌐 再点「−」缩小 ${3 - _zoomOutTries} 次进入 3D 地球'
+                          : '🌐 再捏合缩小 ${3 - _zoomOutTries} 次进入 3D 地球',
                       style: const TextStyle(
                           color: Colors.white, fontSize: 13),
                     ),

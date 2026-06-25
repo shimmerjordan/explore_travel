@@ -24,9 +24,16 @@ TileLayer buildTileLayer({
         urlTemplate: url,
         subdomains: subdomains,
         userAgentPackageName: ua,
-        tileProvider: CachedTileProvider(),
-        keepBuffer: 5,
-        panBuffer: 3,
+        // cached_network_image's web path throws "source image cannot be
+        // decoded" (EncodingError) for tiles, so on web use flutter_map's
+        // plain NetworkTileProvider (the browser HTTP-caches anyway). Native
+        // keeps the persistent on-disk CachedTileProvider.
+        tileProvider: kIsWeb ? NetworkTileProvider() : CachedTileProvider(),
+        // Native pre-loads/keeps a generous ring of tiles for buttery panning.
+        // On web every extra tile is another canvaskit composite op per frame,
+        // so keep the working set small — much smoother zoom/pan in a browser.
+        keepBuffer: kIsWeb ? 1 : 5,
+        panBuffer: kIsWeb ? 0 : 3,
       );
 
   const amapSubs = ['1', '2', '3', '4'];

@@ -84,3 +84,4 @@ desktop.ini
 /test_exports/
 /backup_dumps/
 *.tmp
+/dist/

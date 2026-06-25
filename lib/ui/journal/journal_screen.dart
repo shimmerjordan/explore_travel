@@ -9,6 +9,7 @@ import '../../app/providers.dart';
 import '../../data/db/database.dart';
 import '../../services/imghost/private_image_loader.dart';
 import '../../services/media/exif_service.dart';
+import '../map/native_file_image_io.dart';
 import 'quill_editor_screen.dart';
 
 class JournalScreen extends ConsumerStatefulWidget {
@@ -778,11 +779,10 @@ class JournalMediaThumb extends ConsumerWidget {
         errorBuilder: (_, __, ___) => const Icon(Icons.broken_image),
       );
     } else {
-      child = Image.file(
-        File(path),
-        fit: BoxFit.cover,
-        errorBuilder: (_, __, ___) => const Icon(Icons.broken_image),
-      );
+      // Local file path. NativeFileImage is conditionally compiled: real
+      // Image.file on native, a broken-image placeholder on web (no dart:io at
+      // runtime) — so a view-only web build doesn't throw on local-only photos.
+      child = NativeFileImage(path: path);
     }
     return ClipRRect(
       borderRadius: BorderRadius.circular(6),
@@ -838,8 +838,8 @@ class _FullscreenGalleryState extends ConsumerState<_FullscreenGallery> {
             fit: BoxFit.contain,
             errorBuilder: (_, __, ___) => broken);
       }
-      return Image.file(File(path),
-          fit: BoxFit.contain, errorBuilder: (_, __, ___) => broken);
+      // Local file — web-safe via the conditional NativeFileImage.
+      return NativeFileImage(path: path, fit: BoxFit.contain);
     }
 
     return Scaffold(

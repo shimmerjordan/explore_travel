@@ -8,7 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/providers.dart';
 import '../backup/backup_service.dart';
-import 'onedrive_service.dart';
+import 'sync_storage.dart';
 
 class SyncUpResult {
   final int uploaded;
@@ -20,13 +20,18 @@ class SyncUpResult {
 /// (done, total, label) progress callback for the sync engine.
 typedef SyncProgress = void Function(int done, int total, String label);
 
-/// FOW-style incremental sync to OneDrive — **sharded**.
+/// FOW-style incremental sync — **sharded**, transport-agnostic.
+///
+/// Drives a [SyncStorage] (OneDrive / WebDAV / GitHub / NAS proxy) through a
+/// 3-method byte interface, so the shard / diff / merge pipeline below is
+/// identical regardless of where the bytes actually land. (Historically this
+/// only spoke to OneDrive — hence the file name; the body no longer knows.)
 ///
 /// The backup archive explodes into tens of thousands of tiny files (one
 /// 512-byte `.bin` per fog block). Uploading each as its own HTTP request is
 /// brutally slow and makes per-file progress read as "0%". So instead of
 /// syncing archive entries 1:1, we group them into a MODEST number of
-/// medium-sized shard zips under `Apps/Explore Journal/Sync/`:
+/// medium-sized shard zips under the transport's Sync root:
 ///
 ///   * fog blocks → one shard per ~16 FOW tiles (`fog/<layer>/<bx>_<by>.zip`),
 ///     just like Fog of World keeps per-tile files — spatially local, so only
@@ -40,11 +45,16 @@ typedef SyncProgress = void Function(int done, int total, String label);
 /// (git-like: unchanged history is never re-sent), delete vanished ones, and
 /// reassemble everything on restore. Shard zips are packed deterministically
 /// (sorted entries, zeroed mtime) so an unchanged shard keeps the same MD5.
-class OneDriveSyncEngine {
+class SyncEngine {
   final Ref ref;
-  OneDriveSyncEngine(this.ref);
+  SyncEngine(this.ref);
 
   static const _indexName = '.ej_index.json';
+
+  /// Test seam for [_shardFor] — the shard-routing logic is pure and worth
+  /// pinning without standing up a transport.
+  @visibleForTesting
+  static String shardFor(String path) => _shardFor(path);
 
   /// Which shard an archive entry belongs to. Pure function of the path so the
   /// grouping is stable across runs.
@@ -89,7 +99,7 @@ class OneDriveSyncEngine {
     SyncProgress? onProgress,
     CancelToken? cancelToken,
   }) async {
-    final od = ref.read(oneDriveServiceProvider);
+    final od = ref.read(syncStorageProvider);
 
     onProgress?.call(0, 1, '导出本地数据…');
     debugPrint('[Sync] export modules: ${modules.join(',')}');
@@ -173,7 +183,7 @@ class OneDriveSyncEngine {
     SyncProgress? onProgress,
     CancelToken? cancelToken,
   }) async {
-    final od = ref.read(oneDriveServiceProvider);
+    final od = ref.read(syncStorageProvider);
     onProgress?.call(0, 1, '读取云端索引…');
     final remoteIndex = await _readIndex(od, cancelToken);
     if (remoteIndex.isEmpty) {
@@ -213,7 +223,7 @@ class OneDriveSyncEngine {
   }
 
   Future<Map<String, String>> _readIndex(
-      OneDriveService od, CancelToken? cancelToken) async {
+      SyncStorage od, CancelToken? cancelToken) async {
     final bytes = await od.getSyncFile(_indexName, cancelToken: cancelToken);
     if (bytes == null) return {};
     try {
@@ -256,5 +266,4 @@ class OneDriveSyncEngine {
   }
 }
 
-final oneDriveSyncEngineProvider =
-    Provider<OneDriveSyncEngine>((ref) => OneDriveSyncEngine(ref));
+final syncEngineProvider = Provider<SyncEngine>((ref) => SyncEngine(ref));

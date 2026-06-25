@@ -63,6 +63,15 @@ class WebDavService {
 
   bool get isReady => _client != null;
 
+  /// The underlying configured client, or null when WebDAV isn't set up.
+  /// Exposed so [WebdavSyncStorage] can do byte-level shard I/O (`write` /
+  /// `read` / `remove`) without the temp-file dance the legacy zip backup uses.
+  wd.Client? get rawClient => _client;
+
+  /// Resolved sync-shard root on the WebDAV server. Shards live under here as
+  /// `<root>/<rel>` (e.g. `/explore_journal/Sync/meta.zip`).
+  static const syncRoot = '/explore_journal/Sync';
+
   /// Last URL we built a client for, including any scheme we had to inject.
   /// Exposed so the test button can show users what's actually being hit —
   /// the #1 source of confusion is "I typed a port but it isn't being used".

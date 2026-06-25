@@ -26,6 +26,8 @@ import 'ui/leaderboard/leaderboard_screen.dart';
 import 'ui/about/about_screen.dart';
 import 'ui/permissions/permissions_screen.dart';
 import 'app/providers.dart' show groupLifecycleProvider;
+import 'services/vault/auth_controller.dart';
+import 'ui/auth/login_screen.dart';
 import 'services/debug/log_buffer.dart';
 import 'ui/debug/debug_screen.dart';
 import 'main_native.dart' if (dart.library.js_interop) 'main_web.dart'
@@ -41,6 +43,18 @@ void main() {
   // collapses repeated exceptions into "Another exception was thrown" with
   // no detail.
   FlutterError.onError = (details) {
+    final lib = details.library ?? '';
+    final ex = details.exceptionAsString();
+    // Image-decode failures (a broken/unsupported image, common on web for
+    // missing or cross-origin sources) are non-fatal — each Image handles them
+    // via errorBuilder. Don't dump a full stack per occurrence; it floods the
+    // console without telling us anything actionable.
+    if (lib.contains('image resource') ||
+        ex.contains('EncodingError') ||
+        ex.contains('cannot be decoded')) {
+      debugPrint('[image] decode failed (non-fatal): $ex');
+      return;
+    }
     FlutterError.dumpErrorToConsole(details);
     debugPrint('=== FLUTTER ERROR ===');
     debugPrint('library: ${details.library}');
@@ -81,11 +95,42 @@ void main() {
   runApp(const ProviderScope(child: ExploreJournalApp()));
 }
 
-class ExploreJournalApp extends ConsumerWidget {
+class ExploreJournalApp extends ConsumerStatefulWidget {
   const ExploreJournalApp({super.key});
 
-  static final _router = GoRouter(
+  @override
+  ConsumerState<ExploreJournalApp> createState() => _ExploreJournalAppState();
+}
+
+class _ExploreJournalAppState extends ConsumerState<ExploreJournalApp> {
+  // Built ONCE (late final) so router rebuilds never drop the navigation stack.
+  late final GoRouter _router = _makeRouter();
+
+  @override
+  void initState() {
+    super.initState();
+    // Resolve the initial auth state (web gate) AFTER the first frame —
+    // restore() flips the AuthController (a refreshListenable), and notifying
+    // a listenable during the initial build would dirty the tree mid-build.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      ref.read(authControllerProvider).restore();
+    });
+  }
+
+  GoRouter _makeRouter() => GoRouter(
+    // Re-evaluate the redirect whenever auth state flips (login / logout).
+    refreshListenable: ref.read(authControllerProvider),
+    redirect: (context, state) {
+      if (!kIsWeb) return null; // native is never gated
+      final s = ref.read(authStateProvider);
+      if (s.status == AuthStatus.unknown) return null; // still resolving
+      final atLogin = state.matchedLocation == '/login';
+      if (s.status == AuthStatus.loggedOut && !atLogin) return '/login';
+      if (s.status == AuthStatus.loggedIn && atLogin) return '/';
+      return null;
+    },
     routes: [
+      GoRoute(path: '/login', builder: (_, __) => const LoginScreen()),
       GoRoute(path: '/', builder: (_, __) => const MapScreen()),
       GoRoute(path: '/globe', builder: (_, __) => const GlobeScreen()),
       GoRoute(path: '/menu', builder: (_, __) => const HomeScreen()),
@@ -125,7 +170,7 @@ class ExploreJournalApp extends ConsumerWidget {
   );
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     // Eagerly instantiate so it begins reacting to settings on launch.
     ref.read(groupLifecycleProvider);
     return kIsWeb
@@ -138,10 +183,10 @@ class ExploreJournalApp extends ConsumerWidget {
             localizationsDelegates: _localizationsDelegates,
             supportedLocales: _supportedLocales,
           )
-        : _buildWithForegroundTask(context, ref);
+        : _buildWithForegroundTask(context);
   }
 
-  Widget _buildWithForegroundTask(BuildContext context, WidgetRef _) {
+  Widget _buildWithForegroundTask(BuildContext context) {
     return platform.wrapWithForegroundTask(
       child: MaterialApp.router(
         title: 'Explore Journal',

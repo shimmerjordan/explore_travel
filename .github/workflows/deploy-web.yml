@@ -1,0 +1,71 @@
+name: Deploy web (landing + app)
+
+# Builds the integrated static site (promo landing at /, Flutter app at /app/)
+# and deploys it on every push to main. Pick ONE deploy job below.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'lib/**'
+      - 'web/**'
+      - 'website/**'
+      - 'pubspec.yaml'
+      - 'pubspec.lock'
+      - 'scripts/build-site.sh'
+      - '.github/workflows/deploy-web.yml'
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: '3.32.1' # keep in sync with your local Flutter
+      - run: flutter pub get
+      - run: bash scripts/build-site.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: site
+          path: dist
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # KEEP ONLY THE DEPLOY JOB FOR THE PLATFORM YOU USE — delete the other, or an
+  # unconfigured one (missing secrets) will fail the run.
+  # ─────────────────────────────────────────────────────────────────────────
+
+  # ── Option A: Cloudflare Pages ────────────────────────────────────────────
+  # Secrets needed (repo → Settings → Secrets and variables → Actions):
+  #   CLOUDFLARE_API_TOKEN  (Pages:Edit), CLOUDFLARE_ACCOUNT_ID
+  # One-time: create a Pages project named `explore-journal` (Direct Upload).
+  deploy-cloudflare:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: site, path: dist }
+      - uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy dist --project-name=explore-journal
+
+  # ── Option B: Vercel ──────────────────────────────────────────────────────
+  # Secrets needed: VERCEL_TOKEN, VERCEL_ORG_ID, VERCEL_PROJECT_ID
+  # (org/project IDs come from `vercel link` locally, or the project settings).
+  deploy-vercel:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: site, path: dist }
+      - run: npm i -g vercel@latest
+      - run: vercel deploy dist --prod --yes --token "$VERCEL_TOKEN"
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}

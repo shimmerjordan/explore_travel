@@ -11,6 +11,9 @@ window.SITE_CONFIG = {
   // ── 链接 / Links ────────────────────────────────────────────────────────
   repoUrl: 'https://github.com/shimmerjordan/explore_travel',
   releasesUrl: 'https://github.com/shimmerjordan/explore_travel/releases/latest',
+  // Where the Flutter web "memory" app is mounted, relative to this landing
+  // page. The deploy assembles the app under /app/ (see docs/web-display-deploy.md).
+  appUrl: 'app/',
 
   // ── 品牌 / Brand ─────────────────────────────────────────────────────────
   brandColor: '#26A69A',   // 主色（也可在 styles.css 的 :root 改）

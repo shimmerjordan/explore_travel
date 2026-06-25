@@ -1,6 +1,5 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 import 'package:archive/archive.dart';
 import 'package:drift/drift.dart' show Value, InsertMode;
 import 'package:flutter/foundation.dart';
@@ -676,11 +675,14 @@ class BackupService {
   }
 }
 
-/// List of `app_settings_v1` field names that must be stripped before
-/// any backup leaves the device. Kept here next to the backup logic so
-/// adding a new credential field is hard to forget — every reviewer of
-/// a settings change will see this list nearby.
-const _kSecretSettingsKeys = <String>{
+/// `app_settings_v1` field names that hold weaponizable secrets (PATs,
+/// passwords, tokens, bearer-equivalents) — stripped before any backup leaves
+/// the device. Kept next to the backup logic so adding a new credential field
+/// is hard to forget. **Public** so the zero-knowledge settings vault (a
+/// separate path that, unlike backup, KEEPS these — encrypted client-side)
+/// derives its secret set from the same single source of truth: a key added
+/// here is covered by both, never one and not the other.
+const kVaultSecretKeys = <String>{
   'webdavPass',
   'p2pPassphrase',
   'aiApiKey',
@@ -702,7 +704,7 @@ const _kSecretSettingsKeys = <String>{
 String _scrubSettings(String raw) {
   try {
     final j = jsonDecode(raw) as Map<String, dynamic>;
-    for (final k in _kSecretSettingsKeys) {
+    for (final k in kVaultSecretKeys) {
       if (j.containsKey(k)) j[k] = null;
     }
     return jsonEncode(j);

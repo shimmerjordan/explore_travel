@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 import '../../app/providers.dart';
 import '../../models/models.dart';
 import '../../services/ai/ai_service.dart';
+import '../widgets/responsive_content.dart';
 
 class SettingsScreen extends ConsumerWidget {
   const SettingsScreen({super.key});
@@ -15,7 +16,8 @@ class SettingsScreen extends ConsumerWidget {
     final cs = Theme.of(context).colorScheme;
 
     return Scaffold(
-      body: CustomScrollView(
+      body: ResponsiveContent(
+          child: CustomScrollView(
         slivers: [
           SliverAppBar.large(
             title: const Text('设置',
@@ -229,7 +231,7 @@ class SettingsScreen extends ConsumerWidget {
             ]),
           ),
         ],
-      ),
+      )),
     );
   }
 

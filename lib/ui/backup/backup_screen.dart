@@ -15,6 +15,7 @@ import '../../services/sync/onedrive_service.dart';
 import '../../services/sync/onedrive_sync_engine.dart';
 import '../../services/fog/fog_engine.dart';
 import '../../services/fog/fow_compat.dart';
+import '../widgets/responsive_content.dart';
 
 /// 统一备份页：模块选择 + 本地导出/导入 + WebDAV 上传/恢复。
 /// 所有路径都走 [BackupService] 的模块化 JSON 格式 —— 本地文件和 WebDAV
@@ -73,7 +74,8 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
           ),
         ],
       ),
-      body: ListView(
+      body: ResponsiveContent(
+          child: ListView(
         padding: const EdgeInsets.symmetric(vertical: 8),
         children: [
           Container(
@@ -265,7 +267,7 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
               ),
             ),
         ],
-      ),
+      )),
     );
   }
 
@@ -412,12 +414,16 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
     final res = await FilePicker.platform.pickFiles(
       type: FileType.custom,
       allowedExtensions: ['zip'],
-      withData: false,
+      // withData so the bytes come back in-memory: on web there is no file
+      // path, and BackupService.importFromArchive is pure-bytes anyway.
+      withData: true,
     );
-    if (res == null || res.files.single.path == null) return;
+    if (res == null || res.files.isEmpty) return;
+    final picked = res.files.single;
+    if (picked.bytes == null && picked.path == null) return;
     final status = await _withProgress<String>('导入备份', (report, _) async {
       report(null, '读取文件…');
-      final bytes = await File(res.files.single.path!).readAsBytes();
+      final bytes = picked.bytes ?? await File(picked.path!).readAsBytes();
       report(null, '合并导入…');
       return _runImport(bytes);
     });
@@ -530,7 +536,7 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
     }
     final res =
         await _withProgress<SyncUpResult>('同步到 OneDrive', (report, cancel) {
-      return ref.read(oneDriveSyncEngineProvider).syncUp(
+      return ref.read(syncEngineProvider).syncUp(
             modules: _selectedModules(ref.read(settingsProvider)),
             cancelToken: cancel,
             onProgress: (done, total, label) =>
@@ -546,7 +552,7 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
   Future<void> _oneDriveSyncDown() async {
     final status =
         await _withProgress<String>('从 OneDrive 恢复', (report, cancel) async {
-      final summary = await ref.read(oneDriveSyncEngineProvider).syncDown(
+      final summary = await ref.read(syncEngineProvider).syncDown(
             modules: _selectedModules(ref.read(settingsProvider)),
             clearBeforeImport:
                 ref.read(settingsProvider).importClearBeforeImport,

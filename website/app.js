@@ -55,6 +55,7 @@
   // ── links ───────────────────────────────────────────────────────────────
   function applyLinks() {
     setHref('navGithub', CFG.repoUrl);
+    setHref('heroApp', CFG.appUrl);
     setHref('heroSecondary', CFG.repoUrl);
     setHref('heroPrimary', CFG.releasesUrl);
     setHref('dlReleases', CFG.releasesUrl);
@@ -77,6 +78,7 @@
     setText('heroTitle', t.hero.title);
     setText('heroSubtitle', t.hero.subtitle);
     setText('heroDesc', t.hero.desc);
+    setText('heroApp', t.hero.ctaApp);
     setText('heroPrimary', t.hero.ctaPrimary);
     setText('heroSecondary', t.hero.ctaSecondary);
     setText('heroVideo', t.hero.ctaVideo);

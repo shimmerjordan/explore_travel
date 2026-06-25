@@ -1,0 +1,28 @@
+[package]
+name = "ejnas"
+version = "0.1.0"
+edition = "2021"
+description = "explore_journal NAS backend: zero-knowledge settings vault + read proxy"
+
+[[bin]]
+name = "ejnas"
+path = "src/main.rs"
+
+[dependencies]
+tiny_http = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.31", features = ["bundled"] }
+argon2 = "0.5"
+jsonwebtoken = "9"
+base64 = "0.22"
+rand = "0.8"
+ureq = "2"
+sha2 = "0.10"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+codegen-units = 1
+panic = "abort"

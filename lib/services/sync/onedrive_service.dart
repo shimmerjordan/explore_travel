@@ -10,6 +10,7 @@ import 'package:flutter_web_auth_2/flutter_web_auth_2.dart';
 import '../../app/providers.dart';
 import '../../core/prefs.dart';
 import 'onedrive_config.dart';
+import 'sync_storage.dart';
 
 /// OneDrive sync via Microsoft Graph + OAuth2 (authorization-code + PKCE).
 ///
@@ -24,7 +25,11 @@ import 'onedrive_config.dart';
 /// PREREQUISITE: the user registers an Azure app (any personal MS account
 /// works) and pastes its Application (client) ID into settings, and adds the
 /// redirect URI [redirectUri] under "Mobile and desktop applications".
-class OneDriveService {
+///
+/// Implements [SyncStorage] via its `putSyncFile` / `getSyncFile` /
+/// `deleteSyncFile` methods (defined below) so [SyncEngine] can drive it
+/// through the transport-agnostic interface.
+class OneDriveService implements SyncStorage {
   final Ref ref;
   OneDriveService(this.ref) {
     // Fail fast on a dead network instead of hanging the UI forever, and log
@@ -337,6 +342,7 @@ class OneDriveService {
     return '$_graph/me/drive/special/approot:/Sync/$enc:/content';
   }
 
+  @override
   Future<void> putSyncFile(String rel, List<int> bytes,
       {CancelToken? cancelToken}) async {
     final token = await _validAccessToken(cancelToken);
@@ -352,6 +358,7 @@ class OneDriveService {
     );
   }
 
+  @override
   Future<Uint8List?> getSyncFile(String rel, {CancelToken? cancelToken}) async {
     final token = await _validAccessToken(cancelToken);
     try {
@@ -372,6 +379,7 @@ class OneDriveService {
     }
   }
 
+  @override
   Future<void> deleteSyncFile(String rel, {CancelToken? cancelToken}) async {
     final token = await _validAccessToken(cancelToken);
     final enc = rel.split('/').map(Uri.encodeComponent).join('/');

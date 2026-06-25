@@ -1,12 +1,13 @@
 {
-    "name": "explore_journal",
-    "short_name": "explore_journal",
-    "start_url": ".",
+    "name": "Explore Journal · 探索旅程",
+    "short_name": "探索旅程",
+    "start_url": "./",
+    "scope": "./",
     "display": "standalone",
-    "background_color": "#0175C2",
-    "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
-    "orientation": "portrait-primary",
+    "background_color": "#0F1923",
+    "theme_color": "#0F1923",
+    "description": "自托管的旅行足迹回忆版：迷雾地图、轨迹、旅行手账。",
+    "orientation": "any",
     "prefer_related_applications": false,
     "icons": [
         {

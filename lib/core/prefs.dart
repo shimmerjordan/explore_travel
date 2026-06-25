@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/models.dart';
 
@@ -32,6 +33,18 @@ class AppSettings {
   final String? oneDriveClientId;
   final String? oneDriveRefreshToken;
   final String? oneDriveAccount;
+  /// Which sync transport the incremental [SyncEngine] uses. One of
+  /// [SyncBackend.all] ('onedrive' | 'github' | 'webdav' | 'nas'). Defaults to
+  /// 'onedrive' so existing installs and mobile behave exactly as before.
+  final String syncBackend;
+  /// NAS web-display backend (zero-knowledge vault host). Non-secret config:
+  /// the server base URL, the account email, and the b64 KDF salt returned by
+  /// `GET /auth/salt` (cached so re-login can derive without a round trip).
+  /// The session token is NOT here — it's bearer-equivalent and short-lived,
+  /// kept in a dedicated clearable store ([NasTokenStore]).
+  final String? nasServerUrl;
+  final String? nasAccountEmail;
+  final String? nasKdfSalt;
   final String? zerotierNetworkId;
   final String displayName;
   final String? p2pPassphrase;
@@ -204,6 +217,10 @@ class AppSettings {
     this.oneDriveClientId,
     this.oneDriveRefreshToken,
     this.oneDriveAccount,
+    this.syncBackend = 'onedrive',
+    this.nasServerUrl,
+    this.nasAccountEmail,
+    this.nasKdfSalt,
     this.zerotierNetworkId,
     this.displayName = '旅人',
     this.p2pPassphrase,
@@ -286,6 +303,10 @@ class AppSettings {
     String? oneDriveClientId,
     String? oneDriveRefreshToken,
     String? oneDriveAccount,
+    String? syncBackend,
+    String? nasServerUrl,
+    String? nasAccountEmail,
+    String? nasKdfSalt,
     String? zerotierNetworkId,
     String? displayName,
     String? p2pPassphrase,
@@ -366,6 +387,10 @@ class AppSettings {
         oneDriveClientId: oneDriveClientId ?? this.oneDriveClientId,
         oneDriveRefreshToken: oneDriveRefreshToken ?? this.oneDriveRefreshToken,
         oneDriveAccount: oneDriveAccount ?? this.oneDriveAccount,
+        syncBackend: syncBackend ?? this.syncBackend,
+        nasServerUrl: nasServerUrl ?? this.nasServerUrl,
+        nasAccountEmail: nasAccountEmail ?? this.nasAccountEmail,
+        nasKdfSalt: nasKdfSalt ?? this.nasKdfSalt,
         zerotierNetworkId: zerotierNetworkId ?? this.zerotierNetworkId,
         displayName: displayName ?? this.displayName,
         p2pPassphrase: p2pPassphrase ?? this.p2pPassphrase,
@@ -462,6 +487,10 @@ class AppSettings {
         'oneDriveClientId': oneDriveClientId,
         'oneDriveRefreshToken': oneDriveRefreshToken,
         'oneDriveAccount': oneDriveAccount,
+        'syncBackend': syncBackend,
+        'nasServerUrl': nasServerUrl,
+        'nasAccountEmail': nasAccountEmail,
+        'nasKdfSalt': nasKdfSalt,
         'zerotierNetworkId': zerotierNetworkId,
         'displayName': displayName,
         'p2pPassphrase': p2pPassphrase,
@@ -544,6 +573,10 @@ class AppSettings {
         oneDriveClientId: j['oneDriveClientId'],
         oneDriveRefreshToken: j['oneDriveRefreshToken'],
         oneDriveAccount: j['oneDriveAccount'],
+        syncBackend: j['syncBackend']?.toString() ?? 'onedrive',
+        nasServerUrl: j['nasServerUrl']?.toString(),
+        nasAccountEmail: j['nasAccountEmail']?.toString(),
+        nasKdfSalt: j['nasKdfSalt']?.toString(),
         zerotierNetworkId: j['zerotierNetworkId'],
         displayName: j['displayName'] ?? '旅人',
         p2pPassphrase: j['p2pPassphrase'],
@@ -645,6 +678,12 @@ class PrefsStore {
   static const _key = 'app_settings_v1';
 
   Future<AppSettings> load() async {
+    // WEB SECRET HYGIENE: the web build is a stateless read-only viewer whose
+    // settings (incl. credentials) come from the zero-knowledge vault each
+    // session and live only in memory. Never read/write them to localStorage
+    // (which shared_preferences uses on web) — so a shared browser can't leak
+    // a previous user's PAT/WebDAV password. Native persists normally.
+    if (kIsWeb) return const AppSettings();
     final p = await SharedPreferences.getInstance();
     final raw = p.getString(_key);
     if (raw == null) return const AppSettings();
@@ -652,6 +691,7 @@ class PrefsStore {
   }
 
   Future<void> save(AppSettings s) async {
+    if (kIsWeb) return; // see load(): web settings are in-memory only
     final p = await SharedPreferences.getInstance();
     await p.setString(_key, jsonEncode(s.toJson()));
   }

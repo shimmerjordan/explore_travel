@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:crypto/crypto.dart' as crypto_hash;
 import 'package:drift/drift.dart' show Value;
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:uuid/uuid.dart';
@@ -17,6 +18,12 @@ import '../services/music/music_service.dart';
 import '../services/p2p/crypto.dart';
 import '../services/p2p/p2p_service.dart';
 import '../services/webdav/webdav_service.dart';
+import '../services/sync/sync_storage.dart';
+import '../services/sync/onedrive_service.dart';
+import '../services/sync/github_sync_storage.dart';
+import '../services/sync/webdav_sync_storage.dart';
+import '../services/sync/nas_vault_backed_storage.dart';
+import '../services/vault/vault_sync_controller.dart';
 import '../services/imghost/upload_queue.dart';
 import '../services/backup/backup_service.dart';
 import '../services/geo/geocoding_service.dart';
@@ -25,6 +32,17 @@ import '../services/leaderboard/leaderboard_service.dart';
 import '../services/leaderboard/leaderboard_sync.dart';
 
 final prefsStoreProvider = Provider((_) => PrefsStore());
+
+/// Read-only "memory / 回忆" mode. ON for web (the web build is a viewer, not a
+/// recorder), OFF for native. When on, recording / capture / P2P affordances
+/// are hidden and the recording pipeline refuses to start at the source.
+///
+/// **Backdoor**: enabling debug mode disables read-only — so a developer can
+/// unlock recording/editing on web by toggling debug mode (tap the version
+/// label 10× on the menu screen). `&&` short-circuits on native, so this never
+/// reads settings there (and stays test-safe).
+final viewOnlyProvider =
+    Provider<bool>((ref) => kIsWeb && !ref.watch(settingsProvider).debugMode);
 
 final settingsProvider =
     StateNotifierProvider<SettingsNotifier, AppSettings>((ref) {
@@ -106,6 +124,39 @@ final webdavServiceProvider = Provider<WebDavService>((ref) {
   final svc = WebDavService();
   svc.configure(s);
   return svc;
+});
+
+/// The active sync transport for [SyncEngine], chosen by
+/// [AppSettings.syncBackend]. OneDrive is the default so existing installs and
+/// mobile are unchanged.
+///
+/// On web the credential (e.g. a GitHub PAT) lives only in memory — it comes
+/// from the decrypted zero-knowledge vault and is NEVER persisted (see
+/// [PrefsStore] web hygiene). So GitHub is a valid web transport (its API sends
+/// CORS headers). Direct WebDAV from a browser is usually CORS-blocked and will
+/// fail at call time (the login flow treats sync failures as non-fatal,
+/// local-first); routing it through the NAS proxy is future work.
+final syncStorageProvider = Provider<SyncStorage>((ref) {
+  final s = ref.watch(settingsProvider);
+  switch (s.syncBackend) {
+    case SyncBackend.github:
+      return GithubSyncStorage.fromSettings(s);
+    case SyncBackend.webdav:
+      return WebdavSyncStorage(ref.watch(webdavServiceProvider));
+    case SyncBackend.nas:
+      return NasVaultBackedStorage(ref);
+    case SyncBackend.onedrive:
+    default:
+      return ref.watch(oneDriveServiceProvider);
+  }
+});
+
+/// App-scoped controller for the NAS zero-knowledge vault (login / push /
+/// pull). Long-lived so its in-memory vaultKey + debounce survive navigation.
+final vaultSyncControllerProvider = Provider<VaultSyncController>((ref) {
+  final c = VaultSyncController(ref);
+  ref.onDispose(c.dispose);
+  return c;
 });
 
 final p2pServiceProvider = Provider<P2PService>((ref) {
