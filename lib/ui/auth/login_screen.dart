@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../app/providers.dart';
 import '../../services/vault/auth_controller.dart';
 
 /// Web login gate. Collects the NAS server URL + account + password, derives
@@ -21,6 +22,20 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   bool _registering = false;
   bool _busy = false;
   String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    // Prefill: last-used backend first, else the same-machine default (the
+    // docker-compose backend listens on 48080).
+    final s = ref.read(settingsProvider);
+    _server.text = (s.nasServerUrl?.isNotEmpty ?? false)
+        ? s.nasServerUrl!
+        : 'http://localhost:48080';
+    if (s.nasAccountEmail?.isNotEmpty ?? false) {
+      _email.text = s.nasAccountEmail!;
+    }
+  }
 
   @override
   void dispose() {
@@ -63,7 +78,9 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     if (s.contains('Weak')) return '口令太短（至少 8 位）';
     if (s.contains('401') || s.contains('invalid credentials')) return '邮箱或口令错误';
     if (s.contains('409') || s.contains('already registered')) return '该邮箱已注册，请改为登录';
-    if (s.contains('NAS 地址')) return 'NAS 地址需为 http(s):// 开头的完整 URL';
+    if (s.contains('后端地址') || s.contains('NAS 地址')) {
+      return '后端地址需为 http(s):// 开头的完整 URL';
+    }
     return '失败：$s';
   }
 
@@ -92,8 +109,8 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                 TextField(
                   controller: _server,
                   decoration: const InputDecoration(
-                    labelText: 'NAS 地址',
-                    hintText: 'http://192.168.1.10:48080',
+                    labelText: '后端地址',
+                    hintText: 'http://localhost:48080（NAS 部署则填其地址）',
                     prefixIcon: Icon(Icons.dns),
                   ),
                   keyboardType: TextInputType.url,

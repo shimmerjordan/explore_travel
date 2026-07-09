@@ -32,10 +32,12 @@ import 'sync_storage.dart';
 class OneDriveService implements SyncStorage {
   final Ref ref;
   OneDriveService(this.ref) {
-    // Fail fast on a dead network instead of hanging the UI forever, and log
-    // every request so a stuck sync is visible in the console / debug log.
+    // ERRORS ONLY. Logging every request/response floods the console during a
+    // sync (thousands of per-tile calls) — the user explicitly asked for that
+    // to stop. Failures are rare and worth surfacing, so keep just those; the
+    // SyncEngine already prints the key-node summary (what changed / fetched).
     _dio.interceptors.add(LogInterceptor(
-      request: true,
+      request: false,
       requestHeader: false,
       requestBody: false,
       responseHeader: false,
@@ -57,6 +59,22 @@ class OneDriveService implements SyncStorage {
   /// not the underscore-bearing bundle id. Register this exact URI in Azure.
   static const redirectUri = 'com.explorejournal.oauth://auth';
   static const callbackScheme = 'com.explorejournal.oauth';
+
+  /// Web redirect target: our own hosted `auth.html` next to the app. A
+  /// browser can't dispatch a custom scheme back into the page — that's the
+  /// "要打开 …oauth 吗？" prompt that goes nowhere — so web must round-trip
+  /// through an https callback page. Register this URI in Azure under the
+  /// **单页应用程序 (SPA)** platform (NOT "Mobile and desktop"), or the
+  /// browser-side token exchange is rejected with AADSTS9002326.
+  static String redirectUriForBase(Uri base) =>
+      // resolve() drops the base's query and fragment (RFC 3986), so a hash
+      // route like http://host/app/#/backup yields http://host/app/auth.html.
+      base.resolve('auth.html').removeFragment().toString();
+
+  /// Platform-appropriate redirect URI (custom scheme on native, auth.html
+  /// on web).
+  static String get effectiveRedirectUri =>
+      kIsWeb ? redirectUriForBase(Uri.base) : redirectUri;
 
   // App-folder gives a sandboxed folder + least privilege. User.Read is only
   // for showing which account is connected.
@@ -122,10 +140,11 @@ class OneDriveService implements SyncStorage {
             .replaceAll('=', '');
     final state = _randomString(24);
 
+    final redirect = effectiveRedirectUri;
     final authUrl = Uri.parse(_authorize).replace(queryParameters: {
       'client_id': clientId,
       'response_type': 'code',
-      'redirect_uri': redirectUri,
+      'redirect_uri': redirect,
       'response_mode': 'query',
       'scope': _scopes,
       'code_challenge': challenge,
@@ -157,7 +176,7 @@ class OneDriveService implements SyncStorage {
         'client_id': clientId,
         'grant_type': 'authorization_code',
         'code': code,
-        'redirect_uri': redirectUri,
+        'redirect_uri': redirect,
         'code_verifier': verifier,
         'scope': _scopes,
       },
@@ -333,19 +352,59 @@ class OneDriveService implements SyncStorage {
   }
 
   // ── Incremental Sync folder: Apps/Explore Journal/Sync/<relPath> ──────────
-  // Per-file ops used by OneDriveSyncEngine for FOW-style incremental sync.
-  // Files here are individual backup entries (small), so a simple PUT/GET is
-  // enough — no upload session needed.
+  // Per-file ops used by the SyncEngine for FOW-style incremental sync.
+  // Shards are usually a few MB — simple PUT/GET; anything past the Graph
+  // simple-PUT limit falls back to a resumable upload session.
 
   String _syncContentUrl(String rel) {
     final enc = rel.split('/').map(Uri.encodeComponent).join('/');
     return '$_graph/me/drive/special/approot:/Sync/$enc:/content';
   }
 
+  /// Graph rejects simple PUTs above ~4 MB — larger shards go through a
+  /// resumable upload session instead (same mechanism as [uploadArchive]).
+  static const int _kSimplePutLimit = 3 * 1024 * 1024 + 512 * 1024; // 3.5 MiB
+
   @override
   Future<void> putSyncFile(String rel, List<int> bytes,
       {CancelToken? cancelToken}) async {
     final token = await _validAccessToken(cancelToken);
+    if (bytes.length > _kSimplePutLimit) {
+      final enc = rel.split('/').map(Uri.encodeComponent).join('/');
+      final create = await _dio.post(
+        '$_graph/me/drive/special/approot:/Sync/$enc:/createUploadSession',
+        data: {
+          'item': {'@microsoft.graph.conflictBehavior': 'replace'},
+        },
+        cancelToken: cancelToken,
+        options: Options(headers: _auth(token)),
+      );
+      final uploadUrl =
+          (create.data as Map<String, dynamic>)['uploadUrl'] as String;
+      const chunk = 5 * 327680 * 16; // 5 MiB, multiple of 320 KiB
+      final data = bytes is Uint8List ? bytes : Uint8List.fromList(bytes);
+      final total = data.length;
+      for (var start = 0; start < total; start += chunk) {
+        final end = (start + chunk < total) ? start + chunk : total;
+        final slice = data.sublist(start, end);
+        await _dio.put(
+          uploadUrl,
+          data: Stream.fromIterable([slice]),
+          cancelToken: cancelToken,
+          options: Options(
+            // No Authorization here — the uploadUrl is pre-authorized.
+            headers: {
+              'Content-Length': slice.length,
+              'Content-Range': 'bytes $start-${end - 1}/$total',
+            },
+            contentType: 'application/octet-stream',
+            // 202 = more chunks expected; 200/201 = finished.
+            validateStatus: (s) => s != null && s >= 200 && s < 300,
+          ),
+        );
+      }
+      return;
+    }
     await _dio.put(
       _syncContentUrl(rel),
       data: Stream.fromIterable([bytes]),

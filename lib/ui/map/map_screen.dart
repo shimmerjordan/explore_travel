@@ -648,23 +648,32 @@ class _MapScreenState extends ConsumerState<MapScreen> {
               // pixel-for-pixel with the base map (fixed thickness, no custom
               // per-zoom re-rasterisation). Rendered whenever there are visible
               // layers OR dark mode is on (empty data → a solid dark scrim).
-              if (visibleLayerIds.isNotEmpty || settings.darkMap)
+              // Gated on settings.loaded: painting with the not-yet-loaded
+              // default veil colour / widths flashed a wrong first frame on
+              // every cold start.
+              if (settings.loaded &&
+                  (visibleLayerIds.isNotEmpty || settings.darkMap))
                 FogTileLayer(
                   db: ref.read(dbProvider),
                   layerIds: visibleLayerIds,
                   veil: fogVeil,
                   mapProvider: settings.mapProvider,
                   refreshKey: fogRefresh,
+                  // Live reveal/erase rows merge into the snapshot in memory;
+                  // fogRefresh (imports, layer ops) still forces a full reload.
+                  changes: ref.read(fogEngineProvider).changes,
                 ),
               // Optional decorative coloured line along recorded trails (drawn
               // over the fog tiles). No-op for imported data (no TrackPoints).
-              if (visibleLayerIds.isNotEmpty)
+              if (settings.loaded && visibleLayerIds.isNotEmpty)
                 FogLayer(
                   db: ref.read(dbProvider),
                   layers: fogStyles,
                   penRadiusMeters: settings.fogPenRadius,
                   refreshKey: fogRefresh,
                   mapProvider: settings.mapProvider,
+                  livePoints:
+                      ref.read(recordingControllerProvider).livePoints,
                 ),
               if (displayPos != null)
                 MarkerLayer(markers: [
@@ -690,45 +699,25 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                         .where((j) => !_hiddenJournalIds.contains(j.id))
                         .toList();
                     if (list.isEmpty) return const SizedBox.shrink();
-                    // Pin size. On NATIVE pins scale live with zoom — reading
-                    // MapCamera.zoom subscribes this layer to the camera so it
-                    // rebuilds (and rescales) every frame. On WEB that per-frame
-                    // rebuild of every journal marker (O(entries)/frame) is the
-                    // main zoom jank, so we use a FIXED size and DON'T read the
-                    // camera here — flutter_map still repositions the markers
-                    // smoothly each frame without rebuilding them.
-                    final double scale = kIsWeb
-                        ? 1.0
-                        : math.pow(2.0, MapCamera.of(ctx).zoom - 16.0)
+                    // Pin size. On NATIVE pins scale with zoom; on WEB the
+                    // per-frame rebuild of every marker is the main zoom jank,
+                    // so pins are a FIXED size there (no camera read at all).
+                    // Native reads the camera through a QUANTISED bucket
+                    // (0.1 zoom): the builder below re-runs per frame, but it
+                    // returns the CACHED MarkerLayer instance until the bucket
+                    // actually flips, so the O(entries) marker/pin subtree —
+                    // including Image.file thumbnails — is not rebuilt while
+                    // panning or during sub-bucket zoom.
+                    if (kIsWeb) return _buildPinLayer(list, 1.0);
+                    return _ZoomBucketed(
+                      buckets: 10, // 0.1-zoom steps
+                      builder: (ctx, zoomBucket) {
+                        final double scale = math
+                            .pow(2.0, zoomBucket - 16.0)
                             .toDouble()
                             .clamp(0.5, 3.0);
-                    return MarkerLayer(
-                      markers: list.map((j) {
-                        final p = _toDisplay(j.lat, j.lng);
-                        return Marker(
-                          point: p,
-                          width: 44 * scale,
-                          height: 54 * scale,
-                          alignment: Alignment.bottomCenter,
-                          // Counter-rotate so the pin always stays upright
-                          // (tip pointing down) however the map is rotated.
-                          rotate: true,
-                          child: GestureDetector(
-                            onTap: () async {
-                              final changed = await journal_ui
-                                  .showJournalViewer(context, ref, j);
-                              if (changed && mounted) {
-                                setState(_reloadJournalPins);
-                              }
-                            },
-                            onLongPress: () => _showPinHideMenu(j),
-                            child: FittedBox(
-                              fit: BoxFit.contain,
-                              child: _JournalPin(entry: j),
-                            ),
-                          ),
-                        );
-                      }).toList(),
+                        return _buildPinLayer(list, scale);
+                      },
                     );
                   },
                 ),
@@ -1613,6 +1602,41 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     if (changed && mounted) setState(_reloadJournalPins);
   }
 
+  /// The actual journal-pin MarkerLayer at a given pin [scale]. Extracted so
+  /// the zoom-bucketed wrapper can cache the whole subtree between bucket
+  /// flips (pin thumbnails use Image.file — rebuilding them per frame was
+  /// needless decode-cache churn).
+  Widget _buildPinLayer(List<db_t.JournalEntry> list, double scale) {
+    return MarkerLayer(
+      markers: list.map((j) {
+        final p = _toDisplay(j.lat, j.lng);
+        return Marker(
+          point: p,
+          width: 44 * scale,
+          height: 54 * scale,
+          alignment: Alignment.bottomCenter,
+          // Counter-rotate so the pin always stays upright
+          // (tip pointing down) however the map is rotated.
+          rotate: true,
+          child: GestureDetector(
+            onTap: () async {
+              final changed =
+                  await journal_ui.showJournalViewer(context, ref, j);
+              if (changed && mounted) {
+                setState(_reloadJournalPins);
+              }
+            },
+            onLongPress: () => _showPinHideMenu(j),
+            child: FittedBox(
+              fit: BoxFit.contain,
+              child: _JournalPin(entry: j),
+            ),
+          ),
+        );
+      }).toList(),
+    );
+  }
+
   Future<void> _onMapTap(LatLng latlng, int layerId) async {
     final fog = ref.read(fogEngineProvider);
     final db = ref.read(dbProvider);
@@ -2120,8 +2144,13 @@ class _BottomNav extends ConsumerWidget {
     final inGroup = (ref.watch(settingsProvider).groupId ?? '').isNotEmpty;
     return BottomAppBar(
       height: 64,
-      shape: const CircularNotchedRectangle(),
-      notchMargin: 8,
+      // NO notch shape. CircularNotchedRectangle installs a _BottomAppBarClipper
+      // that reads Scaffold.geometryOf() while recomputing its clip; during a
+      // route transition a pointer hit-test can land between layout-invalidation
+      // and the next paint, and that getter asserts "only during the paint
+      // phase" → the framework exception seen on back-button transitions. With
+      // no shape there is no clipper, so the race can't happen. The centre FAB
+      // still docks over the bar; it just floats without the cut-out notch.
       padding: EdgeInsets.zero,
       color: const Color(0xFF0F1923).withValues(alpha: 0.95),
       elevation: 12,
@@ -2573,6 +2602,35 @@ class _JournalPin extends StatelessWidget {
   }
 }
 
+/// Rebuild-limiter for camera-scaled layers: subscribes to the camera (so its
+/// own build runs per frame) but only re-runs [builder] — and thus rebuilds
+/// the child subtree — when the zoom crosses a 1/[buckets] step. Pan and
+/// sub-bucket zoom return the cached child untouched.
+class _ZoomBucketed extends StatefulWidget {
+  final int buckets;
+  final Widget Function(BuildContext, double zoomBucket) builder;
+  const _ZoomBucketed({required this.buckets, required this.builder});
+
+  @override
+  State<_ZoomBucketed> createState() => _ZoomBucketedState();
+}
+
+class _ZoomBucketedState extends State<_ZoomBucketed> {
+  double? _bucket;
+  Widget? _cached;
+
+  @override
+  Widget build(BuildContext context) {
+    final z = MapCamera.of(context).zoom;
+    final b = (z * widget.buckets).round() / widget.buckets;
+    if (b != _bucket || _cached == null) {
+      _bucket = b;
+      _cached = widget.builder(context, b);
+    }
+    return _cached!;
+  }
+}
+
 class _PinTailPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
@@ -2680,58 +2738,79 @@ class _LayerChip extends StatelessWidget {
     showModalBottomSheet<void>(
       context: context,
       useRootNavigator: true,
-      builder: (sheetCtx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-              child: Row(children: [
-                const Text('图层',
-                    style: TextStyle(fontWeight: FontWeight.w700)),
-                const Spacer(),
-                TextButton.icon(
-                  icon: const Icon(Icons.tune_rounded, size: 16),
-                  label: const Text('管理…'),
-                  onPressed: () {
-                    Navigator.pop(sheetCtx);
-                    onManage();
-                  },
-                ),
-              ]),
-            ),
-            const Divider(height: 1),
-            ...layers.map((l) => ListTile(
-                  leading: Container(
-                    width: 16,
-                    height: 16,
-                    decoration: BoxDecoration(
-                      color: Color(l.colorValue),
-                      shape: BoxShape.circle,
-                      border: Border.all(color: Colors.black12),
+      // The sheet is a separate route built ONCE; a plain snapshot of `layers`
+      // never repaints when the eye toggles the DB. Watch the providers here so
+      // the visibility icon (and the ★ active marker) flip live on tap.
+      builder: (sheetCtx) => Consumer(
+        builder: (ctx, ref, _) {
+          final liveLayers = ref.watch(layersProvider).value ?? layers;
+          final liveActive = ref.watch(activeLayerIdProvider);
+          return SafeArea(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+                  child: Row(children: [
+                    const Text('图层',
+                        style: TextStyle(fontWeight: FontWeight.w700)),
+                    const Spacer(),
+                    TextButton.icon(
+                      icon: const Icon(Icons.tune_rounded, size: 16),
+                      label: const Text('管理…'),
+                      onPressed: () {
+                        Navigator.pop(sheetCtx);
+                        onManage();
+                      },
                     ),
+                  ]),
+                ),
+                const Divider(height: 1),
+                // Scrollable + height-capped: with many layers (e.g. after a
+                // multi-layer import / recovery) a plain Column overflowed the
+                // sheet ("RenderFlex overflowed by 463 pixels").
+                Flexible(
+                  child: ListView(
+                    shrinkWrap: true,
+                    children: [
+                      for (final l in liveLayers)
+                        ListTile(
+                          leading: Container(
+                            width: 16,
+                            height: 16,
+                            decoration: BoxDecoration(
+                              color: Color(l.colorValue),
+                              shape: BoxShape.circle,
+                              border: Border.all(color: Colors.black12),
+                            ),
+                          ),
+                          title: Text(l.name,
+                              style: TextStyle(
+                                  fontWeight: l.id == liveActive
+                                      ? FontWeight.w700
+                                      : FontWeight.w500)),
+                          subtitle:
+                              Text(l.id == liveActive ? '★ 当前活动图层' : ''),
+                          trailing: IconButton(
+                            icon: Icon(l.visible
+                                ? Icons.visibility
+                                : Icons.visibility_off_outlined),
+                            onPressed: () {
+                              onToggleVisible(l);
+                            },
+                          ),
+                          onTap: () {
+                            onSelectActive(l.id);
+                            Navigator.pop(sheetCtx);
+                          },
+                        ),
+                    ],
                   ),
-                  title: Text(l.name,
-                      style: TextStyle(
-                          fontWeight: l.id == activeId
-                              ? FontWeight.w700
-                              : FontWeight.w500)),
-                  subtitle: Text(l.id == activeId ? '★ 当前活动图层' : ''),
-                  trailing: IconButton(
-                    icon: Icon(l.visible
-                        ? Icons.visibility
-                        : Icons.visibility_off_outlined),
-                    onPressed: () {
-                      onToggleVisible(l);
-                    },
-                  ),
-                  onTap: () {
-                    onSelectActive(l.id);
-                    Navigator.pop(sheetCtx);
-                  },
-                )),
-          ],
-        ),
+                ),
+              ],
+            ),
+          );
+        },
       ),
     );
   }

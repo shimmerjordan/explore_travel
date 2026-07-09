@@ -121,7 +121,7 @@ class LayersScreen extends ConsumerWidget {
                     },
                   ),
                 ),
-                if (selected.length >= 2)
+                if (selected.isNotEmpty)
                   Padding(
                     padding: const EdgeInsets.all(12),
                     child: Row(
@@ -129,17 +129,58 @@ class LayersScreen extends ConsumerWidget {
                         Expanded(
                           child: Text('已选择 ${selected.length} 个图层'),
                         ),
-                        FilledButton.icon(
+                        // Batch delete — the primary ask. Confirms once, then
+                        // removes every checked layer (and its points/fog).
+                        TextButton.icon(
                           onPressed: () async {
-                            final keep = selected.first;
-                            final merge =
-                                selected.where((id) => id != keep).toList();
-                            await db.mergeLayers(merge, keep);
+                            final ids = selected.toList();
+                            final ok = await showDialog<bool>(
+                              context: context,
+                              builder: (confirmCtx) => AlertDialog(
+                                title: Text('删除 ${ids.length} 个图层？'),
+                                content: const Text('所选图层及其轨迹、迷雾将从本机'
+                                    '移除，此操作不可撤销（下次同步会传播到其他设备）。'),
+                                actions: [
+                                  TextButton(
+                                    onPressed: () =>
+                                        Navigator.of(confirmCtx).pop(false),
+                                    child: const Text('取消'),
+                                  ),
+                                  FilledButton(
+                                    style: FilledButton.styleFrom(
+                                        backgroundColor: Colors.red),
+                                    onPressed: () =>
+                                        Navigator.of(confirmCtx).pop(true),
+                                    child: const Text('删除'),
+                                  ),
+                                ],
+                              ),
+                            );
+                            if (ok != true) return;
+                            for (final id in ids) {
+                              await db.deleteLayer(id);
+                            }
                             setState(selected.clear);
                           },
-                          icon: const Icon(Icons.merge),
-                          label: const Text('合并到第一个'),
+                          style: TextButton.styleFrom(
+                              foregroundColor: Colors.red),
+                          icon: const Icon(Icons.delete_outline),
+                          label: Text('删除所选 (${selected.length})'),
                         ),
+                        const SizedBox(width: 8),
+                        if (selected.length >= 2)
+                          FilledButton.icon(
+                            onPressed: () async {
+                              final keep = selected.first;
+                              final merge = selected
+                                  .where((id) => id != keep)
+                                  .toList();
+                              await db.mergeLayers(merge, keep);
+                              setState(selected.clear);
+                            },
+                            icon: const Icon(Icons.merge),
+                            label: const Text('合并到第一个'),
+                          ),
                       ],
                     ),
                   ),
@@ -338,7 +379,7 @@ class LayersScreen extends ConsumerWidget {
     double width = l.pathWidth ?? 14;
     showDialog<void>(
       context: context,
-      builder: (_) => AlertDialog(
+      builder: (dialogCtx) => AlertDialog(
         title: const Text('编辑图层'),
         content: StatefulBuilder(builder: (context, setState) {
           return SingleChildScrollView(
@@ -372,8 +413,34 @@ class LayersScreen extends ConsumerWidget {
         actions: [
           TextButton(
             onPressed: () async {
+              // Confirm — deleting a layer also drops its points/fog on the
+              // map. Pop the DIALOG's own route (dialogCtx), not the caller's
+              // screen route: using the screen context here popped the layers
+              // PAGE off go_router's stack ("popped the last page…") and
+              // cascaded into a locked navigator.
+              final ok = await showDialog<bool>(
+                context: dialogCtx,
+                builder: (confirmCtx) => AlertDialog(
+                  title: const Text('删除图层？'),
+                  content: Text('“${l.name}”及其轨迹、迷雾将从本机移除，'
+                      '此操作不可撤销（下次同步会传播到其他设备）。'),
+                  actions: [
+                    TextButton(
+                      onPressed: () => Navigator.of(confirmCtx).pop(false),
+                      child: const Text('取消'),
+                    ),
+                    FilledButton(
+                      style: FilledButton.styleFrom(
+                          backgroundColor: Colors.red),
+                      onPressed: () => Navigator.of(confirmCtx).pop(true),
+                      child: const Text('删除'),
+                    ),
+                  ],
+                ),
+              );
+              if (ok != true) return;
               await db.deleteLayer(l.id);
-              if (context.mounted) Navigator.pop(context);
+              if (dialogCtx.mounted) Navigator.of(dialogCtx).pop();
             },
             style: TextButton.styleFrom(foregroundColor: Colors.red),
             child: const Text('删除'),
@@ -392,7 +459,7 @@ class LayersScreen extends ConsumerWidget {
                 pathOpacity: Value(opacity),
                 pathWidth: Value(width),
               ));
-              if (context.mounted) Navigator.pop(context);
+              if (dialogCtx.mounted) Navigator.of(dialogCtx).pop();
             },
             child: const Text('保存'),
           ),

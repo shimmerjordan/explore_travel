@@ -2,8 +2,14 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/models.dart';
+import '../services/backup/backup_service.dart' show kVaultSecretKeys;
 
 class AppSettings {
+  /// True once the persisted prefs have actually been read from disk.
+  /// The provider starts from `const AppSettings()` and loads async — style
+  /// consumers (fog veil, trail widths) should skip rendering until this
+  /// flips, or the first frames flash default styles. Never persisted.
+  final bool loaded;
   final MapProvider mapProvider;
   final MapStyle mapStyle;
   final RecordingMode recordingMode;
@@ -111,6 +117,10 @@ class AppSettings {
   // ── Image host (for journal photos) ───────────────────────────────────
   /// 'none' | 'github' | 'custom'
   final String imgHostKind;
+  /// When true (default) queued journal photos upload to the image host
+  /// automatically in the background. When false they stay `pending` until the
+  /// user taps 上传 in the upload list — a data/roaming saver.
+  final bool autoUploadImages;
   /// GitHub Personal Access Token with `contents:write` on the target repo.
   final String? githubPat;
   final String? githubOwner;
@@ -195,6 +205,7 @@ class AppSettings {
   final int leaderboardServerSyncMin;
 
   const AppSettings({
+    this.loaded = false,
     this.mapProvider = MapProvider.amap,
     this.mapStyle = MapStyle.standard,
     this.recordingMode = RecordingMode.balanced,
@@ -245,6 +256,7 @@ class AppSettings {
     this.frpDashboardUser,
     this.frpDashboardPass,
     this.imgHostKind = 'none',
+    this.autoUploadImages = true,
     this.githubPat,
     this.githubOwner,
     this.githubRepo,
@@ -281,6 +293,7 @@ class AppSettings {
   });
 
   AppSettings copyWith({
+    bool? loaded,
     MapProvider? mapProvider,
     MapStyle? mapStyle,
     RecordingMode? recordingMode,
@@ -331,6 +344,7 @@ class AppSettings {
     String? frpDashboardUser,
     String? frpDashboardPass,
     String? imgHostKind,
+    bool? autoUploadImages,
     String? githubPat,
     String? githubOwner,
     String? githubRepo,
@@ -365,6 +379,7 @@ class AppSettings {
     int? leaderboardServerSyncMin,
   }) =>
       AppSettings(
+        loaded: loaded ?? this.loaded,
         mapProvider: mapProvider ?? this.mapProvider,
         mapStyle: mapStyle ?? this.mapStyle,
         recordingMode: recordingMode ?? this.recordingMode,
@@ -416,6 +431,7 @@ class AppSettings {
         frpDashboardUser: frpDashboardUser ?? this.frpDashboardUser,
         frpDashboardPass: frpDashboardPass ?? this.frpDashboardPass,
         imgHostKind: imgHostKind ?? this.imgHostKind,
+        autoUploadImages: autoUploadImages ?? this.autoUploadImages,
         githubPat: githubPat ?? this.githubPat,
         githubOwner: githubOwner ?? this.githubOwner,
         githubRepo: githubRepo ?? this.githubRepo,
@@ -515,6 +531,7 @@ class AppSettings {
         'frpDashboardUser': frpDashboardUser,
         'frpDashboardPass': frpDashboardPass,
         'imgHostKind': imgHostKind,
+        'autoUploadImages': autoUploadImages,
         'githubPat': githubPat,
         'githubOwner': githubOwner,
         'githubRepo': githubRepo,
@@ -610,6 +627,7 @@ class AppSettings {
         frpDashboardUser: j['frpDashboardUser'],
         frpDashboardPass: j['frpDashboardPass'],
         imgHostKind: j['imgHostKind'] ?? 'none',
+        autoUploadImages: j['autoUploadImages'] as bool? ?? true,
         githubPat: j['githubPat'],
         githubOwner: j['githubOwner'],
         githubRepo: j['githubRepo'],
@@ -693,6 +711,24 @@ class PrefsStore {
   Future<void> save(AppSettings s) async {
     if (kIsWeb) return; // see load(): web settings are in-memory only
     final p = await SharedPreferences.getInstance();
-    await p.setString(_key, jsonEncode(s.toJson()));
+    final raw = jsonEncode(s.toJson());
+    await p.setString(_key, raw);
+    // LWW stamp for settings sync — but only when a NON-secret field really
+    // changed. Volatile credential rotations (OneDrive refresh token, music
+    // cookies) also flow through save(); letting them bump the stamp would
+    // make local settings permanently look freshly-edited and block every
+    // cloud settings merge. Secrets never sync anyway (export scrubs them).
+    try {
+      final j = jsonDecode(raw) as Map<String, dynamic>;
+      for (final k in kVaultSecretKeys) {
+        if (j.containsKey(k)) j[k] = null;
+      }
+      final scrubbed = jsonEncode(j);
+      if (p.getString('settings_scrub_snapshot') != scrubbed) {
+        await p.setString('settings_scrub_snapshot', scrubbed);
+        await p.setString(
+            'settings_updated_at', DateTime.now().toIso8601String());
+      }
+    } catch (_) {}
   }
 }

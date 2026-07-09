@@ -7,6 +7,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
 import '../../app/providers.dart';
 import '../../data/db/database.dart';
+import '../../services/imghost/upload_queue.dart' show UploadRecord;
 import '../../services/imghost/private_image_loader.dart';
 import '../../services/media/exif_service.dart';
 import '../map/native_file_image_io.dart';
@@ -68,9 +69,8 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
     final uploadQueue = ref.read(uploadQueueProvider);
     for (final id in ids) {
       await uploadQueue.deleteAllForJournal(id);
-      await (db.delete(db.journalEntries)..where((t) => t.id.equals(id))).go();
-      await db
-          .customStatement('DELETE FROM journal_fts WHERE rowid=?', [id]);
+      // Tombstoning delete — the removal survives future sync merges.
+      await db.deleteJournalById(id);
     }
     if (!mounted) return;
     _exitSelect();
@@ -172,6 +172,11 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
                 ),
               ]
             : [
+                IconButton(
+                  tooltip: '图片上传队列',
+                  icon: const Icon(Icons.cloud_upload_outlined),
+                  onPressed: () => _showUploadQueue(context, ref),
+                ),
                 IconButton(
                   tooltip: '从照片批量导入手账',
                   icon: const Icon(Icons.photo_library_outlined),
@@ -286,6 +291,9 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
                                       ?.copyWith(
                                           fontWeight: FontWeight.w600)),
                             ),
+                            // Image-host upload status, right in the list.
+                            if (paths.isNotEmpty)
+                              _UploadStatusBadge(journalId: e.id),
                             Text(
                                 DateFormat('MM/dd HH:mm').format(e.time),
                                 style: Theme.of(context)
@@ -500,6 +508,9 @@ Future<bool> showJournalEditor(
 
   if (!context.mounted) return false;
   bool changed = false;
+  // Inline validation message under the title field. The save used to just
+  // `return` on an empty title, so the button looked broken ("保存不了没提示").
+  String? titleError;
   await showDialog<void>(
     context: context,
     builder: (_) => StatefulBuilder(builder: (dialogCtx, setState) {
@@ -568,7 +579,15 @@ Future<bool> showJournalEditor(
                 ]),
                 TextField(
                   controller: titleCtrl,
-                  decoration: const InputDecoration(labelText: '标题'),
+                  decoration: InputDecoration(
+                    labelText: '标题（必填）',
+                    errorText: titleError,
+                  ),
+                  onChanged: (_) {
+                    if (titleError != null) {
+                      setState(() => titleError = null);
+                    }
+                  },
                 ),
                 const SizedBox(height: 8),
                 OutlinedButton.icon(
@@ -667,11 +686,8 @@ Future<bool> showJournalEditor(
                 await ref
                     .read(uploadQueueProvider)
                     .deleteAllForJournal(entry.id);
-                await (db.delete(db.journalEntries)
-                      ..where((t) => t.id.equals(entry.id)))
-                    .go();
-                await db.customStatement(
-                    'DELETE FROM journal_fts WHERE rowid=?', [entry.id]);
+                // Tombstoning delete — survives future sync merges.
+                await db.deleteJournalById(entry.id);
                 changed = true;
                 if (dialogCtx.mounted) Navigator.pop(dialogCtx);
               },
@@ -682,7 +698,11 @@ Future<bool> showJournalEditor(
               child: const Text('取消')),
           FilledButton(
             onPressed: () async {
-              if (titleCtrl.text.isEmpty) return;
+              // Was a silent no-op on empty title — now tell the user why.
+              if (titleCtrl.text.trim().isEmpty) {
+                setState(() => titleError = '标题不能为空');
+                return;
+              }
               final db = ref.read(dbProvider);
               int journalId;
               if (entry == null) {
@@ -708,6 +728,8 @@ Future<bool> showJournalEditor(
                   mediaPaths: Value(mediaPaths.join('\n')),
                   level: Value(level),
                   ownerPeerId: Value(ownerPeerId),
+                  // Stamp the edit so it beats older copies in sync merges.
+                  updatedAt: Value(DateTime.now()),
                 ));
                 await db.customStatement(
                   'UPDATE journal_fts SET title=?, content=? WHERE rowid=?',
@@ -1064,4 +1086,172 @@ class _UploadStatusBarState extends ConsumerState<_UploadStatusBar> {
       ),
     );
   }
+}
+
+// ─── Image-host upload status (item 4) ──────────────────────────────────────
+
+/// Aggregate of a journal's upload records → the pill shown in the list.
+({IconData icon, Color color, String label})? _statusOf(
+    List<UploadRecord> recs, BuildContext context) {
+  if (recs.isEmpty) return null;
+  final failed = recs.where((r) => r.status == 'failed').length;
+  final pending = recs.where((r) => r.status == 'pending').length;
+  final done = recs.where((r) => r.status == 'done').length;
+  if (failed > 0) {
+    return (icon: Icons.cloud_off_rounded, color: Colors.red, label: '$failed 失败');
+  }
+  if (pending > 0) {
+    return (
+      icon: Icons.cloud_sync_rounded,
+      color: Colors.orange,
+      label: '$pending 待传'
+    );
+  }
+  return (
+    icon: Icons.cloud_done_rounded,
+    color: Colors.green,
+    label: done > 1 ? '已传 $done' : '已传'
+  );
+}
+
+/// A live status pill for one journal's photo uploads. Rebuilds on every queue
+/// write via the queue's [revision] notifier. Tapping opens the upload queue.
+class _UploadStatusBadge extends ConsumerWidget {
+  final int journalId;
+  const _UploadStatusBadge({required this.journalId});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final queue = ref.watch(uploadQueueProvider);
+    return ValueListenableBuilder<int>(
+      valueListenable: queue.revision,
+      builder: (context, _, __) {
+        return FutureBuilder<List<UploadRecord>>(
+          future: queue.recordsForJournal(journalId),
+          builder: (context, snap) {
+            final st = snap.hasData ? _statusOf(snap.data!, context) : null;
+            if (st == null) return const SizedBox.shrink();
+            return Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: InkWell(
+                onTap: () => _showUploadQueue(context, ref),
+                borderRadius: BorderRadius.circular(20),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  Icon(st.icon, size: 15, color: st.color),
+                  const SizedBox(width: 3),
+                  Text(st.label,
+                      style: TextStyle(fontSize: 11, color: st.color)),
+                ]),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+}
+
+/// The upload queue sheet: every image's upload state, a manual 上传 button
+/// (for when auto-upload is off), and per-item retry. Reactive via the queue
+/// revision notifier so states flip live as uploads complete.
+Future<void> _showUploadQueue(BuildContext context, WidgetRef ref) async {
+  final queue = ref.read(uploadQueueProvider);
+  await showModalBottomSheet<void>(
+    context: context,
+    useRootNavigator: true,
+    isScrollControlled: true,
+    builder: (sheetCtx) => Consumer(
+      builder: (ctx, ref2, _) {
+        final s = ref2.watch(settingsProvider);
+        return ValueListenableBuilder<int>(
+          valueListenable: queue.revision,
+          builder: (ctx, _, __) => FutureBuilder<List<UploadRecord>>(
+            future: queue.allRecords(),
+            builder: (ctx, snap) {
+              final recs = snap.data ?? const <UploadRecord>[];
+              final pending =
+                  recs.where((r) => r.status != 'done').length;
+              return DraggableScrollableSheet(
+                expand: false,
+                initialChildSize: 0.6,
+                maxChildSize: 0.9,
+                builder: (ctx, scrollCtrl) => Column(
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 14, 12, 6),
+                      child: Row(children: [
+                        const Text('图片上传队列',
+                            style: TextStyle(
+                                fontWeight: FontWeight.w700, fontSize: 16)),
+                        const Spacer(),
+                        if (s.imgHostKind == 'none')
+                          const Text('未启用图床',
+                              style: TextStyle(color: Colors.grey))
+                        else if (pending > 0)
+                          FilledButton.icon(
+                            onPressed: () => queue.drainNow(),
+                            icon: const Icon(Icons.upload_rounded, size: 18),
+                            label: Text('上传 $pending 项'),
+                          ),
+                      ]),
+                    ),
+                    if (!s.autoUploadImages && s.imgHostKind != 'none')
+                      const Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 16),
+                        child: Align(
+                          alignment: Alignment.centerLeft,
+                          child: Text('自动上传已关闭 · 上传需手动触发',
+                              style: TextStyle(
+                                  fontSize: 12, color: Colors.orange)),
+                        ),
+                      ),
+                    const Divider(height: 16),
+                    Expanded(
+                      child: recs.isEmpty
+                          ? const Center(child: Text('暂无上传记录'))
+                          : ListView.builder(
+                              controller: scrollCtrl,
+                              itemCount: recs.length,
+                              itemBuilder: (_, i) {
+                                final r = recs[i];
+                                final st = _statusOf([r], ctx)!;
+                                return ListTile(
+                                  dense: true,
+                                  leading: Icon(st.icon, color: st.color),
+                                  title: Text(
+                                    r.localPath.split('/').last,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(fontSize: 13),
+                                  ),
+                                  subtitle: Text(
+                                    r.status == 'failed'
+                                        ? (r.error ?? '上传失败')
+                                        : (r.status == 'done'
+                                            ? (r.remoteUrl ?? '已上传')
+                                            : '等待上传'),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                  trailing: r.status == 'failed'
+                                      ? IconButton(
+                                          tooltip: '重试',
+                                          icon: const Icon(Icons.refresh),
+                                          onPressed: () =>
+                                              queue.retry(r.localPath),
+                                        )
+                                      : null,
+                                );
+                              },
+                            ),
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
+        );
+      },
+    ),
+  );
 }

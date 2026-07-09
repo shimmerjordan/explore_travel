@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:drift/drift.dart' show OrderingTerm;
@@ -15,10 +16,20 @@ const double _kMaxAccuracyMeters = 150.0;
 /// Implied speed (m/s) above which two consecutive fixes can't be one walk.
 const double _kMaxSpeedMps = 70.0;
 
-/// Fallback line width (metres) for points with a null `width`.
-const double _kDefaultTrailWidthMeters = 14.0;
+/// A point's stroke width in metres; null = the point predates per-point
+/// widths (schema v5) and follows the layer's live style width instead.
+typedef _P = ({LatLng pt, double? w});
 
-typedef _P = ({LatLng pt, double w});
+/// One freshly-recorded point, pushed by the recording pipeline so the trail
+/// layer can APPEND instead of re-reading every TrackPoint row per tick.
+typedef LiveTrackPoint = ({
+  double lat,
+  double lng,
+  DateTime time,
+  int layerId,
+  double? width,
+  double? accuracy,
+});
 
 /// Per-layer style for the optional translucent COLOURED LINE drawn along a
 /// recorded trail — "a line drawn in the fog". The explored-area fog itself is
@@ -57,6 +68,10 @@ class FogLayer extends StatefulWidget {
   final double penRadiusMeters;
   final Object? refreshKey;
   final MapProvider mapProvider;
+
+  /// Optional live feed of freshly-recorded points — appended to the loaded
+  /// sessions in place of a full TrackPoints re-query per recording tick.
+  final Stream<LiveTrackPoint>? livePoints;
   const FogLayer({
     super.key,
     required this.db,
@@ -64,6 +79,7 @@ class FogLayer extends StatefulWidget {
     required this.penRadiusMeters,
     required this.mapProvider,
     this.refreshKey,
+    this.livePoints,
   });
 
   @override
@@ -75,12 +91,23 @@ class _FogLayerState extends State<FogLayer> {
   Map<int, List<List<_P>>> _sessionsByLayer = const {};
   String _trailKey = '';
 
+  // Last appended/loaded point per layer — the live-append path needs it to
+  // apply the same session-split rules the full load uses.
+  final Map<int, ({DateTime t, double lat, double lng})> _lastPt = {};
+  StreamSubscription<LiveTrackPoint>? _liveSub;
+
   List<int> get _layerIds => widget.layers.map((l) => l.layerId).toList();
 
   /// True when at least one layer actually wants a coloured line — avoids
   /// querying TrackPoints when nothing would be drawn (e.g. pure FOW imports).
   bool get _anyLine =>
       widget.layers.any((l) => l.lineColor != null && l.lineColor!.a != 0);
+
+  @override
+  void initState() {
+    super.initState();
+    _subscribeLive();
+  }
 
   @override
   void didChangeDependencies() {
@@ -91,7 +118,57 @@ class _FogLayerState extends State<FogLayer> {
   @override
   void didUpdateWidget(covariant FogLayer old) {
     super.didUpdateWidget(old);
+    if (!identical(old.livePoints, widget.livePoints)) _subscribeLive();
     _maybeReloadTrail();
+  }
+
+  @override
+  void dispose() {
+    _liveSub?.cancel();
+    super.dispose();
+  }
+
+  void _subscribeLive() {
+    _liveSub?.cancel();
+    _liveSub = widget.livePoints?.listen(_appendLive);
+  }
+
+  /// Append one live point using the same gap/speed/accuracy gates as
+  /// [_loadTrail], starting a new session when they fail. The outer map is
+  /// shallow-copied so the painter's `identical` repaint check fires.
+  void _appendLive(LiveTrackPoint p) {
+    if (!mounted || !_anyLine) return;
+    if (!_layerIds.contains(p.layerId)) return;
+    if (p.accuracy != null && p.accuracy! > _kMaxAccuracyMeters) return;
+
+    final maxMeters = math.max(widget.penRadiusMeters * 5.0, 50.0);
+    final sessions =
+        List<List<_P>>.of(_sessionsByLayer[p.layerId] ?? const []);
+    final last = _lastPt[p.layerId];
+    bool startNew;
+    if (sessions.isEmpty || last == null) {
+      startNew = true;
+    } else {
+      final dt = p.time.difference(last.t);
+      final dist = _haversineMeters(last.lat, last.lng, p.lat, p.lng);
+      final secs = dt.inMilliseconds / 1000.0;
+      startNew = dt > const Duration(seconds: 30) ||
+          dt.isNegative ||
+          dist > maxMeters ||
+          (secs > 0 && (dist / secs) > _kMaxSpeedMps);
+    }
+    final pt = (pt: LatLng(p.lat, p.lng), w: p.width);
+    if (startNew) {
+      sessions.add([pt]);
+    } else {
+      // In-place append is safe: repaint is driven by the OUTER map identity
+      // changing below, and nothing retains the old inner list.
+      sessions.last.add(pt);
+    }
+    _lastPt[p.layerId] = (t: p.time, lat: p.lat, lng: p.lng);
+    setState(() {
+      _sessionsByLayer = {..._sessionsByLayer, p.layerId: sessions};
+    });
   }
 
   void _maybeReloadTrail() {
@@ -135,16 +212,18 @@ class _FogLayerState extends State<FogLayer> {
             current = [];
           }
         }
-        current.add((
-          pt: LatLng(p.lat, p.lng),
-          w: p.width ?? _kDefaultTrailWidthMeters,
-        ));
+        current.add((pt: LatLng(p.lat, p.lng), w: p.width));
         lastT = p.time;
         lastLat = p.lat;
         lastLng = p.lng;
       }
       if (current.isNotEmpty) sessions.add(current);
       out[lid] = sessions;
+      if (lastT != null) {
+        _lastPt[lid] = (t: lastT, lat: lastLat!, lng: lastLng!);
+      } else {
+        _lastPt.remove(lid);
+      }
     }
     if (!mounted) return;
     setState(() => _sessionsByLayer = out);
@@ -206,45 +285,58 @@ class _FogLinePainter extends CustomPainter {
         refM;
     double strokePx(double m) => (m * pxPerMeter).clamp(1.0, 600.0);
 
-    void forEachStroke(
-      List<List<_P>> sessions,
-      void Function(ui.Path path) onPath,
-      void Function(Offset c) onDot,
-    ) {
-      for (final session in sessions) {
-        if (session.isEmpty) continue;
-        if (session.length == 1) {
-          onDot(project(session.first.pt));
-          continue;
-        }
-        final path = ui.Path();
-        final first = project(session.first.pt);
-        path.moveTo(first.dx, first.dy);
-        for (var i = 1; i < session.length; i++) {
-          final o = project(session[i].pt);
-          path.lineTo(o.dx, o.dy);
-        }
-        onPath(path);
-      }
-    }
-
     for (final st in layers) {
       final col = st.lineColor;
       if (col == null || col.a == 0) continue;
-      final w = strokePx(st.widthMeters);
-      final line = Paint()
+      final dotPaint = Paint()
+        ..color = col
+        ..isAntiAlias = true;
+      Paint linePaint(double wMeters) => Paint()
         ..color = col
         ..strokeCap = StrokeCap.round
         ..strokeJoin = StrokeJoin.round
         ..style = PaintingStyle.stroke
-        ..strokeWidth = w
+        ..strokeWidth = strokePx(wMeters)
         ..isAntiAlias = true;
-      forEachStroke(
-        sessionsByLayer[st.layerId] ?? const [],
-        (path) => canvas.drawPath(path, line),
-        (dot) => canvas.drawCircle(
-            dot, w / 2, Paint()..color = col..isAntiAlias = true),
-      );
+
+      for (final session in sessionsByLayer[st.layerId] ?? const <List<_P>>[]) {
+        if (session.isEmpty) continue;
+        // Each point carries its own recorded width (the brush/size at record
+        // time); legacy null-width points follow the layer's live style width.
+        // Manual dabs land as single-point sessions → dots at their own size.
+        if (session.length == 1) {
+          final w = strokePx(session.first.w ?? st.widthMeters);
+          canvas.drawCircle(project(session.first.pt), w / 2, dotPaint);
+          continue;
+        }
+        // Stroke maximal constant-width runs so a width change mid-trail
+        // doesn't retroactively fatten/thin what came before it. The joint
+        // segment into the change-point keeps the OLD width; the new run
+        // starts at that point.
+        var runStart = 0;
+        var runW = session.first.w ?? st.widthMeters;
+        void flush(int endIdx, double wMeters) {
+          if (endIdx <= runStart) return; // 1-point tail — cap already drawn
+          final path = ui.Path();
+          final first = project(session[runStart].pt);
+          path.moveTo(first.dx, first.dy);
+          for (var i = runStart + 1; i <= endIdx; i++) {
+            final o = project(session[i].pt);
+            path.lineTo(o.dx, o.dy);
+          }
+          canvas.drawPath(path, linePaint(wMeters));
+        }
+
+        for (var i = 1; i < session.length; i++) {
+          final wi = session[i].w ?? st.widthMeters;
+          if (wi != runW) {
+            flush(i, runW);
+            runStart = i;
+            runW = wi;
+          }
+        }
+        flush(session.length - 1, runW);
+      }
     }
   }
 

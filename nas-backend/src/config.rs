@@ -30,7 +30,11 @@ impl Default for Config {
             allow_registration: true,
             proxy_enabled: false,
             proxy_allow_hosts: Vec::new(),
-            token_ttl_secs: 3600,
+            // Long-lived by design: the web client persists its session and
+            // the user expects to stay logged in until they log OUT, not
+            // until a timer fires. Personal/self-hosted threat model; tune
+            // with EJ_TOKEN_TTL_SECS if you want shorter sessions.
+            token_ttl_secs: 365 * 24 * 3600,
             trust_proxy_header: false,
             workers: 8,
         }
@@ -95,7 +99,7 @@ impl Config {
             ));
         }
         if cfg.token_ttl_secs == 0 {
-            cfg.token_ttl_secs = 3600;
+            cfg.token_ttl_secs = 365 * 24 * 3600;
         }
         if cfg.workers == 0 {
             cfg.workers = 8;

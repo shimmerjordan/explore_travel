@@ -26,7 +26,6 @@ class PttController {
 
   Timer? _chunkTimer;
   String? _currentPath;
-  int _seq = 0;
   String? _targetPeerId;
 
   /// [targetPeerId] non-null = private (walkie-talkie) call to that peer
@@ -37,7 +36,6 @@ class PttController {
     final hasPerm = await _recorder!.hasPermission();
     if (!hasPerm) return false;
     _active = true;
-    _seq = 0;
     _targetPeerId = targetPeerId;
     await _startNextChunk();
     _chunkTimer = Timer.periodic(
@@ -108,7 +106,6 @@ class PttController {
         } else {
           await svc.sendVoice(bytes, 'audio/mp4');
         }
-        _seq++;
       }
       try {
         await f.delete();

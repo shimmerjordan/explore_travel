@@ -11,6 +11,7 @@ import 'package:share_plus/share_plus.dart';
 import '../../app/providers.dart';
 import '../../core/prefs.dart';
 import '../../services/backup/backup_service.dart';
+import '../../services/sync/local_folder_storage.dart';
 import '../../services/sync/onedrive_service.dart';
 import '../../services/sync/onedrive_sync_engine.dart';
 import '../../services/fog/fog_engine.dart';
@@ -100,6 +101,16 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
             return CheckboxListTile(
               value: selected.contains(k),
               title: Text(BackupService.moduleLabels[k] ?? k),
+              // A per-module "clear this module's LOCAL data" button (with a
+              // confirm). leaderboard is community-shared → not clearable.
+              secondary: k == 'leaderboard'
+                  ? null
+                  : IconButton(
+                      icon: const Icon(Icons.delete_outline_rounded),
+                      tooltip: '清除本机此模块数据',
+                      color: cs.error,
+                      onPressed: _busy ? null : () => _clearModule(k),
+                    ),
               onChanged: (v) {
                 final next = {...selected};
                 if (v == true) {
@@ -213,6 +224,36 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
                 : '先连接 OneDrive'),
             enabled: oneDriveConnected && !_busy,
             onTap: (oneDriveConnected && !_busy) ? _oneDriveSyncDown : null,
+          ),
+
+          // ── 本地文件夹（与云端同构·便于排查）──────────────────────────
+          const _SectionHeader('本地文件夹（与云端同构·便于排查）'),
+          Container(
+            margin: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+            child: Text(
+              '和「同步到 OneDrive / 从 OneDrive 恢复」走完全相同的流水线（分片打包 → '
+              'MD5 增量 → 合并），区别只是文件写到本机文件夹而非云端。用它可以在无网络、'
+              '无第二台设备的情况下复现同步问题：先导出，再清空数据，然后从文件夹导入。',
+              style: TextStyle(
+                  fontSize: 11,
+                  height: 1.5,
+                  color: cs.onSurfaceVariant),
+            ),
+          ),
+          ListTile(
+            leading: const Icon(Icons.drive_folder_upload_outlined),
+            title: const Text('导出到本地文件夹'),
+            subtitle: const Text(
+                '写到 documents/ej_sync_mirror/（同 OneDrive 的 Sync 目录结构）'),
+            enabled: !_busy,
+            onTap: _busy ? null : _exportToLocalFolder,
+          ),
+          ListTile(
+            leading: const Icon(Icons.drive_folder_upload_outlined),
+            title: const Text('从本地文件夹导入'),
+            subtitle: const Text('从上面那个文件夹按勾选模块合并（与「从 OneDrive 恢复」同逻辑）'),
+            enabled: !_busy,
+            onTap: _busy ? null : _importFromLocalFolder,
           ),
 
           // ── Fog of World 兼容 ─────────────────────────────────────────
@@ -382,9 +423,15 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
           bytes,
           modules: _selectedModules(ref.read(settingsProvider)),
           clearBeforeImport: ref.read(settingsProvider).importClearBeforeImport,
+          // A user-picked backup is an authoritative RESTORE: bring back rows
+          // even if the user deleted them locally after this backup was made.
+          restore: true,
         );
     ref.read(journalRefreshProvider.notifier).state++;
     ref.read(fogRefreshProvider.notifier).state++;
+    // The archive may have carried settings — re-read prefs so they apply
+    // immediately instead of after the next app start.
+    await ref.read(settingsProvider.notifier).reload();
     return '导入完成：\n${sum.describe()}';
   }
 
@@ -529,6 +576,70 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
     if (mounted) setState(() => _status = '已断开 OneDrive 连接');
   }
 
+  /// Show an operation's outcome in a dialog. The bottom-of-page `_status`
+  /// container also gets it, but it sits BELOW the fold — users watching the
+  /// OneDrive tiles never saw it and read a finished restore as "没有反应".
+  Future<void> _showResult(String title, String body) async {
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogCtx) => AlertDialog(
+        title: Text(title),
+        content: SingleChildScrollView(
+          child: Text(body, style: const TextStyle(fontSize: 13, height: 1.6)),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogCtx).pop(),
+            child: const Text('好'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Confirm, then wipe one module's local data. Refreshes the map/journal
+  /// so a cleared module visibly disappears.
+  Future<void> _clearModule(String key) async {
+    final label = BackupService.moduleLabels[key] ?? key;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dialogCtx) => AlertDialog(
+        title: Text('清除本机「$label」？'),
+        content: const Text(
+            '仅删除本设备上的这部分数据（云端备份不受影响，除非你随后再同步上传）。'
+            '此操作不可撤销。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogCtx).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.of(dialogCtx).pop(true),
+            child: const Text('清除'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    setState(() => _busy = true);
+    try {
+      final msg = await ref.read(backupServiceProvider).clearModule(key);
+      // Reflect the wipe on screen immediately.
+      ref.read(journalRefreshProvider.notifier).state++;
+      ref.read(fogRefreshProvider.notifier).state++;
+      if (key == 'settings') {
+        await ref.read(settingsProvider.notifier).reload();
+      }
+      if (mounted) setState(() => _status = msg);
+    } catch (e) {
+      if (mounted) setState(() => _status = '清除失败：$e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
   Future<void> _oneDriveSyncUp() async {
     if (_selectedModules(ref.read(settingsProvider)).isEmpty) {
       setState(() => _status = '至少选一个模块');
@@ -544,8 +655,10 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
           );
     });
     if (res != null && mounted) {
-      setState(() => _status =
-          '增量同步完成：上传 ${res.uploaded} · 删除 ${res.deleted} · 未变 ${res.unchanged}');
+      final msg =
+          '增量同步完成：上传 ${res.uploaded} · 删除 ${res.deleted} · 未变 ${res.unchanged}';
+      setState(() => _status = msg);
+      await _showResult('同步到 OneDrive', msg);
     }
   }
 
@@ -563,12 +676,88 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
       if (summary == null) {
         return 'OneDrive 的 Sync 文件夹还是空的（先同步一次上去）';
       }
-      // A restore can replace journals, layers and fog — refresh the map.
+      // A restore can replace journals, layers, fog AND settings — refresh
+      // the map and re-read prefs so the imported settings apply now (and a
+      // later settings edit can't write the stale in-memory copy back).
       ref.read(journalRefreshProvider.notifier).state++;
       ref.read(fogRefreshProvider.notifier).state++;
+      await ref.read(settingsProvider.notifier).reload();
       return '已从 OneDrive 恢复：\n${summary.describe()}';
     });
-    if (status != null && mounted) setState(() => _status = status);
+    if (status != null && mounted) {
+      setState(() => _status = status);
+      await _showResult('从 OneDrive 恢复', status);
+    }
+  }
+
+  // ── Local folder — a local mirror of the cloud Sync folder ────────────────
+  //
+  // Identical SyncEngine pipeline to OneDrive (export → shard → MD5 diff →
+  // merge); only the transport differs (LocalFolderStorage writes to
+  // documents/ej_sync_mirror). This is the "reproduce a sync bug with no
+  // network / no second device" tool: export → clear data → import back.
+
+  Future<String> _mirrorDir() async {
+    final docs = await getApplicationDocumentsDirectory();
+    final dir = Directory('${docs.path}/ej_sync_mirror');
+    await dir.create(recursive: true);
+    return dir.path;
+  }
+
+  Future<void> _exportToLocalFolder() async {
+    if (_selectedModules(ref.read(settingsProvider)).isEmpty) {
+      setState(() => _status = '至少选一个模块');
+      return;
+    }
+    final root = await _mirrorDir();
+    final res = await _withProgress<SyncUpResult>(
+        '导出到本地文件夹', (report, cancel) {
+      return ref.read(syncEngineProvider).syncUp(
+            modules: _selectedModules(ref.read(settingsProvider)),
+            storage: LocalFolderStorage(root),
+            cancelToken: cancel,
+            onProgress: (done, total, label) =>
+                report(total == 0 ? null : done / total, label),
+          );
+    });
+    if (res != null && mounted) {
+      final msg = '已导出到：\n$root\n\n'
+          '上传 ${res.uploaded} · 删除 ${res.deleted} · 未变 ${res.unchanged}\n'
+          '目录结构与 OneDrive 的 Sync 文件夹一致，可用文件管理器 / adb pull 查看。';
+      setState(() => _status = msg);
+      await _showResult('导出到本地文件夹', msg);
+    }
+  }
+
+  Future<void> _importFromLocalFolder() async {
+    final root = await _mirrorDir();
+    final status = await _withProgress<String>(
+        '从本地文件夹导入', (report, cancel) async {
+      final summary = await ref.read(syncEngineProvider).syncDown(
+            modules: _selectedModules(ref.read(settingsProvider)),
+            clearBeforeImport:
+                ref.read(settingsProvider).importClearBeforeImport,
+            // The local folder is a backup mirror: importing from it is a
+            // RESTORE (export → delete → import back must bring the data back),
+            // not a two-way sync. Only OneDrive keeps strict sync semantics.
+            restore: true,
+            storage: LocalFolderStorage(root),
+            cancelToken: cancel,
+            onProgress: (done, total, label) =>
+                report(total == 0 ? null : done / total, label),
+          );
+      if (summary == null) {
+        return '本地文件夹还是空的（先「导出到本地文件夹」一次）：\n$root';
+      }
+      ref.read(journalRefreshProvider.notifier).state++;
+      ref.read(fogRefreshProvider.notifier).state++;
+      await ref.read(settingsProvider.notifier).reload();
+      return '已从本地文件夹导入：\n${summary.describe()}';
+    });
+    if (status != null && mounted) {
+      setState(() => _status = status);
+      await _showResult('从本地文件夹导入', status);
+    }
   }
 
   // ── Fog of World ──────────────────────────────────────────────────────────
@@ -580,6 +769,7 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
     // means the import still completes even if this State is gone by the time
     // the picker returns; setState is always behind a `mounted` check.
     final fog = ref.read(fogEngineProvider);
+    final db = ref.read(dbProvider);
     final layerId = ref.read(effectiveActiveLayerIdProvider);
     final fogRefresh = ref.read(fogRefreshProvider.notifier);
     final fogImportFocus = ref.read(fogImportFocusProvider.notifier);
@@ -653,6 +843,15 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
       }
       phase.dispose();
     }
+    // Guarantee the imported fog is actually rendered: the map only draws
+    // VISIBLE layers, and the effective-active layer can be a hidden one when
+    // the user has toggled every layer's eye off — the fog then lands in the DB
+    // but never appears ("导入不生效/清除后再导入就没了"). Un-hide the target and
+    // force a reload.
+    if (result.startsWith('已点亮')) {
+      await db.setLayerVisible(layerId, true);
+      fogRefresh.state++;
+    }
     if (mounted) setState(() => _status = result);
   }
 
@@ -692,6 +891,11 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
 
     onPhase('正在写入 ${blocks.length} 个迷雾块…');
     final written = await fog.importBlocks(layerId: layerId, blocks: blocks);
+    // DIAG: which layer the FOW fog landed on. If this layer isn't in the map's
+    // visibleLayerIds (see [FOG] reload log), the import writes fine but nothing
+    // renders — the "清除后再导入就没了" symptom.
+    debugPrint('[FOW] import → activeLayer=$layerId '
+        'blocks=${blocks.length} written=$written');
     fogRefresh.state++;
 
     // Fly the map to the centre of the imported fog (FoW has no track lines,

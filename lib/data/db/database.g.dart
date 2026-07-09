@@ -564,6 +564,12 @@ class $TrackLayersTable extends TrackLayers
   late final GeneratedColumn<double> pathWidth = GeneratedColumn<double>(
       'path_width', aliasedName, true,
       type: DriftSqlType.double, requiredDuringInsert: false);
+  static const VerificationMeta _updatedAtMeta =
+      const VerificationMeta('updatedAt');
+  @override
+  late final GeneratedColumn<DateTime> updatedAt = GeneratedColumn<DateTime>(
+      'updated_at', aliasedName, true,
+      type: DriftSqlType.dateTime, requiredDuringInsert: false);
   @override
   List<GeneratedColumn> get $columns => [
         id,
@@ -575,7 +581,8 @@ class $TrackLayersTable extends TrackLayers
         createdAt,
         pathColor,
         pathOpacity,
-        pathWidth
+        pathWidth,
+        updatedAt
       ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -636,6 +643,10 @@ class $TrackLayersTable extends TrackLayers
       context.handle(_pathWidthMeta,
           pathWidth.isAcceptableOrUnknown(data['path_width']!, _pathWidthMeta));
     }
+    if (data.containsKey('updated_at')) {
+      context.handle(_updatedAtMeta,
+          updatedAt.isAcceptableOrUnknown(data['updated_at']!, _updatedAtMeta));
+    }
     return context;
   }
 
@@ -665,6 +676,8 @@ class $TrackLayersTable extends TrackLayers
           .read(DriftSqlType.double, data['${effectivePrefix}path_opacity']),
       pathWidth: attachedDatabase.typeMapping
           .read(DriftSqlType.double, data['${effectivePrefix}path_width']),
+      updatedAt: attachedDatabase.typeMapping
+          .read(DriftSqlType.dateTime, data['${effectivePrefix}updated_at']),
     );
   }
 
@@ -692,6 +705,11 @@ class TrackLayer extends DataClass implements Insertable<TrackLayer> {
   final int? pathColor;
   final double? pathOpacity;
   final double? pathWidth;
+
+  /// Last local edit (rename, style, visibility). Sync merges rows by
+  /// last-write-wins on this — null (pre-v8 rows, or never edited) loses to
+  /// any non-null timestamp.
+  final DateTime? updatedAt;
   const TrackLayer(
       {required this.id,
       required this.uuid,
@@ -702,7 +720,8 @@ class TrackLayer extends DataClass implements Insertable<TrackLayer> {
       required this.createdAt,
       this.pathColor,
       this.pathOpacity,
-      this.pathWidth});
+      this.pathWidth,
+      this.updatedAt});
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
     final map = <String, Expression>{};
@@ -723,6 +742,9 @@ class TrackLayer extends DataClass implements Insertable<TrackLayer> {
     }
     if (!nullToAbsent || pathWidth != null) {
       map['path_width'] = Variable<double>(pathWidth);
+    }
+    if (!nullToAbsent || updatedAt != null) {
+      map['updated_at'] = Variable<DateTime>(updatedAt);
     }
     return map;
   }
@@ -745,6 +767,9 @@ class TrackLayer extends DataClass implements Insertable<TrackLayer> {
       pathWidth: pathWidth == null && nullToAbsent
           ? const Value.absent()
           : Value(pathWidth),
+      updatedAt: updatedAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(updatedAt),
     );
   }
 
@@ -762,6 +787,7 @@ class TrackLayer extends DataClass implements Insertable<TrackLayer> {
       pathColor: serializer.fromJson<int?>(json['pathColor']),
       pathOpacity: serializer.fromJson<double?>(json['pathOpacity']),
       pathWidth: serializer.fromJson<double?>(json['pathWidth']),
+      updatedAt: serializer.fromJson<DateTime?>(json['updatedAt']),
     );
   }
   @override
@@ -778,6 +804,7 @@ class TrackLayer extends DataClass implements Insertable<TrackLayer> {
       'pathColor': serializer.toJson<int?>(pathColor),
       'pathOpacity': serializer.toJson<double?>(pathOpacity),
       'pathWidth': serializer.toJson<double?>(pathWidth),
+      'updatedAt': serializer.toJson<DateTime?>(updatedAt),
     };
   }
 
@@ -791,7 +818,8 @@ class TrackLayer extends DataClass implements Insertable<TrackLayer> {
           DateTime? createdAt,
           Value<int?> pathColor = const Value.absent(),
           Value<double?> pathOpacity = const Value.absent(),
-          Value<double?> pathWidth = const Value.absent()}) =>
+          Value<double?> pathWidth = const Value.absent(),
+          Value<DateTime?> updatedAt = const Value.absent()}) =>
       TrackLayer(
         id: id ?? this.id,
         uuid: uuid ?? this.uuid,
@@ -803,6 +831,7 @@ class TrackLayer extends DataClass implements Insertable<TrackLayer> {
         pathColor: pathColor.present ? pathColor.value : this.pathColor,
         pathOpacity: pathOpacity.present ? pathOpacity.value : this.pathOpacity,
         pathWidth: pathWidth.present ? pathWidth.value : this.pathWidth,
+        updatedAt: updatedAt.present ? updatedAt.value : this.updatedAt,
       );
   TrackLayer copyWithCompanion(TrackLayersCompanion data) {
     return TrackLayer(
@@ -818,6 +847,7 @@ class TrackLayer extends DataClass implements Insertable<TrackLayer> {
       pathOpacity:
           data.pathOpacity.present ? data.pathOpacity.value : this.pathOpacity,
       pathWidth: data.pathWidth.present ? data.pathWidth.value : this.pathWidth,
+      updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
     );
   }
 
@@ -833,14 +863,15 @@ class TrackLayer extends DataClass implements Insertable<TrackLayer> {
           ..write('createdAt: $createdAt, ')
           ..write('pathColor: $pathColor, ')
           ..write('pathOpacity: $pathOpacity, ')
-          ..write('pathWidth: $pathWidth')
+          ..write('pathWidth: $pathWidth, ')
+          ..write('updatedAt: $updatedAt')
           ..write(')'))
         .toString();
   }
 
   @override
   int get hashCode => Object.hash(id, uuid, name, colorValue, visible, tag,
-      createdAt, pathColor, pathOpacity, pathWidth);
+      createdAt, pathColor, pathOpacity, pathWidth, updatedAt);
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -854,7 +885,8 @@ class TrackLayer extends DataClass implements Insertable<TrackLayer> {
           other.createdAt == this.createdAt &&
           other.pathColor == this.pathColor &&
           other.pathOpacity == this.pathOpacity &&
-          other.pathWidth == this.pathWidth);
+          other.pathWidth == this.pathWidth &&
+          other.updatedAt == this.updatedAt);
 }
 
 class TrackLayersCompanion extends UpdateCompanion<TrackLayer> {
@@ -868,6 +900,7 @@ class TrackLayersCompanion extends UpdateCompanion<TrackLayer> {
   final Value<int?> pathColor;
   final Value<double?> pathOpacity;
   final Value<double?> pathWidth;
+  final Value<DateTime?> updatedAt;
   const TrackLayersCompanion({
     this.id = const Value.absent(),
     this.uuid = const Value.absent(),
@@ -879,6 +912,7 @@ class TrackLayersCompanion extends UpdateCompanion<TrackLayer> {
     this.pathColor = const Value.absent(),
     this.pathOpacity = const Value.absent(),
     this.pathWidth = const Value.absent(),
+    this.updatedAt = const Value.absent(),
   });
   TrackLayersCompanion.insert({
     this.id = const Value.absent(),
@@ -891,6 +925,7 @@ class TrackLayersCompanion extends UpdateCompanion<TrackLayer> {
     this.pathColor = const Value.absent(),
     this.pathOpacity = const Value.absent(),
     this.pathWidth = const Value.absent(),
+    this.updatedAt = const Value.absent(),
   })  : name = Value(name),
         colorValue = Value(colorValue),
         createdAt = Value(createdAt);
@@ -905,6 +940,7 @@ class TrackLayersCompanion extends UpdateCompanion<TrackLayer> {
     Expression<int>? pathColor,
     Expression<double>? pathOpacity,
     Expression<double>? pathWidth,
+    Expression<DateTime>? updatedAt,
   }) {
     return RawValuesInsertable({
       if (id != null) 'id': id,
@@ -917,6 +953,7 @@ class TrackLayersCompanion extends UpdateCompanion<TrackLayer> {
       if (pathColor != null) 'path_color': pathColor,
       if (pathOpacity != null) 'path_opacity': pathOpacity,
       if (pathWidth != null) 'path_width': pathWidth,
+      if (updatedAt != null) 'updated_at': updatedAt,
     });
   }
 
@@ -930,7 +967,8 @@ class TrackLayersCompanion extends UpdateCompanion<TrackLayer> {
       Value<DateTime>? createdAt,
       Value<int?>? pathColor,
       Value<double?>? pathOpacity,
-      Value<double?>? pathWidth}) {
+      Value<double?>? pathWidth,
+      Value<DateTime?>? updatedAt}) {
     return TrackLayersCompanion(
       id: id ?? this.id,
       uuid: uuid ?? this.uuid,
@@ -942,6 +980,7 @@ class TrackLayersCompanion extends UpdateCompanion<TrackLayer> {
       pathColor: pathColor ?? this.pathColor,
       pathOpacity: pathOpacity ?? this.pathOpacity,
       pathWidth: pathWidth ?? this.pathWidth,
+      updatedAt: updatedAt ?? this.updatedAt,
     );
   }
 
@@ -978,6 +1017,9 @@ class TrackLayersCompanion extends UpdateCompanion<TrackLayer> {
     if (pathWidth.present) {
       map['path_width'] = Variable<double>(pathWidth.value);
     }
+    if (updatedAt.present) {
+      map['updated_at'] = Variable<DateTime>(updatedAt.value);
+    }
     return map;
   }
 
@@ -993,7 +1035,8 @@ class TrackLayersCompanion extends UpdateCompanion<TrackLayer> {
           ..write('createdAt: $createdAt, ')
           ..write('pathColor: $pathColor, ')
           ..write('pathOpacity: $pathOpacity, ')
-          ..write('pathWidth: $pathWidth')
+          ..write('pathWidth: $pathWidth, ')
+          ..write('updatedAt: $updatedAt')
           ..write(')'))
         .toString();
   }
@@ -1420,6 +1463,12 @@ class $JournalEntriesTable extends JournalEntries
   late final GeneratedColumn<String> ownerPeerId = GeneratedColumn<String>(
       'owner_peer_id', aliasedName, true,
       type: DriftSqlType.string, requiredDuringInsert: false);
+  static const VerificationMeta _updatedAtMeta =
+      const VerificationMeta('updatedAt');
+  @override
+  late final GeneratedColumn<DateTime> updatedAt = GeneratedColumn<DateTime>(
+      'updated_at', aliasedName, true,
+      type: DriftSqlType.dateTime, requiredDuringInsert: false);
   @override
   List<GeneratedColumn> get $columns => [
         id,
@@ -1432,7 +1481,8 @@ class $JournalEntriesTable extends JournalEntries
         mediaPaths,
         layerId,
         level,
-        ownerPeerId
+        ownerPeerId,
+        updatedAt
       ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -1503,6 +1553,10 @@ class $JournalEntriesTable extends JournalEntries
           ownerPeerId.isAcceptableOrUnknown(
               data['owner_peer_id']!, _ownerPeerIdMeta));
     }
+    if (data.containsKey('updated_at')) {
+      context.handle(_updatedAtMeta,
+          updatedAt.isAcceptableOrUnknown(data['updated_at']!, _updatedAtMeta));
+    }
     return context;
   }
 
@@ -1534,6 +1588,8 @@ class $JournalEntriesTable extends JournalEntries
           .read(DriftSqlType.string, data['${effectivePrefix}level'])!,
       ownerPeerId: attachedDatabase.typeMapping
           .read(DriftSqlType.string, data['${effectivePrefix}owner_peer_id']),
+      updatedAt: attachedDatabase.typeMapping
+          .read(DriftSqlType.dateTime, data['${effectivePrefix}updated_at']),
     );
   }
 
@@ -1561,6 +1617,10 @@ class JournalEntry extends DataClass implements Insertable<JournalEntry> {
   /// Peer id of the traveler this entry belongs to, or null for "self".
   /// Free-form because peers in this app are P2P UUIDs, not joined records.
   final String? ownerPeerId;
+
+  /// Last local edit. Sync merges entries by last-write-wins on this — null
+  /// (pre-v8 rows, or never edited) loses to any non-null timestamp.
+  final DateTime? updatedAt;
   const JournalEntry(
       {required this.id,
       required this.uuid,
@@ -1572,7 +1632,8 @@ class JournalEntry extends DataClass implements Insertable<JournalEntry> {
       required this.mediaPaths,
       required this.layerId,
       required this.level,
-      this.ownerPeerId});
+      this.ownerPeerId,
+      this.updatedAt});
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
     final map = <String, Expression>{};
@@ -1588,6 +1649,9 @@ class JournalEntry extends DataClass implements Insertable<JournalEntry> {
     map['level'] = Variable<String>(level);
     if (!nullToAbsent || ownerPeerId != null) {
       map['owner_peer_id'] = Variable<String>(ownerPeerId);
+    }
+    if (!nullToAbsent || updatedAt != null) {
+      map['updated_at'] = Variable<DateTime>(updatedAt);
     }
     return map;
   }
@@ -1607,6 +1671,9 @@ class JournalEntry extends DataClass implements Insertable<JournalEntry> {
       ownerPeerId: ownerPeerId == null && nullToAbsent
           ? const Value.absent()
           : Value(ownerPeerId),
+      updatedAt: updatedAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(updatedAt),
     );
   }
 
@@ -1625,6 +1692,7 @@ class JournalEntry extends DataClass implements Insertable<JournalEntry> {
       layerId: serializer.fromJson<int>(json['layerId']),
       level: serializer.fromJson<String>(json['level']),
       ownerPeerId: serializer.fromJson<String?>(json['ownerPeerId']),
+      updatedAt: serializer.fromJson<DateTime?>(json['updatedAt']),
     );
   }
   @override
@@ -1642,6 +1710,7 @@ class JournalEntry extends DataClass implements Insertable<JournalEntry> {
       'layerId': serializer.toJson<int>(layerId),
       'level': serializer.toJson<String>(level),
       'ownerPeerId': serializer.toJson<String?>(ownerPeerId),
+      'updatedAt': serializer.toJson<DateTime?>(updatedAt),
     };
   }
 
@@ -1656,7 +1725,8 @@ class JournalEntry extends DataClass implements Insertable<JournalEntry> {
           String? mediaPaths,
           int? layerId,
           String? level,
-          Value<String?> ownerPeerId = const Value.absent()}) =>
+          Value<String?> ownerPeerId = const Value.absent(),
+          Value<DateTime?> updatedAt = const Value.absent()}) =>
       JournalEntry(
         id: id ?? this.id,
         uuid: uuid ?? this.uuid,
@@ -1669,6 +1739,7 @@ class JournalEntry extends DataClass implements Insertable<JournalEntry> {
         layerId: layerId ?? this.layerId,
         level: level ?? this.level,
         ownerPeerId: ownerPeerId.present ? ownerPeerId.value : this.ownerPeerId,
+        updatedAt: updatedAt.present ? updatedAt.value : this.updatedAt,
       );
   JournalEntry copyWithCompanion(JournalEntriesCompanion data) {
     return JournalEntry(
@@ -1686,6 +1757,7 @@ class JournalEntry extends DataClass implements Insertable<JournalEntry> {
       level: data.level.present ? data.level.value : this.level,
       ownerPeerId:
           data.ownerPeerId.present ? data.ownerPeerId.value : this.ownerPeerId,
+      updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
     );
   }
 
@@ -1702,14 +1774,15 @@ class JournalEntry extends DataClass implements Insertable<JournalEntry> {
           ..write('mediaPaths: $mediaPaths, ')
           ..write('layerId: $layerId, ')
           ..write('level: $level, ')
-          ..write('ownerPeerId: $ownerPeerId')
+          ..write('ownerPeerId: $ownerPeerId, ')
+          ..write('updatedAt: $updatedAt')
           ..write(')'))
         .toString();
   }
 
   @override
   int get hashCode => Object.hash(id, uuid, time, lat, lng, title, richContent,
-      mediaPaths, layerId, level, ownerPeerId);
+      mediaPaths, layerId, level, ownerPeerId, updatedAt);
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -1724,7 +1797,8 @@ class JournalEntry extends DataClass implements Insertable<JournalEntry> {
           other.mediaPaths == this.mediaPaths &&
           other.layerId == this.layerId &&
           other.level == this.level &&
-          other.ownerPeerId == this.ownerPeerId);
+          other.ownerPeerId == this.ownerPeerId &&
+          other.updatedAt == this.updatedAt);
 }
 
 class JournalEntriesCompanion extends UpdateCompanion<JournalEntry> {
@@ -1739,6 +1813,7 @@ class JournalEntriesCompanion extends UpdateCompanion<JournalEntry> {
   final Value<int> layerId;
   final Value<String> level;
   final Value<String?> ownerPeerId;
+  final Value<DateTime?> updatedAt;
   const JournalEntriesCompanion({
     this.id = const Value.absent(),
     this.uuid = const Value.absent(),
@@ -1751,6 +1826,7 @@ class JournalEntriesCompanion extends UpdateCompanion<JournalEntry> {
     this.layerId = const Value.absent(),
     this.level = const Value.absent(),
     this.ownerPeerId = const Value.absent(),
+    this.updatedAt = const Value.absent(),
   });
   JournalEntriesCompanion.insert({
     this.id = const Value.absent(),
@@ -1764,6 +1840,7 @@ class JournalEntriesCompanion extends UpdateCompanion<JournalEntry> {
     required int layerId,
     this.level = const Value.absent(),
     this.ownerPeerId = const Value.absent(),
+    this.updatedAt = const Value.absent(),
   })  : time = Value(time),
         lat = Value(lat),
         lng = Value(lng),
@@ -1781,6 +1858,7 @@ class JournalEntriesCompanion extends UpdateCompanion<JournalEntry> {
     Expression<int>? layerId,
     Expression<String>? level,
     Expression<String>? ownerPeerId,
+    Expression<DateTime>? updatedAt,
   }) {
     return RawValuesInsertable({
       if (id != null) 'id': id,
@@ -1794,6 +1872,7 @@ class JournalEntriesCompanion extends UpdateCompanion<JournalEntry> {
       if (layerId != null) 'layer_id': layerId,
       if (level != null) 'level': level,
       if (ownerPeerId != null) 'owner_peer_id': ownerPeerId,
+      if (updatedAt != null) 'updated_at': updatedAt,
     });
   }
 
@@ -1808,7 +1887,8 @@ class JournalEntriesCompanion extends UpdateCompanion<JournalEntry> {
       Value<String>? mediaPaths,
       Value<int>? layerId,
       Value<String>? level,
-      Value<String?>? ownerPeerId}) {
+      Value<String?>? ownerPeerId,
+      Value<DateTime?>? updatedAt}) {
     return JournalEntriesCompanion(
       id: id ?? this.id,
       uuid: uuid ?? this.uuid,
@@ -1821,6 +1901,7 @@ class JournalEntriesCompanion extends UpdateCompanion<JournalEntry> {
       layerId: layerId ?? this.layerId,
       level: level ?? this.level,
       ownerPeerId: ownerPeerId ?? this.ownerPeerId,
+      updatedAt: updatedAt ?? this.updatedAt,
     );
   }
 
@@ -1860,6 +1941,9 @@ class JournalEntriesCompanion extends UpdateCompanion<JournalEntry> {
     if (ownerPeerId.present) {
       map['owner_peer_id'] = Variable<String>(ownerPeerId.value);
     }
+    if (updatedAt.present) {
+      map['updated_at'] = Variable<DateTime>(updatedAt.value);
+    }
     return map;
   }
 
@@ -1876,7 +1960,8 @@ class JournalEntriesCompanion extends UpdateCompanion<JournalEntry> {
           ..write('mediaPaths: $mediaPaths, ')
           ..write('layerId: $layerId, ')
           ..write('level: $level, ')
-          ..write('ownerPeerId: $ownerPeerId')
+          ..write('ownerPeerId: $ownerPeerId, ')
+          ..write('updatedAt: $updatedAt')
           ..write(')'))
         .toString();
   }
@@ -3060,6 +3145,581 @@ class PeerLocationsCompanion extends UpdateCompanion<PeerLocation> {
   }
 }
 
+class $TombstonesTable extends Tombstones
+    with TableInfo<$TombstonesTable, Tombstone> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $TombstonesTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _tblMeta = const VerificationMeta('tbl');
+  @override
+  late final GeneratedColumn<String> tbl = GeneratedColumn<String>(
+      'tbl', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _uuidMeta = const VerificationMeta('uuid');
+  @override
+  late final GeneratedColumn<String> uuid = GeneratedColumn<String>(
+      'uuid', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _deletedAtMeta =
+      const VerificationMeta('deletedAt');
+  @override
+  late final GeneratedColumn<DateTime> deletedAt = GeneratedColumn<DateTime>(
+      'deleted_at', aliasedName, false,
+      type: DriftSqlType.dateTime, requiredDuringInsert: true);
+  @override
+  List<GeneratedColumn> get $columns => [tbl, uuid, deletedAt];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'tombstones';
+  @override
+  VerificationContext validateIntegrity(Insertable<Tombstone> instance,
+      {bool isInserting = false}) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('tbl')) {
+      context.handle(
+          _tblMeta, tbl.isAcceptableOrUnknown(data['tbl']!, _tblMeta));
+    } else if (isInserting) {
+      context.missing(_tblMeta);
+    }
+    if (data.containsKey('uuid')) {
+      context.handle(
+          _uuidMeta, uuid.isAcceptableOrUnknown(data['uuid']!, _uuidMeta));
+    } else if (isInserting) {
+      context.missing(_uuidMeta);
+    }
+    if (data.containsKey('deleted_at')) {
+      context.handle(_deletedAtMeta,
+          deletedAt.isAcceptableOrUnknown(data['deleted_at']!, _deletedAtMeta));
+    } else if (isInserting) {
+      context.missing(_deletedAtMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {tbl, uuid};
+  @override
+  Tombstone map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return Tombstone(
+      tbl: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}tbl'])!,
+      uuid: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}uuid'])!,
+      deletedAt: attachedDatabase.typeMapping
+          .read(DriftSqlType.dateTime, data['${effectivePrefix}deleted_at'])!,
+    );
+  }
+
+  @override
+  $TombstonesTable createAlias(String alias) {
+    return $TombstonesTable(attachedDatabase, alias);
+  }
+}
+
+class Tombstone extends DataClass implements Insertable<Tombstone> {
+  /// Logical (SQL) table name, e.g. 'track_points', 'journal_entries'.
+  final String tbl;
+  final String uuid;
+  final DateTime deletedAt;
+  const Tombstone(
+      {required this.tbl, required this.uuid, required this.deletedAt});
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['tbl'] = Variable<String>(tbl);
+    map['uuid'] = Variable<String>(uuid);
+    map['deleted_at'] = Variable<DateTime>(deletedAt);
+    return map;
+  }
+
+  TombstonesCompanion toCompanion(bool nullToAbsent) {
+    return TombstonesCompanion(
+      tbl: Value(tbl),
+      uuid: Value(uuid),
+      deletedAt: Value(deletedAt),
+    );
+  }
+
+  factory Tombstone.fromJson(Map<String, dynamic> json,
+      {ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return Tombstone(
+      tbl: serializer.fromJson<String>(json['tbl']),
+      uuid: serializer.fromJson<String>(json['uuid']),
+      deletedAt: serializer.fromJson<DateTime>(json['deletedAt']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'tbl': serializer.toJson<String>(tbl),
+      'uuid': serializer.toJson<String>(uuid),
+      'deletedAt': serializer.toJson<DateTime>(deletedAt),
+    };
+  }
+
+  Tombstone copyWith({String? tbl, String? uuid, DateTime? deletedAt}) =>
+      Tombstone(
+        tbl: tbl ?? this.tbl,
+        uuid: uuid ?? this.uuid,
+        deletedAt: deletedAt ?? this.deletedAt,
+      );
+  Tombstone copyWithCompanion(TombstonesCompanion data) {
+    return Tombstone(
+      tbl: data.tbl.present ? data.tbl.value : this.tbl,
+      uuid: data.uuid.present ? data.uuid.value : this.uuid,
+      deletedAt: data.deletedAt.present ? data.deletedAt.value : this.deletedAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('Tombstone(')
+          ..write('tbl: $tbl, ')
+          ..write('uuid: $uuid, ')
+          ..write('deletedAt: $deletedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(tbl, uuid, deletedAt);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is Tombstone &&
+          other.tbl == this.tbl &&
+          other.uuid == this.uuid &&
+          other.deletedAt == this.deletedAt);
+}
+
+class TombstonesCompanion extends UpdateCompanion<Tombstone> {
+  final Value<String> tbl;
+  final Value<String> uuid;
+  final Value<DateTime> deletedAt;
+  final Value<int> rowid;
+  const TombstonesCompanion({
+    this.tbl = const Value.absent(),
+    this.uuid = const Value.absent(),
+    this.deletedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  TombstonesCompanion.insert({
+    required String tbl,
+    required String uuid,
+    required DateTime deletedAt,
+    this.rowid = const Value.absent(),
+  })  : tbl = Value(tbl),
+        uuid = Value(uuid),
+        deletedAt = Value(deletedAt);
+  static Insertable<Tombstone> custom({
+    Expression<String>? tbl,
+    Expression<String>? uuid,
+    Expression<DateTime>? deletedAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (tbl != null) 'tbl': tbl,
+      if (uuid != null) 'uuid': uuid,
+      if (deletedAt != null) 'deleted_at': deletedAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  TombstonesCompanion copyWith(
+      {Value<String>? tbl,
+      Value<String>? uuid,
+      Value<DateTime>? deletedAt,
+      Value<int>? rowid}) {
+    return TombstonesCompanion(
+      tbl: tbl ?? this.tbl,
+      uuid: uuid ?? this.uuid,
+      deletedAt: deletedAt ?? this.deletedAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (tbl.present) {
+      map['tbl'] = Variable<String>(tbl.value);
+    }
+    if (uuid.present) {
+      map['uuid'] = Variable<String>(uuid.value);
+    }
+    if (deletedAt.present) {
+      map['deleted_at'] = Variable<DateTime>(deletedAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('TombstonesCompanion(')
+          ..write('tbl: $tbl, ')
+          ..write('uuid: $uuid, ')
+          ..write('deletedAt: $deletedAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class $FogErasesTable extends FogErases
+    with TableInfo<$FogErasesTable, FogErase> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $FogErasesTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _tileXMeta = const VerificationMeta('tileX');
+  @override
+  late final GeneratedColumn<int> tileX = GeneratedColumn<int>(
+      'tile_x', aliasedName, false,
+      type: DriftSqlType.int, requiredDuringInsert: true);
+  static const VerificationMeta _tileYMeta = const VerificationMeta('tileY');
+  @override
+  late final GeneratedColumn<int> tileY = GeneratedColumn<int>(
+      'tile_y', aliasedName, false,
+      type: DriftSqlType.int, requiredDuringInsert: true);
+  static const VerificationMeta _zoomMeta = const VerificationMeta('zoom');
+  @override
+  late final GeneratedColumn<int> zoom = GeneratedColumn<int>(
+      'zoom', aliasedName, false,
+      type: DriftSqlType.int, requiredDuringInsert: true);
+  static const VerificationMeta _layerIdMeta =
+      const VerificationMeta('layerId');
+  @override
+  late final GeneratedColumn<int> layerId = GeneratedColumn<int>(
+      'layer_id', aliasedName, false,
+      type: DriftSqlType.int, requiredDuringInsert: true);
+  static const VerificationMeta _maskMeta = const VerificationMeta('mask');
+  @override
+  late final GeneratedColumn<Uint8List> mask = GeneratedColumn<Uint8List>(
+      'mask', aliasedName, false,
+      type: DriftSqlType.blob, requiredDuringInsert: true);
+  static const VerificationMeta _erasedAtMeta =
+      const VerificationMeta('erasedAt');
+  @override
+  late final GeneratedColumn<DateTime> erasedAt = GeneratedColumn<DateTime>(
+      'erased_at', aliasedName, false,
+      type: DriftSqlType.dateTime, requiredDuringInsert: true);
+  @override
+  List<GeneratedColumn> get $columns =>
+      [tileX, tileY, zoom, layerId, mask, erasedAt];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'fog_erases';
+  @override
+  VerificationContext validateIntegrity(Insertable<FogErase> instance,
+      {bool isInserting = false}) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('tile_x')) {
+      context.handle(
+          _tileXMeta, tileX.isAcceptableOrUnknown(data['tile_x']!, _tileXMeta));
+    } else if (isInserting) {
+      context.missing(_tileXMeta);
+    }
+    if (data.containsKey('tile_y')) {
+      context.handle(
+          _tileYMeta, tileY.isAcceptableOrUnknown(data['tile_y']!, _tileYMeta));
+    } else if (isInserting) {
+      context.missing(_tileYMeta);
+    }
+    if (data.containsKey('zoom')) {
+      context.handle(
+          _zoomMeta, zoom.isAcceptableOrUnknown(data['zoom']!, _zoomMeta));
+    } else if (isInserting) {
+      context.missing(_zoomMeta);
+    }
+    if (data.containsKey('layer_id')) {
+      context.handle(_layerIdMeta,
+          layerId.isAcceptableOrUnknown(data['layer_id']!, _layerIdMeta));
+    } else if (isInserting) {
+      context.missing(_layerIdMeta);
+    }
+    if (data.containsKey('mask')) {
+      context.handle(
+          _maskMeta, mask.isAcceptableOrUnknown(data['mask']!, _maskMeta));
+    } else if (isInserting) {
+      context.missing(_maskMeta);
+    }
+    if (data.containsKey('erased_at')) {
+      context.handle(_erasedAtMeta,
+          erasedAt.isAcceptableOrUnknown(data['erased_at']!, _erasedAtMeta));
+    } else if (isInserting) {
+      context.missing(_erasedAtMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {tileX, tileY, zoom, layerId};
+  @override
+  FogErase map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return FogErase(
+      tileX: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}tile_x'])!,
+      tileY: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}tile_y'])!,
+      zoom: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}zoom'])!,
+      layerId: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}layer_id'])!,
+      mask: attachedDatabase.typeMapping
+          .read(DriftSqlType.blob, data['${effectivePrefix}mask'])!,
+      erasedAt: attachedDatabase.typeMapping
+          .read(DriftSqlType.dateTime, data['${effectivePrefix}erased_at'])!,
+    );
+  }
+
+  @override
+  $FogErasesTable createAlias(String alias) {
+    return $FogErasesTable(attachedDatabase, alias);
+  }
+}
+
+class FogErase extends DataClass implements Insertable<FogErase> {
+  final int tileX;
+  final int tileY;
+  final int zoom;
+  final int layerId;
+  final Uint8List mask;
+  final DateTime erasedAt;
+  const FogErase(
+      {required this.tileX,
+      required this.tileY,
+      required this.zoom,
+      required this.layerId,
+      required this.mask,
+      required this.erasedAt});
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['tile_x'] = Variable<int>(tileX);
+    map['tile_y'] = Variable<int>(tileY);
+    map['zoom'] = Variable<int>(zoom);
+    map['layer_id'] = Variable<int>(layerId);
+    map['mask'] = Variable<Uint8List>(mask);
+    map['erased_at'] = Variable<DateTime>(erasedAt);
+    return map;
+  }
+
+  FogErasesCompanion toCompanion(bool nullToAbsent) {
+    return FogErasesCompanion(
+      tileX: Value(tileX),
+      tileY: Value(tileY),
+      zoom: Value(zoom),
+      layerId: Value(layerId),
+      mask: Value(mask),
+      erasedAt: Value(erasedAt),
+    );
+  }
+
+  factory FogErase.fromJson(Map<String, dynamic> json,
+      {ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return FogErase(
+      tileX: serializer.fromJson<int>(json['tileX']),
+      tileY: serializer.fromJson<int>(json['tileY']),
+      zoom: serializer.fromJson<int>(json['zoom']),
+      layerId: serializer.fromJson<int>(json['layerId']),
+      mask: serializer.fromJson<Uint8List>(json['mask']),
+      erasedAt: serializer.fromJson<DateTime>(json['erasedAt']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'tileX': serializer.toJson<int>(tileX),
+      'tileY': serializer.toJson<int>(tileY),
+      'zoom': serializer.toJson<int>(zoom),
+      'layerId': serializer.toJson<int>(layerId),
+      'mask': serializer.toJson<Uint8List>(mask),
+      'erasedAt': serializer.toJson<DateTime>(erasedAt),
+    };
+  }
+
+  FogErase copyWith(
+          {int? tileX,
+          int? tileY,
+          int? zoom,
+          int? layerId,
+          Uint8List? mask,
+          DateTime? erasedAt}) =>
+      FogErase(
+        tileX: tileX ?? this.tileX,
+        tileY: tileY ?? this.tileY,
+        zoom: zoom ?? this.zoom,
+        layerId: layerId ?? this.layerId,
+        mask: mask ?? this.mask,
+        erasedAt: erasedAt ?? this.erasedAt,
+      );
+  FogErase copyWithCompanion(FogErasesCompanion data) {
+    return FogErase(
+      tileX: data.tileX.present ? data.tileX.value : this.tileX,
+      tileY: data.tileY.present ? data.tileY.value : this.tileY,
+      zoom: data.zoom.present ? data.zoom.value : this.zoom,
+      layerId: data.layerId.present ? data.layerId.value : this.layerId,
+      mask: data.mask.present ? data.mask.value : this.mask,
+      erasedAt: data.erasedAt.present ? data.erasedAt.value : this.erasedAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('FogErase(')
+          ..write('tileX: $tileX, ')
+          ..write('tileY: $tileY, ')
+          ..write('zoom: $zoom, ')
+          ..write('layerId: $layerId, ')
+          ..write('mask: $mask, ')
+          ..write('erasedAt: $erasedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+      tileX, tileY, zoom, layerId, $driftBlobEquality.hash(mask), erasedAt);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is FogErase &&
+          other.tileX == this.tileX &&
+          other.tileY == this.tileY &&
+          other.zoom == this.zoom &&
+          other.layerId == this.layerId &&
+          $driftBlobEquality.equals(other.mask, this.mask) &&
+          other.erasedAt == this.erasedAt);
+}
+
+class FogErasesCompanion extends UpdateCompanion<FogErase> {
+  final Value<int> tileX;
+  final Value<int> tileY;
+  final Value<int> zoom;
+  final Value<int> layerId;
+  final Value<Uint8List> mask;
+  final Value<DateTime> erasedAt;
+  final Value<int> rowid;
+  const FogErasesCompanion({
+    this.tileX = const Value.absent(),
+    this.tileY = const Value.absent(),
+    this.zoom = const Value.absent(),
+    this.layerId = const Value.absent(),
+    this.mask = const Value.absent(),
+    this.erasedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  FogErasesCompanion.insert({
+    required int tileX,
+    required int tileY,
+    required int zoom,
+    required int layerId,
+    required Uint8List mask,
+    required DateTime erasedAt,
+    this.rowid = const Value.absent(),
+  })  : tileX = Value(tileX),
+        tileY = Value(tileY),
+        zoom = Value(zoom),
+        layerId = Value(layerId),
+        mask = Value(mask),
+        erasedAt = Value(erasedAt);
+  static Insertable<FogErase> custom({
+    Expression<int>? tileX,
+    Expression<int>? tileY,
+    Expression<int>? zoom,
+    Expression<int>? layerId,
+    Expression<Uint8List>? mask,
+    Expression<DateTime>? erasedAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (tileX != null) 'tile_x': tileX,
+      if (tileY != null) 'tile_y': tileY,
+      if (zoom != null) 'zoom': zoom,
+      if (layerId != null) 'layer_id': layerId,
+      if (mask != null) 'mask': mask,
+      if (erasedAt != null) 'erased_at': erasedAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  FogErasesCompanion copyWith(
+      {Value<int>? tileX,
+      Value<int>? tileY,
+      Value<int>? zoom,
+      Value<int>? layerId,
+      Value<Uint8List>? mask,
+      Value<DateTime>? erasedAt,
+      Value<int>? rowid}) {
+    return FogErasesCompanion(
+      tileX: tileX ?? this.tileX,
+      tileY: tileY ?? this.tileY,
+      zoom: zoom ?? this.zoom,
+      layerId: layerId ?? this.layerId,
+      mask: mask ?? this.mask,
+      erasedAt: erasedAt ?? this.erasedAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (tileX.present) {
+      map['tile_x'] = Variable<int>(tileX.value);
+    }
+    if (tileY.present) {
+      map['tile_y'] = Variable<int>(tileY.value);
+    }
+    if (zoom.present) {
+      map['zoom'] = Variable<int>(zoom.value);
+    }
+    if (layerId.present) {
+      map['layer_id'] = Variable<int>(layerId.value);
+    }
+    if (mask.present) {
+      map['mask'] = Variable<Uint8List>(mask.value);
+    }
+    if (erasedAt.present) {
+      map['erased_at'] = Variable<DateTime>(erasedAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('FogErasesCompanion(')
+          ..write('tileX: $tileX, ')
+          ..write('tileY: $tileY, ')
+          ..write('zoom: $zoom, ')
+          ..write('layerId: $layerId, ')
+          ..write('mask: $mask, ')
+          ..write('erasedAt: $erasedAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$AppDb extends GeneratedDatabase {
   _$AppDb(QueryExecutor e) : super(e);
   $AppDbManager get managers => $AppDbManager(this);
@@ -3070,6 +3730,8 @@ abstract class _$AppDb extends GeneratedDatabase {
   late final $ChatMessagesTable chatMessages = $ChatMessagesTable(this);
   late final $SongFavoritesTable songFavorites = $SongFavoritesTable(this);
   late final $PeerLocationsTable peerLocations = $PeerLocationsTable(this);
+  late final $TombstonesTable tombstones = $TombstonesTable(this);
+  late final $FogErasesTable fogErases = $FogErasesTable(this);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -3081,7 +3743,9 @@ abstract class _$AppDb extends GeneratedDatabase {
         journalEntries,
         chatMessages,
         songFavorites,
-        peerLocations
+        peerLocations,
+        tombstones,
+        fogErases
       ];
 }
 
@@ -3333,6 +3997,7 @@ typedef $$TrackLayersTableCreateCompanionBuilder = TrackLayersCompanion
   Value<int?> pathColor,
   Value<double?> pathOpacity,
   Value<double?> pathWidth,
+  Value<DateTime?> updatedAt,
 });
 typedef $$TrackLayersTableUpdateCompanionBuilder = TrackLayersCompanion
     Function({
@@ -3346,6 +4011,7 @@ typedef $$TrackLayersTableUpdateCompanionBuilder = TrackLayersCompanion
   Value<int?> pathColor,
   Value<double?> pathOpacity,
   Value<double?> pathWidth,
+  Value<DateTime?> updatedAt,
 });
 
 class $$TrackLayersTableFilterComposer
@@ -3386,6 +4052,9 @@ class $$TrackLayersTableFilterComposer
 
   ColumnFilters<double> get pathWidth => $composableBuilder(
       column: $table.pathWidth, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<DateTime> get updatedAt => $composableBuilder(
+      column: $table.updatedAt, builder: (column) => ColumnFilters(column));
 }
 
 class $$TrackLayersTableOrderingComposer
@@ -3426,6 +4095,9 @@ class $$TrackLayersTableOrderingComposer
 
   ColumnOrderings<double> get pathWidth => $composableBuilder(
       column: $table.pathWidth, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<DateTime> get updatedAt => $composableBuilder(
+      column: $table.updatedAt, builder: (column) => ColumnOrderings(column));
 }
 
 class $$TrackLayersTableAnnotationComposer
@@ -3466,6 +4138,9 @@ class $$TrackLayersTableAnnotationComposer
 
   GeneratedColumn<double> get pathWidth =>
       $composableBuilder(column: $table.pathWidth, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get updatedAt =>
+      $composableBuilder(column: $table.updatedAt, builder: (column) => column);
 }
 
 class $$TrackLayersTableTableManager extends RootTableManager<
@@ -3501,6 +4176,7 @@ class $$TrackLayersTableTableManager extends RootTableManager<
             Value<int?> pathColor = const Value.absent(),
             Value<double?> pathOpacity = const Value.absent(),
             Value<double?> pathWidth = const Value.absent(),
+            Value<DateTime?> updatedAt = const Value.absent(),
           }) =>
               TrackLayersCompanion(
             id: id,
@@ -3513,6 +4189,7 @@ class $$TrackLayersTableTableManager extends RootTableManager<
             pathColor: pathColor,
             pathOpacity: pathOpacity,
             pathWidth: pathWidth,
+            updatedAt: updatedAt,
           ),
           createCompanionCallback: ({
             Value<int> id = const Value.absent(),
@@ -3525,6 +4202,7 @@ class $$TrackLayersTableTableManager extends RootTableManager<
             Value<int?> pathColor = const Value.absent(),
             Value<double?> pathOpacity = const Value.absent(),
             Value<double?> pathWidth = const Value.absent(),
+            Value<DateTime?> updatedAt = const Value.absent(),
           }) =>
               TrackLayersCompanion.insert(
             id: id,
@@ -3537,6 +4215,7 @@ class $$TrackLayersTableTableManager extends RootTableManager<
             pathColor: pathColor,
             pathOpacity: pathOpacity,
             pathWidth: pathWidth,
+            updatedAt: updatedAt,
           ),
           withReferenceMapper: (p0) => p0
               .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
@@ -3749,6 +4428,7 @@ typedef $$JournalEntriesTableCreateCompanionBuilder = JournalEntriesCompanion
   required int layerId,
   Value<String> level,
   Value<String?> ownerPeerId,
+  Value<DateTime?> updatedAt,
 });
 typedef $$JournalEntriesTableUpdateCompanionBuilder = JournalEntriesCompanion
     Function({
@@ -3763,6 +4443,7 @@ typedef $$JournalEntriesTableUpdateCompanionBuilder = JournalEntriesCompanion
   Value<int> layerId,
   Value<String> level,
   Value<String?> ownerPeerId,
+  Value<DateTime?> updatedAt,
 });
 
 class $$JournalEntriesTableFilterComposer
@@ -3806,6 +4487,9 @@ class $$JournalEntriesTableFilterComposer
 
   ColumnFilters<String> get ownerPeerId => $composableBuilder(
       column: $table.ownerPeerId, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<DateTime> get updatedAt => $composableBuilder(
+      column: $table.updatedAt, builder: (column) => ColumnFilters(column));
 }
 
 class $$JournalEntriesTableOrderingComposer
@@ -3849,6 +4533,9 @@ class $$JournalEntriesTableOrderingComposer
 
   ColumnOrderings<String> get ownerPeerId => $composableBuilder(
       column: $table.ownerPeerId, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<DateTime> get updatedAt => $composableBuilder(
+      column: $table.updatedAt, builder: (column) => ColumnOrderings(column));
 }
 
 class $$JournalEntriesTableAnnotationComposer
@@ -3892,6 +4579,9 @@ class $$JournalEntriesTableAnnotationComposer
 
   GeneratedColumn<String> get ownerPeerId => $composableBuilder(
       column: $table.ownerPeerId, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get updatedAt =>
+      $composableBuilder(column: $table.updatedAt, builder: (column) => column);
 }
 
 class $$JournalEntriesTableTableManager extends RootTableManager<
@@ -3928,6 +4618,7 @@ class $$JournalEntriesTableTableManager extends RootTableManager<
             Value<int> layerId = const Value.absent(),
             Value<String> level = const Value.absent(),
             Value<String?> ownerPeerId = const Value.absent(),
+            Value<DateTime?> updatedAt = const Value.absent(),
           }) =>
               JournalEntriesCompanion(
             id: id,
@@ -3941,6 +4632,7 @@ class $$JournalEntriesTableTableManager extends RootTableManager<
             layerId: layerId,
             level: level,
             ownerPeerId: ownerPeerId,
+            updatedAt: updatedAt,
           ),
           createCompanionCallback: ({
             Value<int> id = const Value.absent(),
@@ -3954,6 +4646,7 @@ class $$JournalEntriesTableTableManager extends RootTableManager<
             required int layerId,
             Value<String> level = const Value.absent(),
             Value<String?> ownerPeerId = const Value.absent(),
+            Value<DateTime?> updatedAt = const Value.absent(),
           }) =>
               JournalEntriesCompanion.insert(
             id: id,
@@ -3967,6 +4660,7 @@ class $$JournalEntriesTableTableManager extends RootTableManager<
             layerId: layerId,
             level: level,
             ownerPeerId: ownerPeerId,
+            updatedAt: updatedAt,
           ),
           withReferenceMapper: (p0) => p0
               .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
@@ -4590,6 +5284,321 @@ typedef $$PeerLocationsTableProcessedTableManager = ProcessedTableManager<
     (PeerLocation, BaseReferences<_$AppDb, $PeerLocationsTable, PeerLocation>),
     PeerLocation,
     PrefetchHooks Function()>;
+typedef $$TombstonesTableCreateCompanionBuilder = TombstonesCompanion Function({
+  required String tbl,
+  required String uuid,
+  required DateTime deletedAt,
+  Value<int> rowid,
+});
+typedef $$TombstonesTableUpdateCompanionBuilder = TombstonesCompanion Function({
+  Value<String> tbl,
+  Value<String> uuid,
+  Value<DateTime> deletedAt,
+  Value<int> rowid,
+});
+
+class $$TombstonesTableFilterComposer
+    extends Composer<_$AppDb, $TombstonesTable> {
+  $$TombstonesTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get tbl => $composableBuilder(
+      column: $table.tbl, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<String> get uuid => $composableBuilder(
+      column: $table.uuid, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<DateTime> get deletedAt => $composableBuilder(
+      column: $table.deletedAt, builder: (column) => ColumnFilters(column));
+}
+
+class $$TombstonesTableOrderingComposer
+    extends Composer<_$AppDb, $TombstonesTable> {
+  $$TombstonesTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get tbl => $composableBuilder(
+      column: $table.tbl, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<String> get uuid => $composableBuilder(
+      column: $table.uuid, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<DateTime> get deletedAt => $composableBuilder(
+      column: $table.deletedAt, builder: (column) => ColumnOrderings(column));
+}
+
+class $$TombstonesTableAnnotationComposer
+    extends Composer<_$AppDb, $TombstonesTable> {
+  $$TombstonesTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get tbl =>
+      $composableBuilder(column: $table.tbl, builder: (column) => column);
+
+  GeneratedColumn<String> get uuid =>
+      $composableBuilder(column: $table.uuid, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get deletedAt =>
+      $composableBuilder(column: $table.deletedAt, builder: (column) => column);
+}
+
+class $$TombstonesTableTableManager extends RootTableManager<
+    _$AppDb,
+    $TombstonesTable,
+    Tombstone,
+    $$TombstonesTableFilterComposer,
+    $$TombstonesTableOrderingComposer,
+    $$TombstonesTableAnnotationComposer,
+    $$TombstonesTableCreateCompanionBuilder,
+    $$TombstonesTableUpdateCompanionBuilder,
+    (Tombstone, BaseReferences<_$AppDb, $TombstonesTable, Tombstone>),
+    Tombstone,
+    PrefetchHooks Function()> {
+  $$TombstonesTableTableManager(_$AppDb db, $TombstonesTable table)
+      : super(TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$TombstonesTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$TombstonesTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$TombstonesTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback: ({
+            Value<String> tbl = const Value.absent(),
+            Value<String> uuid = const Value.absent(),
+            Value<DateTime> deletedAt = const Value.absent(),
+            Value<int> rowid = const Value.absent(),
+          }) =>
+              TombstonesCompanion(
+            tbl: tbl,
+            uuid: uuid,
+            deletedAt: deletedAt,
+            rowid: rowid,
+          ),
+          createCompanionCallback: ({
+            required String tbl,
+            required String uuid,
+            required DateTime deletedAt,
+            Value<int> rowid = const Value.absent(),
+          }) =>
+              TombstonesCompanion.insert(
+            tbl: tbl,
+            uuid: uuid,
+            deletedAt: deletedAt,
+            rowid: rowid,
+          ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ));
+}
+
+typedef $$TombstonesTableProcessedTableManager = ProcessedTableManager<
+    _$AppDb,
+    $TombstonesTable,
+    Tombstone,
+    $$TombstonesTableFilterComposer,
+    $$TombstonesTableOrderingComposer,
+    $$TombstonesTableAnnotationComposer,
+    $$TombstonesTableCreateCompanionBuilder,
+    $$TombstonesTableUpdateCompanionBuilder,
+    (Tombstone, BaseReferences<_$AppDb, $TombstonesTable, Tombstone>),
+    Tombstone,
+    PrefetchHooks Function()>;
+typedef $$FogErasesTableCreateCompanionBuilder = FogErasesCompanion Function({
+  required int tileX,
+  required int tileY,
+  required int zoom,
+  required int layerId,
+  required Uint8List mask,
+  required DateTime erasedAt,
+  Value<int> rowid,
+});
+typedef $$FogErasesTableUpdateCompanionBuilder = FogErasesCompanion Function({
+  Value<int> tileX,
+  Value<int> tileY,
+  Value<int> zoom,
+  Value<int> layerId,
+  Value<Uint8List> mask,
+  Value<DateTime> erasedAt,
+  Value<int> rowid,
+});
+
+class $$FogErasesTableFilterComposer
+    extends Composer<_$AppDb, $FogErasesTable> {
+  $$FogErasesTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<int> get tileX => $composableBuilder(
+      column: $table.tileX, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<int> get tileY => $composableBuilder(
+      column: $table.tileY, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<int> get zoom => $composableBuilder(
+      column: $table.zoom, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<int> get layerId => $composableBuilder(
+      column: $table.layerId, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<Uint8List> get mask => $composableBuilder(
+      column: $table.mask, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<DateTime> get erasedAt => $composableBuilder(
+      column: $table.erasedAt, builder: (column) => ColumnFilters(column));
+}
+
+class $$FogErasesTableOrderingComposer
+    extends Composer<_$AppDb, $FogErasesTable> {
+  $$FogErasesTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<int> get tileX => $composableBuilder(
+      column: $table.tileX, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<int> get tileY => $composableBuilder(
+      column: $table.tileY, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<int> get zoom => $composableBuilder(
+      column: $table.zoom, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<int> get layerId => $composableBuilder(
+      column: $table.layerId, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<Uint8List> get mask => $composableBuilder(
+      column: $table.mask, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<DateTime> get erasedAt => $composableBuilder(
+      column: $table.erasedAt, builder: (column) => ColumnOrderings(column));
+}
+
+class $$FogErasesTableAnnotationComposer
+    extends Composer<_$AppDb, $FogErasesTable> {
+  $$FogErasesTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<int> get tileX =>
+      $composableBuilder(column: $table.tileX, builder: (column) => column);
+
+  GeneratedColumn<int> get tileY =>
+      $composableBuilder(column: $table.tileY, builder: (column) => column);
+
+  GeneratedColumn<int> get zoom =>
+      $composableBuilder(column: $table.zoom, builder: (column) => column);
+
+  GeneratedColumn<int> get layerId =>
+      $composableBuilder(column: $table.layerId, builder: (column) => column);
+
+  GeneratedColumn<Uint8List> get mask =>
+      $composableBuilder(column: $table.mask, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get erasedAt =>
+      $composableBuilder(column: $table.erasedAt, builder: (column) => column);
+}
+
+class $$FogErasesTableTableManager extends RootTableManager<
+    _$AppDb,
+    $FogErasesTable,
+    FogErase,
+    $$FogErasesTableFilterComposer,
+    $$FogErasesTableOrderingComposer,
+    $$FogErasesTableAnnotationComposer,
+    $$FogErasesTableCreateCompanionBuilder,
+    $$FogErasesTableUpdateCompanionBuilder,
+    (FogErase, BaseReferences<_$AppDb, $FogErasesTable, FogErase>),
+    FogErase,
+    PrefetchHooks Function()> {
+  $$FogErasesTableTableManager(_$AppDb db, $FogErasesTable table)
+      : super(TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$FogErasesTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$FogErasesTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$FogErasesTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback: ({
+            Value<int> tileX = const Value.absent(),
+            Value<int> tileY = const Value.absent(),
+            Value<int> zoom = const Value.absent(),
+            Value<int> layerId = const Value.absent(),
+            Value<Uint8List> mask = const Value.absent(),
+            Value<DateTime> erasedAt = const Value.absent(),
+            Value<int> rowid = const Value.absent(),
+          }) =>
+              FogErasesCompanion(
+            tileX: tileX,
+            tileY: tileY,
+            zoom: zoom,
+            layerId: layerId,
+            mask: mask,
+            erasedAt: erasedAt,
+            rowid: rowid,
+          ),
+          createCompanionCallback: ({
+            required int tileX,
+            required int tileY,
+            required int zoom,
+            required int layerId,
+            required Uint8List mask,
+            required DateTime erasedAt,
+            Value<int> rowid = const Value.absent(),
+          }) =>
+              FogErasesCompanion.insert(
+            tileX: tileX,
+            tileY: tileY,
+            zoom: zoom,
+            layerId: layerId,
+            mask: mask,
+            erasedAt: erasedAt,
+            rowid: rowid,
+          ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ));
+}
+
+typedef $$FogErasesTableProcessedTableManager = ProcessedTableManager<
+    _$AppDb,
+    $FogErasesTable,
+    FogErase,
+    $$FogErasesTableFilterComposer,
+    $$FogErasesTableOrderingComposer,
+    $$FogErasesTableAnnotationComposer,
+    $$FogErasesTableCreateCompanionBuilder,
+    $$FogErasesTableUpdateCompanionBuilder,
+    (FogErase, BaseReferences<_$AppDb, $FogErasesTable, FogErase>),
+    FogErase,
+    PrefetchHooks Function()>;
 
 class $AppDbManager {
   final _$AppDb _db;
@@ -4608,4 +5617,8 @@ class $AppDbManager {
       $$SongFavoritesTableTableManager(_db, _db.songFavorites);
   $$PeerLocationsTableTableManager get peerLocations =>
       $$PeerLocationsTableTableManager(_db, _db.peerLocations);
+  $$TombstonesTableTableManager get tombstones =>
+      $$TombstonesTableTableManager(_db, _db.tombstones);
+  $$FogErasesTableTableManager get fogErases =>
+      $$FogErasesTableTableManager(_db, _db.fogErases);
 }

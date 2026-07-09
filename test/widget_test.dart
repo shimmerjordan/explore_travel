@@ -12,7 +12,11 @@ void main() {
   testWidgets('App boots and mounts the router without throwing',
       (tester) async {
     await tester.pumpWidget(const ProviderScope(child: ExploreJournalApp()));
+    // Let the post-frame callbacks (auth restore, startup DB maintenance)
+    // run and drain — they schedule async DB work that must settle before
+    // teardown or the binding flags a still-pending timer.
     await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
 
     expect(find.byType(MaterialApp), findsOneWidget);
     expect(tester.takeException(), isNull);

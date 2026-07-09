@@ -8,6 +8,7 @@ import '../data/db/database.dart';
 import '../services/location/background_task.dart'
     if (dart.library.js_interop) '../services/location/background_task_stub.dart';
 import '../services/location/sample_buffer.dart';
+import '../services/map/fog_layer.dart' show LiveTrackPoint;
 import 'providers.dart';
 // providers exports groupServiceProvider
 
@@ -27,9 +28,11 @@ final recordingActiveProvider = StateProvider<bool>((ref) => false);
 ///   * Identical samples (same lat/lng/timestamp) from the two streams
 ///     are deduped by `_lastHandledKey`. Without this every sample
 ///     ended up being processed twice on Android.
-///   * `fogRefreshProvider` is bumped at most once per 250 ms via a
-///     coalescing timer instead of once per sample, so a flurry of
-///     points doesn't trigger a frame-storm in the fog painter.
+///   * The map layers update INCREMENTALLY: fog corridor rows flow through
+///     [FogEngine.changes] and the coloured trail through [livePoints], so a
+///     recording tick no longer bumps `fogRefreshProvider` (which forced a
+///     full fog_tiles + track_points re-read every 250 ms — brutal after a
+///     ~45k-block FOW import).
 class RecordingController with WidgetsBindingObserver {
   final Ref ref;
   StreamSubscription<Map<String, dynamic>>? _bgSub;
@@ -65,10 +68,10 @@ class RecordingController with WidgetsBindingObserver {
   /// drop the duplicate that the *other* stream is about to emit.
   String? _lastHandledKey;
 
-  /// Coalescing timer for the UI fog refresh counter. We collect any
-  /// number of writes into a single notifier bump.
-  Timer? _refreshDebounce;
-  bool _refreshPending = false;
+  /// Freshly-inserted points, one event per recorded sample. The map's trail
+  /// layer appends these to its loaded sessions — no re-query per tick.
+  final _livePoints = StreamController<LiveTrackPoint>.broadcast();
+  Stream<LiveTrackPoint> get livePoints => _livePoints.stream;
 
   /// Returns null on success, or a user-facing error string on failure.
   Future<String?> start() async {
@@ -179,7 +182,9 @@ class RecordingController with WidgetsBindingObserver {
         if (kDebugMode) {
           debugPrint('[Recording] ingested $ingested buffered bg samples');
         }
-        _scheduleRefresh();
+        // One full refresh after a catch-up batch — reconciles the layers in
+        // a single reload instead of relying on a long burst of deltas.
+        ref.read(fogRefreshProvider.notifier).state++;
       }
     } catch (e) {
       if (kDebugMode) debugPrint('[Recording] buffer ingest failed: $e');
@@ -318,26 +323,23 @@ class RecordingController with WidgetsBindingObserver {
         );
       }
       _lastSample[layerId] = (lat: lat, lng: lng, t: sampleAt);
-      _scheduleRefresh();
+      // Feed the trail layer's append path. Fog corridor updates travel on
+      // FogEngine.changes from inside revealLine/revealPoint themselves.
+      if (_livePoints.hasListener) {
+        _livePoints.add((
+          lat: lat,
+          lng: lng,
+          time: sampleAt,
+          layerId: layerId,
+          width: newPointWidth,
+          accuracy: (s['accuracy'] as num?)?.toDouble(),
+        ));
+      }
     } catch (e, st) {
       debugPrint('[Recording] write failed at ($lat,$lng) layer=$layerId: $e\n$st');
       // Don't rethrow — we're inside a queue. Throwing here would break
       // the chain and silently kill recording.
     }
-  }
-
-  /// Coalesce N writes-in-a-burst into one provider notify. The fog
-  /// layer rebuilds aren't free; bumping the notifier every sample at
-  /// 1Hz is borderline, and bumping it during the catch-up burst after
-  /// a screen unlock used to drop ~40 frames.
-  void _scheduleRefresh() {
-    if (_refreshPending) return;
-    _refreshPending = true;
-    _refreshDebounce?.cancel();
-    _refreshDebounce = Timer(const Duration(milliseconds: 250), () {
-      _refreshPending = false;
-      ref.read(fogRefreshProvider.notifier).state++;
-    });
   }
 
   /// Called by the debug simulation panel to inject a fake GPS sample.
@@ -358,9 +360,6 @@ class RecordingController with WidgetsBindingObserver {
     await _fgSub?.cancel();
     _bgSub = null;
     _fgSub = null;
-    _refreshDebounce?.cancel();
-    _refreshDebounce = null;
-    _refreshPending = false;
     _lastHandledKey = null;
     await BackgroundLocation.stop();
     await SampleBuffer.clear();

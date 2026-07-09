@@ -25,7 +25,8 @@ import 'ui/group_setup/group_diagnostics_screen.dart';
 import 'ui/leaderboard/leaderboard_screen.dart';
 import 'ui/about/about_screen.dart';
 import 'ui/permissions/permissions_screen.dart';
-import 'app/providers.dart' show groupLifecycleProvider;
+import 'app/providers.dart'
+    show groupLifecycleProvider, dbProvider, runStartupDbMaintenance;
 import 'services/vault/auth_controller.dart';
 import 'ui/auth/login_screen.dart';
 import 'services/debug/log_buffer.dart';
@@ -114,6 +115,10 @@ class _ExploreJournalAppState extends ConsumerState<ExploreJournalApp> {
     // a listenable during the initial build would dirty the tree mid-build.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       ref.read(authControllerProvider).restore();
+      // Self-heal a layer-less DB + log the row-count probe (see
+      // runStartupDbMaintenance). Recreating an orphaned layer flips the
+      // watchLayers() stream, so the map/trail/journal re-render on their own.
+      runStartupDbMaintenance(ref.read(dbProvider));
     });
   }
 

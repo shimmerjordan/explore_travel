@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:crypto/crypto.dart' as crypto_hash;
 import 'package:drift/drift.dart' show Value;
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show debugPrint, kIsWeb;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:uuid/uuid.dart';
@@ -61,13 +61,23 @@ class SettingsNotifier extends StateNotifier<AppSettings> {
       loaded = loaded.copyWith(selfPeerId: const Uuid().v4());
       await store.save(loaded);
     }
-    state = loaded;
+    // Stamp AFTER the disk read so style consumers (fog veil, trail widths)
+    // can hold rendering until real values are in — otherwise the first
+    // frames flash the default veil colour / 14 m trail width.
+    state = loaded.copyWith(loaded: true);
   }
 
   Future<void> update(AppSettings Function(AppSettings) f) async {
     state = f(state);
     await store.save(state);
   }
+
+  /// Re-read settings from disk. A backup/sync import writes
+  /// `app_settings_v1` directly to prefs behind this notifier's back — until
+  /// reload the in-memory state (and everything watching it, like the
+  /// OneDrive "connected" flag) kept showing pre-import values, and the next
+  /// settings edit would even write the stale state back over the import.
+  Future<void> reload() => _load();
 }
 
 final dbProvider = Provider<AppDb>((ref) {
@@ -75,6 +85,42 @@ final dbProvider = Provider<AppDb>((ref) {
   ref.onDispose(() => db.close());
   return db;
 });
+
+/// Startup maintenance run once from the app's post-frame callback (not from
+/// [dbProvider], so the provider stays side-effect-free): self-heal a
+/// layer-less-but-content-full DB — every render layer is layer-driven, so
+/// content whose layers got wiped shows a blank map until this recreates
+/// them — then log a one-line row-count probe. The probe splits "synced but
+/// nothing shows" in one look: zeros → the data never landed (sync); non-zero
+/// → data is here and RENDERING is what's off.
+Future<void> runStartupDbMaintenance(AppDb db) async {
+  try {
+    final fixedIds = await db.backfillMissingUuids();
+    if (fixedIds > 0) {
+      debugPrint('[DB] backfilled $fixedIds missing uuid(s)');
+    }
+    final healed = await db.ensureLayersForContent();
+    if (healed > 0) {
+      debugPrint('[DB] recreated $healed orphaned layer(s) on startup');
+    }
+    Future<int> count(String t, [String where = '']) async =>
+        (await db.customSelect('SELECT COUNT(*) c FROM $t $where').getSingle())
+            .read<int>('c');
+    debugPrint('[DB] rows — journal=${await count('journal_entries')} '
+        'layers=${await count('track_layers')} '
+        'points=${await count('track_points')} '
+        'fog=${await count('fog_tiles')} '
+        'chat=${await count('chat_messages')} '
+        'favorites=${await count('song_favorites')}');
+    // uuid coverage on the two identity-critical, low-volume tables — a
+    // non-zero "no-uuid" count means sync identity is broken for those rows.
+    debugPrint('[DB] no-uuid — '
+        "journal=${await count('journal_entries', "WHERE uuid IS NULL OR uuid=''")} "
+        "layers=${await count('track_layers', "WHERE uuid IS NULL OR uuid=''")}");
+  } catch (e) {
+    debugPrint('[DB] startup self-heal/probe failed: $e');
+  }
+}
 
 final fogEngineProvider =
     Provider<FogEngine>((ref) => FogEngine(ref.watch(dbProvider)));

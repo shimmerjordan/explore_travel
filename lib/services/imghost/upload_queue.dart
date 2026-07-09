@@ -99,6 +99,23 @@ class UploadQueue {
     _settings = s;
   }
 
+  /// Bumped on every registry write so reactive UIs (the journal list badge,
+  /// the upload-list screen) can refresh without polling. The registry lives
+  /// in SharedPreferences, which isn't reactive on its own.
+  final ValueNotifier<int> revision = ValueNotifier<int>(0);
+
+  /// All upload records, newest first — for the upload-list screen.
+  Future<List<UploadRecord>> allRecords() async {
+    final all = await _loadAll();
+    final list = all.values.toList()
+      ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    return list;
+  }
+
+  /// Manually kick the queue — used by the upload list's 上传 button when
+  /// auto-upload is off (so pending items only go when the user says so).
+  Future<void> drainNow() => _drain();
+
   // Persistence -------------------------------------------------------------
 
   Future<Map<String, UploadRecord>> _loadAll() async {
@@ -114,6 +131,7 @@ class UploadQueue {
     final p = await SharedPreferences.getInstance();
     await p.setString(_prefsKey,
         jsonEncode(all.map((k, v) => MapEntry(k, v.toJson()))));
+    revision.value++;
   }
 
   Future<UploadRecord?> recordFor(String localPath) async {
@@ -129,12 +147,6 @@ class UploadQueue {
   Future<void> _upsert(UploadRecord r) async {
     final all = await _loadAll();
     all[r.localPath] = r;
-    await _saveAll(all);
-  }
-
-  Future<void> _remove(String localPath) async {
-    final all = await _loadAll();
-    all.remove(localPath);
     await _saveAll(all);
   }
 
@@ -170,8 +182,11 @@ class UploadQueue {
         updatedAt: DateTime.now(),
       ));
     }
-    // Fire-and-forget background drain.
-    unawaited(_drain());
+    // Auto-upload is opt-out: when the user has turned it off, the work stays
+    // `pending` in the registry until they tap 上传 in the upload list.
+    if (_settings.autoUploadImages) {
+      unawaited(_drain());
+    }
   }
 
   Future<void> retry(String localPath) async {
@@ -350,6 +365,9 @@ class UploadQueue {
         .write(JournalEntriesCompanion(
       mediaPaths: Value(newMedia),
       richContent: Value(newRich),
+      // The URL rewrite is a content edit — stamp it so the hosted-image
+      // version wins sync merges against the local-path copy elsewhere.
+      updatedAt: Value(DateTime.now()),
     ));
     // Keep FTS consistent — the rich body is part of the search index.
     if (newRich != entry.richContent) {

@@ -53,6 +53,17 @@ App 通过**微软登录授权**直接读写你 OneDrive 里的一个 App 专属
    com.explorejournal.oauth://auth
    ```
    必须与 `OneDriveService.redirectUri` 完全一致。
+
+   **⚠️ Web 版还需要额外一个平台**：浏览器无法把自定义 scheme 跳回网页（表现为
+   微软登录完成后弹「要打开 …oauth 吗？」然后没有任何反应），所以 web 走
+   `auth.html` 回调页。在「身份验证 → 添加平台」中再加一个
+   「**单页应用程序（Single-page application, SPA）**」平台——**必须是 SPA
+   而不是 Web/移动平台**，否则浏览器侧的 token 交换会被拒绝
+   （`AADSTS9002326`）。重定向 URI 按你的部署填（可多个）：
+   ```
+   http://localhost:8080/auth.html          ← 本地测试
+   https://<你的域名>/app/auth.html          ← 线上（build-site.sh 的 /app/ 部署）
+   ```
 4. **Register** 后，在「**概述（Overview）**」复制 **应用程序(客户端) ID**。
 
 ### 第 4 步：权限 + 公共客户端

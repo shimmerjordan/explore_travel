@@ -32,13 +32,25 @@ class AuthController extends ChangeNotifier {
 
   AuthState get state => _state;
 
-  /// Resolve the initial state. With no in-memory key we're effectively logged
-  /// out; this exists as the single async seam the router waits on.
+  /// Resolve the initial state — the single async seam the router waits on.
+  /// On web this silently resumes the persisted session (token + derived key
+  /// in localStorage), so a page refresh no longer bounces to the login page;
+  /// an expired/invalid session falls back to loggedOut.
   Future<void> restore() async {
     final ctrl = ref.read(vaultSyncControllerProvider);
-    _set(ctrl.isLoggedIn
-        ? const AuthState(AuthStatus.loggedIn)
-        : const AuthState(AuthStatus.loggedOut));
+    if (ctrl.isLoggedIn) {
+      _set(const AuthState(AuthStatus.loggedIn));
+      return;
+    }
+    final resumed = await ctrl.restoreSession();
+    if (resumed) {
+      _set(AuthState(
+          AuthStatus.loggedIn, ref.read(settingsProvider).nasAccountEmail));
+      // Same background content pull as an interactive login.
+      unawaited(_syncDownData());
+    } else {
+      _set(const AuthState(AuthStatus.loggedOut));
+    }
   }
 
   Future<void> register({

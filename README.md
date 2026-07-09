@@ -24,14 +24,14 @@
 | Area | What you get |
 |------|--------------|
 | 🗺️ Maps | OSM / 高德 / Google × standard / satellite / hybrid · live switching · GCJ-02 ↔ WGS-84 conversion · **offline tile cache** (100k tiles / 365 days) · opt-in rotation + compass chip · location dot grows a heading arrow when moving (>0.5 m/s) · **3D globe** (pinch past min zoom → textured day/night sphere with footprint heat-map) |
-| 🌫️ Fog of war | Fog of World–compatible 64×64 bitmap tiles for storage / stats / sync · **vector swept-disk trail rendering**: anti-aliased canvas stroke through actual GPS samples → silky diagonals and curves with no raster aliasing · per-segment GPS-dropout split (no false straight lines across drops) · single-pass gaussian-feathered clear with continuous alpha gradient · brush radius / color / opacity tunable · per-layer |
+| 🌫️ Fog of war | Fog of World–compatible 64×64 bitmap tiles for storage / stats / sync · rendered as **baked map tiles** that pan/zoom pixel-for-pixel with the base imagery · **FoW-style smooth reveal**: z15–17 baked natively as anti-aliased disk unions with a gaussian feather (no pixel staircase at any zoom; z≤14 stays bit-exact) · live recording merges **incrementally** into the snapshot (no full-table re-reads) · optional coloured trail line honouring **per-point recorded width** · per-segment GPS-dropout split · brush radius / color / opacity tunable · per-layer |
 | 👤 Profile & avatar | Tap right-top chip → bottom sheet with base64 avatar editor (256×256 / ≤30 KB) · nickname inline edit · peerId copy · avatar inlined into leaderboard entries + peer markers · M3 ripple + scale animations on home tiles |
 | 🏆 Leaderboard | **Decentralised, append-only, signed** · Ed25519 keypair per device · LWW by `statsAt` per peerId · TOFU on publicKey · global km² + month-by-month tabs · auto-merge over the same P2P transport as chat/voice (`lb_hello / lb_pull / lb_batch`) · always-included in backup module · optional GitHub PR to a community registry repo · optional REST server backend ([API spec](docs/leaderboard-server-api.md)) |
 | 📍 Tracking | Android foreground service (`flutter_foreground_task`) — survives screen-off / Doze / process-kill and auto-resumes · 3 power modes: **High 1 s / 2 m · Balanced 10 s / 15 m · Saver 30 s / 40 m** · dual-stream (live UI + on-disk JSONL buffer so background points aren't lost) · per-row UUID cross-device dedup · **camera auto-follows while recording** (manual pan opts out; locate FAB re-arms) · GPS signal chip keyed to fix + accuracy, not staleness · EXIF GPS auto-tagging |
 | 🗂️ Layers | Color-coded, taggable, per-layer visibility · in-map dropdown chip · auto-fallback when active layer is hidden/missing |
 | 🌐 Exploration | Real-area progress — revealed km² ÷ region km² (UN country areas) · 10-decimal precision · **smallest-bbox attribution** so a point in Shanghai doesn't double-count into Jiangsu/Zhejiang · global "incl. ocean" + per-country + per-province + learned-from-visits regions |
-| ☁️ Export & Import (导出与导入) | Unified page · **12 modules** independently selectable (leaderboard always included) · **chunked zip archive** (per-tile fog like Fog of World, per-month track points, per-peer chat) · WebDAV upload / restore · local export & share · all destinations share one interchangeable zip schema · **UUID-based incremental import** · secret fields stripped from exports |
-| 🌫️ FOW compat | **Import** via the system file picker — multi-select the files inside a Fog of World "Sync" folder (**reaches OneDrive & other cloud providers**; zip vs raw tiles auto-detected by magic bytes) · **export** packs visible-layer fog into a zip handed to the system share sheet |
+| ☁️ Export & Import (导出与导入) | Unified page · **12 modules** independently selectable (leaderboard + tombstones always included) · **chunked archive** (fog as **native Fog of World tile files**, per-month track points, per-peer chat) · WebDAV upload / restore · local export & share · **incremental cloud sync**: MD5 index so only changed shards upload, 3-wide parallel transfers, one continuous progress bar · **three-way incremental**: adds (union / per-row), edits (row-level LWW — they finally propagate), deletes (tombstones + erase masks — no resurrection) · cross-device **layer remap by uuid** · secret fields stripped from exports |
+| 🌫️ FOW compat | **Two-way interop**: cloud/backup fog IS a set of native FoW tile files — copy either way between our `Sync/fow/` and a Fog of World "Sync" folder · manual **import** via the system file picker (**reaches OneDrive & other cloud providers**; zip vs raw tiles auto-detected by magic bytes) · **export** packs visible-layer fog into a zip handed to the system share sheet |
 | 🖼️ Image host | Per-journal `public` / `private` level · GitHub direct (Contents API) + jsDelivr/Statically CDN · private repo via raw-with-PAT + in-app authenticated image loader · generic custom host (Chevereto/兰空/EasyImage…) via URL templates · async upload queue + retry · path hierarchy `traveler/yyyy/mm/continent/country/province/city/title-id/uuid.ext` |
 | 🤖 AI | OpenAI-compatible (SiliconFlow / OpenAI / DeepSeek…) · streaming trip planning with manual cancel · 30-min timeout · persistent chat history (30-day retention) · mini-map + energy estimates from emitted JSON · context-aware music keyword generation |
 | 🎵 Music | NetEase / Kuwo / JOOX direct backends + GD聚合 fallback · cookie capture via WebView · AI playlist (place + mood → songs) · favorites map |
@@ -53,13 +53,24 @@ A few modules that don't fit in one table row:
 ### 🌫️ Fog engine & trail rendering
 Fog is stored in **Fog of World's tile format** — a 512×512 global tile grid (zoom 9),
 128×128 blocks per tile, each block a 64×64-bit bitmap (512 bytes, MSB-first), ≈9.55 m per
-pixel at the equator. The visible trail is **not** rasterised: live GPS points are stroked
-as a polyline on a Canvas and erased from a dark veil with `BlendMode.dstOut`, so diagonals
-and curves stay crisp with no aliasing. A new segment starts (so no false straight line is
-drawn) whenever the gap exceeds 30 s, the implied speed is absurd, or accuracy is worse than
-150 m. Reveal sweeps a disk pixel-by-pixel along each segment (capped at 8192 steps) to
-avoid scalloping on diagonals. Brush radius (1–50 m), colour, and opacity are tunable per
-layer.
+pixel at the equator. Reveal sweeps a disk pixel-by-pixel along each segment (capped at
+8192 steps) to avoid scalloping on diagonals.
+
+The explored area renders as **baked Web-Mercator tiles** drawn by flutter_map's own tile
+pipeline, so the fog pans, pinches and zooms pixel-for-pixel with the base imagery — no
+per-frame re-rasterisation, none of the gesture/thickness artifacts a dynamic painter had.
+At the fog's native zoom (14, 1 fog cell = 1 px) and below, tiles are punched with an exact
+integer pass that keeps FOW bit-parity. From z15 to z17 each tile is baked natively: every
+explored cell becomes an anti-aliased disk and the union is feathered with a single gaussian
+pass — the smooth, round-cornered **Fog of World look** instead of scaled-up pixel
+staircases; past z17 the already-soft tiles overzoom gracefully. Live recording streams
+changed fog rows **incrementally** into the tile snapshot (no full-table re-read per tick).
+
+An optional translucent coloured line can be drawn along recorded trails, stroking each
+point at its **own recorded width** (the brush size at record time — changing the slider
+only affects future points). A new segment starts (so no false straight line is drawn)
+whenever the gap exceeds 30 s, the implied speed is absurd, or accuracy is worse than 150 m.
+Brush radius, colour, and opacity are tunable per layer.
 
 ### 📍 Recording reliability
 A foreground `LocationService` feeds the live UI while a background isolate appends samples
@@ -94,12 +105,45 @@ and a WebDAV mailbox for offline delivery.
 ### ☁️ Export & Import / FOW compat
 The unified page packs everything into one **chunked zip**: 12 modules (journal, layers, fog
 tiles, favorites, track points, chat, AI history, settings, image-host records, geocode cache,
-learned regions, and leaderboard — always included), with fog split per tile, tracks per
-month, chat per peer. Local files and WebDAV uploads are byte-identical and interchangeable;
-import merges by UUID (skipping rows already present) and exports strip every secret field.
-**Fog of World** interop: import multi-selects files via the system picker (which reaches
-**OneDrive** and other cloud providers — unlike the SAF folder picker), auto-detecting zip vs
-raw tiles by magic bytes; export bundles visible-layer fog into a zip handed to the share sheet.
+learned regions, and leaderboard — leaderboard and tombstones always included). **Fog ships
+as native Fog of World tile files** (`fow/<layerUuid>/<obfuscatedName>` — extract a backup
+and drop them straight into a FoW Sync folder); tracks split per month, chat per peer. Local
+files and WebDAV uploads are byte-identical and interchangeable. Import is a **compared,
+incremental merge**: new rows insert; editable rows (journal, layers) merge by per-row
+**last-writer-wins on `updatedAt`**, so edits genuinely propagate and an older cloud copy
+never clobbers a newer local one; immutable rows (track points, chat) dedup by UUID; and
+every row is **remapped to the uuid-matched layer** (autoincrement layer ids differ across
+devices). Exports strip every secret field.
+
+**Incremental cloud sync** (OneDrive / GitHub / WebDAV / NAS via one `SyncStorage`
+interface) regroups those entries into shards: **fog travels as the native FoW files
+themselves, raw and 1:1** (never zipped — the cloud `Sync/fow/` folder IS a valid Fog of
+World tile set you can copy either way, and spatial locality means only tiles near
+newly-explored areas re-upload); tracks per year, chat per peer, everything else in
+`meta.zip`, with the metadata FoW's format can't carry (per-block timestamps, erase masks)
+in `fogindex.zip`. Zip shards over 24 MB raw split into deterministic `.pN.zip` parts
+(≈≤10 MB zipped each). A `.ej_index.json` maps shard → MD5, and **both directions are
+diffed**: uploads send only changed shards (git-style), and pulls rebuild the local shard
+hashes first and fetch only what differs — a routine pull is a handful of requests even
+with hundreds of tile files ("restore" mode still fetches everything). Small files run
+8-wide, multi-MB zips 3-wide, packing runs off the UI isolate, oversized OneDrive files
+use resumable upload sessions, and one continuous progress bar spans export → pack →
+diff → transfer → index.
+
+**Deletes and erases propagate too（增量减）**: every local deletion (erased track points,
+removed journals / layers / favorites) records a tombstone that always rides along in
+exports; imports apply tombstones first and skip those uuids while merging. Fog merges by
+**bitwise union + erase masks**: two devices exploring the same block converge to the
+union of both pixel sets (neither side is lost), while erased pixels are recorded as
+timestamped masks (`fog_erases`) that clear only copies OLDER than the erase — so erases
+reach every device in any sync order, and re-exploring after an erase legitimately
+brings the area back.
+**Fog of World** interop is now two-way: the cloud/backup fog files ARE FoW tiles (copy
+them into a FoW Sync folder, or drop FoW's tiles under `fow/` in an archive — layer-less
+tiles land on the default layer). Manual import still multi-selects files via the system
+picker (which reaches **OneDrive** and other cloud providers — unlike the SAF folder
+picker), auto-detecting zip vs raw tiles by magic bytes; export bundles visible-layer fog
+into a zip handed to the share sheet.
 
 ---
 

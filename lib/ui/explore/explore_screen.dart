@@ -660,12 +660,3 @@ String _codeToFlagEmoji(String code) {
     return '🏳️';
   }
 }
-
-Color _pctColor(double pct, BuildContext context) {
-  if (pct <= 0) {
-    return Theme.of(context).colorScheme.surfaceContainerHigh;
-  }
-  const low = Color(0xFF1F4D48);
-  const high = Color(0xFF26A69A);
-  return Color.lerp(low, high, pct.clamp(0.05, 1.0))!;
-}

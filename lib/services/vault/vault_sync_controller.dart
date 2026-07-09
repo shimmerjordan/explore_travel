@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/providers.dart';
 import '../../core/prefs.dart';
+import 'nas_session_store.dart';
 import 'nas_token_store.dart';
 import 'nas_vault_client.dart';
 import 'settings_vault.dart';
@@ -23,22 +24,26 @@ import 'vault_payload.dart';
 /// controller uses [SettingsVault.derive]/`encrypt`/`decrypt` with that fixed
 /// salt rather than `seal`/`open` (which mint a fresh random salt).
 ///
-/// **Session lifetime**: `vaultKey` lives only in memory. After an app restart
-/// the token may still be valid but the key is gone, so vault writes are
-/// skipped until the user logs in again (re-enters the password). v1 limitation.
+/// **Session lifetime**: on native the `vaultKey` lives only in memory. On
+/// WEB the whole session (token + derived key) is additionally persisted via
+/// [NasSessionStore] so a page refresh can silently resume instead of
+/// bouncing to the login page — see [restoreSession]; logout wipes it.
 class VaultSyncController {
   final Ref ref;
   final NasVaultClient Function(String baseUrl) _clientFactory;
   final NasTokenStore _tokenStore;
+  final NasSessionStore _sessionStore;
   final SettingsVault _vault;
 
   VaultSyncController(
     this.ref, {
     NasVaultClient Function(String baseUrl)? clientFactory,
     NasTokenStore? tokenStore,
+    NasSessionStore? sessionStore,
     SettingsVault vault = const SettingsVault(),
   })  : _clientFactory = clientFactory ?? HttpNasVaultClient.new,
         _tokenStore = tokenStore ?? SecureNasTokenStore(),
+        _sessionStore = sessionStore ?? PrefsNasSessionStore(),
         _vault = vault {
     // Debounced auto-push on any settings change, once we hold a key.
     ref.listen<AppSettings>(settingsProvider, (_, __) => _schedulePush());
@@ -66,7 +71,7 @@ class VaultSyncController {
     final u = Uri.tryParse(s);
     if (u == null || !u.hasScheme || (u.scheme != 'http' && u.scheme != 'https') ||
         u.host.isEmpty) {
-      throw ArgumentError('NAS 地址需为 http(s):// 开头的完整 URL');
+      throw ArgumentError('后端地址需为 http(s):// 开头的完整 URL');
     }
     return s.endsWith('/') ? s.substring(0, s.length - 1) : s;
   }
@@ -114,12 +119,53 @@ class VaultSyncController {
     _salt = salt;
     _version = session.vaultVersion;
     await _tokenStore.write(session.token);
+    // Web: persist the resumable session so a page refresh doesn't log the
+    // user out (a fresh page has no in-memory key otherwise). Native keeps
+    // secrets in the keychain-backed stores only.
+    if (kIsWeb) {
+      final keyBytes = await vaultKey.extractBytes();
+      await _sessionStore.write(NasWebSession(
+        serverUrl: url,
+        email: email,
+        token: session.token,
+        saltB64: base64.encode(salt),
+        vaultKeyB64: base64.encode(keyBytes),
+      ));
+    }
     // Persist non-secret NAS config (never the token).
     await ref.read(settingsProvider.notifier).update((p) => p.copyWith(
           nasServerUrl: url,
           nasAccountEmail: email,
           nasKdfSalt: base64.encode(salt),
         ));
+  }
+
+  /// Silently resume a previously persisted session (web refresh). Returns
+  /// true when the stored token is still accepted by the server; any failure
+  /// (expired token, unreachable NAS, corrupt record) clears the session and
+  /// returns false so the router falls back to the login page.
+  Future<bool> restoreSession() async {
+    final s = await _sessionStore.read();
+    if (s == null) return false;
+    try {
+      _client = _clientFactory(s.serverUrl);
+      _token = s.token;
+      _vaultKey = SecretKey(base64.decode(s.vaultKeyB64));
+      _salt = Uint8List.fromList(base64.decode(s.saltB64));
+      // Validates the token AND applies the vault's sync config in one go
+      // (an expired/revoked token throws here).
+      await pullAndApply();
+      await ref.read(settingsProvider.notifier).update((p) => p.copyWith(
+            nasServerUrl: s.serverUrl,
+            nasAccountEmail: s.email,
+            nasKdfSalt: s.saltB64,
+          ));
+      return true;
+    } catch (e) {
+      debugPrint('[VaultSync] session restore failed: $e');
+      await logout();
+      return false;
+    }
   }
 
   /// Encrypt the current settings subset and PUT it. No-op if not logged in or
@@ -180,7 +226,7 @@ class VaultSyncController {
   }
 
   /// Clear the session. Does NOT touch local data (local-first) — only the
-  /// token and the in-memory key.
+  /// token, the in-memory key, and the persisted web session record.
   Future<void> logout() async {
     _debounce?.cancel();
     _token = null;
@@ -190,6 +236,7 @@ class VaultSyncController {
     _lastPushedHash = null;
     _client = null;
     await _tokenStore.clear();
+    await _sessionStore.clear();
   }
 
   void _schedulePush() {

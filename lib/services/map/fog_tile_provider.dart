@@ -2,7 +2,8 @@ import 'dart:async';
 import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
-import 'package:flutter/foundation.dart' show SynchronousFuture;
+import 'package:flutter/foundation.dart'
+    show SynchronousFuture, visibleForTesting;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_map/flutter_map.dart';
 import '../../data/db/database.dart';
@@ -13,9 +14,12 @@ import '../geo/coord_converter.dart';
 /// Renders the explored "fog of war" as ordinary Web-Mercator map tiles, so it
 /// is drawn by flutter_map's tile pipeline exactly like the base map: it pans,
 /// pinches and zooms pixel-for-pixel with the base imagery, with the corridor
-/// thickness FIXED in the baked pixels. There is no per-zoom re-rasterisation
+/// thickness FIXED in the baked pixels. There is no per-frame re-rasterisation
 /// or custom painter — that dynamic rendering was the source of the thickness /
-/// gesture artifacts.
+/// gesture artifacts. (Tiles above the fog's native zoom are baked per TILE
+/// zoom — still through the same cache-keyed tile pipeline — so high zooms get
+/// smooth feathered edges instead of scaled-up hard pixels; see
+/// [_bakeTileSmooth].)
 ///
 /// Each tile is the FINAL composited fog (inverts the old veil + dstOut erase):
 ///   - unexplored pixel = veil colour (alpha baked in)
@@ -156,10 +160,31 @@ class _FogTileImage extends ImageProvider<_FogTileKey> {
 
 const int _maxBlockIndex = (FogEngine.full >> 6) - 1; // 2^16 - 1
 
+/// Test seam: bake one tile exactly as the provider would (integer punch at
+/// native-and-below zooms, smooth disk+feather pass above). Lets tests
+/// rasterise and pin the fog look without a running map.
+@visibleForTesting
+Future<ui.Image> bakeFogTileForTest(
+        FogSnapshot snap, int tx, int ty, int z, int dim) =>
+    _bakeTile(snap, tx, ty, z, dim);
+
 /// Bake one (z,x,y) fog tile of [dim] px. Never throws — on any failure returns
 /// a solid-veil tile (the safe fallback, since unexplored == veil).
 Future<ui.Image> _bakeTile(
     FogSnapshot snap, int tx, int ty, int z, int dim) async {
+  // Past the fog's native resolution each fog cell spans ≥2 tile px, so the
+  // hard integer punch would show as a pixel staircase. Bake those zooms as a
+  // smooth Fog-of-World-style reveal instead: every explored cell becomes an
+  // anti-aliased disk and the union is feathered with one blur pass, so
+  // corridor edges stay soft and rounded at any zoom. Falls back to the
+  // integer punch on any failure.
+  if (z > _kFogNativeZoom && !snap.isEmpty) {
+    try {
+      return await _bakeTileSmooth(snap, tx, ty, z, dim);
+    } catch (_) {
+      // fall through to the crisp integer bake
+    }
+  }
   final argb = snap.veil.toARGB32();
   final vA = (argb >> 24) & 0xFF;
   final vR = (argb >> 16) & 0xFF;
@@ -184,6 +209,103 @@ Future<ui.Image> _bakeTile(
   return _decode(rgba, dim);
 }
 
+/// Constant per-tile GCJ-02 shift (dest px) so punched holes line up with the
+/// shifted base imagery of amap/google. (0,0) for WGS-84 providers.
+(double, double) _gcjShift(FogSnapshot snap, int tx, int ty, int z, int dim) {
+  if (!CoordConverter.needsGcj02(snap.mapProvider)) return (0, 0);
+  const full = FogEngine.full;
+  final ppt = full >> z;
+  final scale = dim / ppt;
+  final txPpt = tx * ppt, tyPpt = ty * ppt;
+  // Where the GCJ tile-centre's WGS coordinate would land if drawn with the
+  // plain WGS formula, vs the centre. The GCJ↔WGS offset varies slowly, so
+  // one value per tile is accurate to a fraction of a px.
+  final worldPx = dim * (1 << z).toDouble();
+  final cLatGcj = _mercPxToLat(tyPpt.toDouble() * scale + dim / 2, worldPx);
+  final cLngGcj = _mercPxToLng(txPpt.toDouble() * scale + dim / 2, worldPx);
+  final wgs = CoordConverter.gcj02ToWgs84(cLatGcj, cLngGcj);
+  final wgsGx = FogEngine.lngToGlobalX(wgs.lng).toDouble();
+  final wgsGy = FogEngine.latToGlobalY(wgs.lat).toDouble();
+  return (
+    dim / 2 - (wgsGx - txPpt) * scale,
+    dim / 2 - (wgsGy - tyPpt) * scale,
+  );
+}
+
+/// Smooth overzoom bake (z > native): veil rect, then the explored cells are
+/// drawn as slightly-overlapping anti-aliased disks into an unbounded
+/// saveLayer whose paint erases the veil (dstOut) through a single gaussian
+/// blur — soft feathered corridor edges, rounded corners, merged unions, the
+/// Fog of World look. Disk radius 0.78·cell keeps diagonal runs connected;
+/// σ = 0.45·cell keeps the feather proportional to the map (constant ground
+/// width) instead of constant screen px.
+Future<ui.Image> _bakeTileSmooth(
+    FogSnapshot snap, int tx, int ty, int z, int dim) async {
+  const full = FogEngine.full;
+  const w = FogEngine.bitmapWidth; // 64
+  final ppt = full >> z; // fog px per tile
+  final scale = dim / ppt; // dest px per fog px (2,4,8 for z15..17)
+  final txPpt = tx * ppt, tyPpt = ty * ppt;
+  final (shiftX, shiftY) = _gcjShift(snap, tx, ty, z, dim);
+
+  final rec = ui.PictureRecorder();
+  final canvas = ui.Canvas(rec);
+  final dimD = dim.toDouble();
+  canvas.drawRect(
+      ui.Rect.fromLTWH(0, 0, dimD, dimD), ui.Paint()..color = snap.veil);
+
+  // Padded fog-px window: disks just outside the tile must still bleed their
+  // blur across the edge or adjacent tiles would show seams.
+  final r = scale * 0.78;
+  final sigma = scale * 0.45;
+  final padPx = r + sigma * 3 + 2; // dest px
+  final padFog = padPx / scale;
+  final shiftFogX = shiftX / scale, shiftFogY = shiftY / scale;
+  var bxMin = ((txPpt - shiftFogX - padFog) / w).floor() - 1;
+  var bxMax = ((txPpt + ppt - shiftFogX + padFog) / w).floor() + 1;
+  var byMin = ((tyPpt - shiftFogY - padFog) / w).floor() - 1;
+  var byMax = ((tyPpt + ppt - shiftFogY + padFog) / w).floor() + 1;
+  if (bxMin < 0) bxMin = 0;
+  if (byMin < 0) byMin = 0;
+  if (bxMax > _maxBlockIndex) bxMax = _maxBlockIndex;
+  if (byMax > _maxBlockIndex) byMax = _maxBlockIndex;
+
+  if (!snap.windowOutsideExtent(bxMin, bxMax, byMin, byMax)) {
+    canvas.saveLayer(
+      null,
+      ui.Paint()
+        ..blendMode = ui.BlendMode.dstOut
+        ..imageFilter = ui.ImageFilter.blur(sigmaX: sigma, sigmaY: sigma),
+    );
+    final disk = ui.Paint()
+      ..color = const ui.Color(0xFFFFFFFF)
+      ..isAntiAlias = true;
+    final lo = -padPx, hi = dimD + padPx;
+    snap.forEachBlockInWindow(bxMin, bxMax, byMin, byMax, (t) {
+      final bm = t.bitmap;
+      final baseGx = t.tileX * w, baseGy = t.tileY * w;
+      for (int py = 0; py < w; py++) {
+        final cy = (baseGy + py + 0.5 - tyPpt) * scale + shiftY;
+        if (cy < lo || cy > hi) continue;
+        final rowBase = py * 8;
+        for (int byteCol = 0; byteCol < 8; byteCol++) {
+          final bval = bm[rowBase + byteCol];
+          if (bval == 0) continue;
+          for (int bit = 0; bit < 8; bit++) {
+            if (((bval >> (7 - bit)) & 1) == 0) continue;
+            final gx = baseGx + byteCol * 8 + bit;
+            final cx = (gx + 0.5 - txPpt) * scale + shiftX;
+            if (cx < lo || cx > hi) continue;
+            canvas.drawCircle(ui.Offset(cx, cy), r, disk);
+          }
+        }
+      }
+    });
+    canvas.restore();
+  }
+  return rec.endRecording().toImage(dim, dim);
+}
+
 /// Punch explored cells transparent into [rgba]. Pure integer scaling for
 /// WGS-84 providers; a constant per-tile shift (computed at the tile centre)
 /// for GCJ-02 providers (amap/google) so the holes line up with the shifted
@@ -195,21 +317,7 @@ void _punch(FogSnapshot snap, Uint8List rgba, int tx, int ty, int z, int dim) {
   if (ppt <= 0) return;
   final scale = dim / ppt; // dest px per fog px
   final txPpt = tx * ppt, tyPpt = ty * ppt;
-
-  double shiftX = 0, shiftY = 0;
-  if (CoordConverter.needsGcj02(snap.mapProvider)) {
-    // Constant shift: where the GCJ tile-centre's WGS coordinate would land if
-    // drawn with the plain WGS formula, vs the centre. The GCJ↔WGS offset
-    // varies slowly, so one value per tile is accurate to a fraction of a px.
-    final worldPx = dim * (1 << z).toDouble();
-    final cLatGcj = _mercPxToLat(tyPpt.toDouble() * scale + dim / 2, worldPx);
-    final cLngGcj = _mercPxToLng(txPpt.toDouble() * scale + dim / 2, worldPx);
-    final wgs = CoordConverter.gcj02ToWgs84(cLatGcj, cLngGcj);
-    final wgsGx = FogEngine.lngToGlobalX(wgs.lng).toDouble();
-    final wgsGy = FogEngine.latToGlobalY(wgs.lat).toDouble();
-    shiftX = dim / 2 - (wgsGx - txPpt) * scale;
-    shiftY = dim / 2 - (wgsGy - tyPpt) * scale;
-  }
+  final (shiftX, shiftY) = _gcjShift(snap, tx, ty, z, dim);
 
   // Fog-pixel window this tile covers (shifted for GCJ), padded a couple of
   // blocks for the shift / footprint, then clamped and converted to blocks.
@@ -309,9 +417,14 @@ Future<ui.Image> _decode(Uint8List rgba, int dim) {
 }
 
 /// The fog grid's native zoom: `full = 2^22 = 256 · 2^14`, so 1 fog cell == 1
-/// tile pixel at zoom 14. Above this flutter_map overzooms (scales) the z14
-/// tiles — fixed thickness, like the base map past its max native zoom.
+/// tile pixel at zoom 14. At and below this the integer punch is exact.
 const int _kFogNativeZoom = 14;
+
+/// Highest zoom we bake real tiles for. Between native+1 and here each tile
+/// is baked with the smooth disk+feather pass (cells span 2/4/8 px — a hard
+/// punch would be a visible staircase). Past this flutter_map overzooms the
+/// z17 tiles, whose edges are already soft, so they stay smooth when scaled.
+const int _kFogMaxNativeZoom = 17;
 
 /// Drop-in flutter_map layer that draws the explored fog as baked tiles. Owns
 /// the [FogTileProvider] + a persistent reset stream; loads the explored rows
@@ -324,6 +437,12 @@ class FogTileLayer extends StatefulWidget {
   final Color veil;
   final MapProvider mapProvider;
   final Object? refreshKey;
+
+  /// Optional live-edit feed ([FogEngine.changes]). Rows arriving here are
+  /// merged into the in-memory snapshot instead of re-reading the whole
+  /// fog_tiles table — recording at 1 Hz used to trigger a full-table read
+  /// (~45k rows after a FOW import) every refresh tick.
+  final Stream<List<FogTile>>? changes;
   const FogTileLayer({
     super.key,
     required this.db,
@@ -331,6 +450,7 @@ class FogTileLayer extends StatefulWidget {
     required this.veil,
     required this.mapProvider,
     this.refreshKey,
+    this.changes,
   });
 
   @override
@@ -347,16 +467,51 @@ class _FogTileLayerState extends State<FogTileLayer> {
   String _dataKey = '';
   int _generation = 0;
 
+  /// In-memory mirror of the visible layers' fog rows, keyed by
+  /// (tileX,tileY,layerId). Full reloads replace it; delta events patch it.
+  final Map<int, FogTile> _rows = {};
+  StreamSubscription<List<FogTile>>? _changesSub;
+
+  // tileX/tileY are block-global (< 2^16), layerId is small — pack the three
+  // into one int key so the hot merge path doesn't allocate strings.
+  static int _key(FogTile t) =>
+      (t.layerId << 32) | (t.tileX << 16) | t.tileY;
+
   @override
   void initState() {
     super.initState();
+    _subscribe();
     _maybeReload();
   }
 
   @override
   void didUpdateWidget(covariant FogTileLayer old) {
     super.didUpdateWidget(old);
+    if (!identical(old.changes, widget.changes)) _subscribe();
     _maybeReload();
+  }
+
+  @override
+  void dispose() {
+    _changesSub?.cancel();
+    super.dispose();
+  }
+
+  void _subscribe() {
+    _changesSub?.cancel();
+    _changesSub = widget.changes?.listen(_applyDelta);
+  }
+
+  void _applyDelta(List<FogTile> rows) {
+    if (!mounted) return;
+    var relevant = false;
+    for (final t in rows) {
+      if (t.zoom != FogEngine.tileZoom) continue;
+      if (!widget.layerIds.contains(t.layerId)) continue;
+      _rows[_key(t)] = t;
+      relevant = true;
+    }
+    if (relevant) _publish();
   }
 
   void _maybeReload() {
@@ -373,16 +528,27 @@ class _FogTileLayerState extends State<FogTileLayer> {
         ? const <FogTile>[]
         : await widget.db.fogTilesForLayers(ids, FogEngine.tileZoom);
     if (!mounted) return;
-    // Bump generation + snapshot, then setState so the rebuilt TileLayer gets a
-    // new `additionalOptions` — flutter_map's didUpdateWidget then reloads tiles
-    // IN PLACE (old tiles stay until the new bake decodes → no veil flash), and
-    // the generation in the image key busts Flutter's ImageCache. (TileLayer's
-    // `reset` stream is broken in flutter_map 7.0.2 — its subscription is a
-    // `late final` only read in dispose — so we drive refresh via this instead.)
+    // DIAG: which layers the map actually reads fog from. Compare against the
+    // [FOW] import log's activeLayer — a mismatch is why re-imported fog after a
+    // clear "没了" (written to a layer the map doesn't render).
+    debugPrint('[FOG] reload visibleLayers=$ids → loaded=${rows.length} tiles');
+    _rows
+      ..clear()
+      ..addEntries(rows.map((t) => MapEntry(_key(t), t)));
+    _publish();
+  }
+
+  /// Bump generation + snapshot, then setState so the rebuilt TileLayer gets a
+  /// new `additionalOptions` — flutter_map's didUpdateWidget then reloads tiles
+  /// IN PLACE (old tiles stay until the new bake decodes → no veil flash), and
+  /// the generation in the image key busts Flutter's ImageCache. (TileLayer's
+  /// `reset` stream is broken in flutter_map 7.0.2 — its subscription is a
+  /// `late final` only read in dispose — so we drive refresh via this instead.)
+  void _publish() {
     setState(() {
       _generation++;
       _provider.snapshot = FogSnapshot(
-        rows: rows,
+        rows: _rows.values.toList(growable: false),
         veil: widget.veil,
         mapProvider: widget.mapProvider,
         generation: _generation,
@@ -396,7 +562,7 @@ class _FogTileLayerState extends State<FogTileLayer> {
         // Changing this on a data change is what triggers an in-place reload.
         additionalOptions: {'gen': '$_generation'},
         tileSize: 256,
-        maxNativeZoom: _kFogNativeZoom, // overzoom past the fog's native res
+        maxNativeZoom: _kFogMaxNativeZoom, // smooth-baked past the native res
         // Instant (no fade) so the veil never flashes semi-transparent while
         // panning or after a data refresh.
         tileDisplay: const TileDisplay.instantaneous(),

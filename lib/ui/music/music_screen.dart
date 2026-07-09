@@ -506,9 +506,8 @@ class _MusicScreenState extends ConsumerState<MusicScreen> {
               direction: DismissDirection.endToStart,
               background: Container(color: Colors.red),
               onDismissed: (_) async {
-                await (db.delete(db.songFavorites)
-                      ..where((t) => t.id.equals(f.id)))
-                    .go();
+                // Tombstoning delete — survives future sync merges.
+                await db.deleteSongFavoriteById(f.id);
                 setState(() {});
               },
               child: ListTile(

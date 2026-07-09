@@ -110,6 +110,19 @@ class _ImgHostSettingsScreenState
           ),
           if (s.imgHostKind == 'github') ..._buildGithubFields(s, n),
           if (s.imgHostKind == 'custom') ..._buildCustomFields(s, n),
+          if (s.imgHostKind != 'none') ...[
+            const _SectionHeader('上传行为'),
+            SwitchListTile(
+              secondary: const Icon(Icons.cloud_upload_outlined),
+              title: const Text('自动上传手账图片'),
+              subtitle: Text(s.autoUploadImages
+                  ? '保存手账后立即在后台上传'
+                  : '仅排队，需在手账页「上传队列」里手动上传（省流量）'),
+              value: s.autoUploadImages,
+              onChanged: (v) =>
+                  n.update((p) => p.copyWith(autoUploadImages: v)),
+            ),
+          ],
           const _SectionHeader('连通性测试'),
           if (s.imgHostKind == 'none')
             const ListTile(

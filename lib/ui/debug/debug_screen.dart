@@ -5,7 +5,6 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import '../../app/providers.dart';
-import '../../app/recording_controller.dart';
 import '../../services/debug/log_buffer.dart';
 import '../../services/fog/fog_engine.dart';
 

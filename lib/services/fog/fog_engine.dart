@@ -1,6 +1,6 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'dart:typed_data';
-import 'package:drift/drift.dart' show Value;
 import '../../data/db/database.dart';
 
 /// Fog of war engine — **Fog of World compatible**.
@@ -36,6 +36,18 @@ class FogEngine {
 
   final AppDb db;
   FogEngine(this.db);
+
+  /// Rows written by the interactive reveal/erase paths, emitted as they
+  /// land. The map's fog layer merges these into its in-memory snapshot
+  /// instead of re-reading the whole fog_tiles table (which can be ~45k rows
+  /// after a FOW import) on every recording tick. Bulk import does NOT emit —
+  /// importers bump the global fog refresh once at the end instead.
+  final _changes = StreamController<List<FogTile>>.broadcast();
+  Stream<List<FogTile>> get changes => _changes.stream;
+
+  void _emitChanged(List<FogTile> rows) {
+    if (rows.isNotEmpty && _changes.hasListener) _changes.add(rows);
+  }
 
   // ─── Web Mercator projection (matches FOW exactly) ───
 
@@ -129,14 +141,16 @@ class FogEngine {
     if (isSet(bytes, dx.pixel, dy.pixel)) return; // already set
 
     setBit(bytes, dx.pixel, dy.pixel);
-    await db.upsertFogTile(FogTilesCompanion.insert(
+    final row = FogTile(
       tileX: dbX,
       tileY: dbY,
       zoom: tileZoom,
       layerId: layerId,
       bitmap: bytes,
       updatedAt: DateTime.now(),
-    ));
+    );
+    await db.upsertFogTile(row.toCompanion(false));
+    _emitChanged([row]);
   }
 
   /// Erases exactly one FOW pixel at the given GPS position (WGS-84).
@@ -152,6 +166,12 @@ class FogEngine {
     final dbX = _dbX(dx.tile, dx.block);
     final dbY = _dbY(dy.tile, dy.block);
 
+    // Record the sweep BEFORE the bail-outs: the erase must reach other
+    // devices even when this one has nothing lit here (their copy might).
+    final eraseMask = Uint8List(512);
+    setBit(eraseMask, dx.pixel, dy.pixel);
+    await db.recordFogErase(dbX, dbY, tileZoom, layerId, eraseMask);
+
     final existing = await db.getFogTile(dbX, dbY, tileZoom, layerId);
     if (existing == null) return;
     final bytes = Uint8List.fromList(existing.bitmap);
@@ -159,14 +179,16 @@ class FogEngine {
     if (!isSet(bytes, dx.pixel, dy.pixel)) return; // already clear
 
     clearBit(bytes, dx.pixel, dy.pixel);
-    await db.upsertFogTile(FogTilesCompanion(
-      tileX: Value(dbX),
-      tileY: Value(dbY),
-      zoom: Value(tileZoom),
-      layerId: Value(layerId),
-      bitmap: Value(bytes),
-      updatedAt: Value(DateTime.now()),
-    ));
+    final row = FogTile(
+      tileX: dbX,
+      tileY: dbY,
+      zoom: tileZoom,
+      layerId: layerId,
+      bitmap: bytes,
+      updatedAt: DateTime.now(),
+    );
+    await db.upsertFogTile(row.toCompanion(false));
+    _emitChanged([row]);
   }
 
   /// Reveals fog in a circular area around a GPS position (WGS-84).
@@ -242,6 +264,7 @@ class FogEngine {
         }
       }
     }
+    final changed = <FogTile>[];
     for (final edit in touched.values) {
       final dbX = _dbX(edit.tileX, edit.blockX);
       final dbY = _dbY(edit.tileY, edit.blockY);
@@ -252,15 +275,18 @@ class FogEngine {
       for (final (px, py) in edit.sets) {
         setBit(bytes, px, py);
       }
-      await db.upsertFogTile(FogTilesCompanion.insert(
+      final row = FogTile(
         tileX: dbX,
         tileY: dbY,
         zoom: tileZoom,
         layerId: layerId,
         bitmap: bytes,
         updatedAt: DateTime.now(),
-      ));
+      );
+      await db.upsertFogTile(row.toCompanion(false));
+      changed.add(row);
     }
+    _emitChanged(changed);
   }
 
   Future<void> revealPoint({
@@ -300,6 +326,7 @@ class FogEngine {
       }
     }
 
+    final changed = <FogTile>[];
     for (final edit in touched.values) {
       final dbX = _dbX(edit.tileX, edit.blockX);
       final dbY = _dbY(edit.tileY, edit.blockY);
@@ -312,15 +339,18 @@ class FogEngine {
         setBit(bytes, px, py);
       }
 
-      await db.upsertFogTile(FogTilesCompanion.insert(
+      final row = FogTile(
         tileX: dbX,
         tileY: dbY,
         zoom: tileZoom,
         layerId: layerId,
         bitmap: bytes,
         updatedAt: DateTime.now(),
-      ));
+      );
+      await db.upsertFogTile(row.toCompanion(false));
+      changed.add(row);
     }
+    _emitChanged(changed);
   }
 
   /// Erase fog around a point.
@@ -360,9 +390,20 @@ class FogEngine {
       }
     }
 
+    final changed = <FogTile>[];
     for (final edit in touched.values) {
       final dbX = _dbX(edit.tileX, edit.blockX);
       final dbY = _dbY(edit.tileY, edit.blockY);
+
+      // Record the full swept mask (not just locally-lit pixels): the erase
+      // must clear these pixels on other devices too, whose copies may hold
+      // bits this device never had.
+      final eraseMask = Uint8List(512);
+      for (final (px, py) in edit.sets) {
+        setBit(eraseMask, px, py);
+      }
+      await db.recordFogErase(dbX, dbY, tileZoom, layerId, eraseMask);
+
       final existing = await db.getFogTile(dbX, dbY, tileZoom, layerId);
       if (existing == null) continue;
       final bytes = Uint8List.fromList(existing.bitmap);
@@ -371,15 +412,18 @@ class FogEngine {
         clearBit(bytes, px, py);
       }
 
-      await db.upsertFogTile(FogTilesCompanion(
-        tileX: Value(dbX),
-        tileY: Value(dbY),
-        zoom: Value(tileZoom),
-        layerId: Value(layerId),
-        bitmap: Value(bytes),
-        updatedAt: Value(DateTime.now()),
-      ));
+      final row = FogTile(
+        tileX: dbX,
+        tileY: dbY,
+        zoom: tileZoom,
+        layerId: layerId,
+        bitmap: bytes,
+        updatedAt: DateTime.now(),
+      );
+      await db.upsertFogTile(row.toCompanion(false));
+      changed.add(row);
     }
+    _emitChanged(changed);
   }
 
   /// Returns a merged bitmap for a given FOW block across all given layers.
