@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:drift/drift.dart' show Value;
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
+import 'package:flutter_quill/flutter_quill.dart' as q;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
@@ -333,6 +334,7 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
                                     ),
                                   ),
                                   const Spacer(),
+                                  _ListUploadChip(entry: e),
                                   if (paths.isNotEmpty)
                                     _UploadStatusBadge(journalId: e.id),
                                 ]),
@@ -1107,6 +1109,98 @@ class _UploadStatusBadge extends ConsumerWidget {
   }
 }
 
+/// Local (not-yet-hosted) image refs in an entry — from both mediaPaths and
+/// the Quill rich body. Mirrors [_UploadStatusBarState._localImages] so list
+/// and detail agree on what still needs uploading.
+List<String> _entryLocalImages(JournalEntry e) {
+  bool isRemote(String s) =>
+      s.startsWith('http://') || s.startsWith('https://');
+  final out = <String>{};
+  for (final raw in e.mediaPaths.split('\n')) {
+    final s = raw.trim();
+    if (s.isEmpty || isRemote(s)) continue;
+    out.add(s);
+  }
+  if (e.richContent.isNotEmpty) {
+    try {
+      final delta = jsonDecode(e.richContent);
+      if (delta is List) {
+        for (final op in delta) {
+          if (op is Map &&
+              op['insert'] is Map &&
+              (op['insert'] as Map)['image'] is String) {
+            final s = (op['insert'] as Map)['image'] as String;
+            if (!isRemote(s)) out.add(s);
+          }
+        }
+      }
+    } catch (_) {/* non-Quill body — ignore */}
+  }
+  return out.toList();
+}
+
+/// Compact "上传到图床" action shown on a journal list row while it still has
+/// local images — push a journal's photos straight from the list, no need to
+/// open it first.
+class _ListUploadChip extends ConsumerStatefulWidget {
+  final JournalEntry entry;
+  const _ListUploadChip({required this.entry});
+  @override
+  ConsumerState<_ListUploadChip> createState() => _ListUploadChipState();
+}
+
+class _ListUploadChipState extends ConsumerState<_ListUploadChip> {
+  bool _busy = false;
+
+  Future<void> _upload(int count) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final queue = ref.read(uploadQueueProvider);
+    setState(() => _busy = true);
+    try {
+      await queue.enqueueForJournal(
+        journalId: widget.entry.id,
+        localPaths: widget.entry.mediaPaths
+            .split('\n')
+            .where((p) => p.isNotEmpty)
+            .toList(),
+        richContent: widget.entry.richContent,
+      );
+      await queue.drainNow();
+      messenger.showSnackBar(SnackBar(content: Text('已开始上传（$count 张）')));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = ref.watch(settingsProvider).imgHostKind != 'none';
+    if (!enabled) return const SizedBox.shrink();
+    final local = _entryLocalImages(widget.entry);
+    if (local.isEmpty) return const SizedBox.shrink();
+    final cs = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(right: 8),
+      child: InkWell(
+        onTap: _busy ? null : () => _upload(local.length),
+        borderRadius: BorderRadius.circular(20),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          if (_busy)
+            const SizedBox(
+                width: 13,
+                height: 13,
+                child: CircularProgressIndicator(strokeWidth: 2))
+          else
+            Icon(Icons.cloud_upload_outlined, size: 15, color: cs.primary),
+          const SizedBox(width: 3),
+          Text('上传 ${local.length}',
+              style: TextStyle(fontSize: 11, color: cs.primary)),
+        ]),
+      ),
+    );
+  }
+}
+
 /// The upload queue sheet: every image's upload state, a manual 上传 button
 /// (for when auto-upload is off), and per-item retry. Reactive via the queue
 /// revision notifier so states flip live as uploads complete.
@@ -1257,6 +1351,7 @@ class _JournalDetailScreenState extends ConsumerState<JournalDetailScreen> {
 
   // Edit buffers.
   final _titleCtrl = TextEditingController();
+  q.QuillController? _bodyCtrl; // live rich-text surface while editing
   List<String> _media = [];
   String _rich = '';
   String _level = 'public';
@@ -1276,6 +1371,7 @@ class _JournalDetailScreenState extends ConsumerState<JournalDetailScreen> {
   @override
   void dispose() {
     _titleCtrl.dispose();
+    _bodyCtrl?.dispose();
     super.dispose();
   }
 
@@ -1286,6 +1382,20 @@ class _JournalDetailScreenState extends ConsumerState<JournalDetailScreen> {
     _level = _entry.level;
     _owner = _entry.ownerPeerId;
     _titleError = null;
+    _bodyCtrl?.dispose();
+    _bodyCtrl = _makeBodyController(_rich);
+  }
+
+  q.QuillController _makeBodyController(String json) {
+    if (json.isNotEmpty) {
+      try {
+        return q.QuillController(
+          document: q.Document.fromJson(jsonDecode(json) as List),
+          selection: const TextSelection.collapsed(offset: 0),
+        );
+      } catch (_) {/* not a Quill doc — fall through to a blank one */}
+    }
+    return q.QuillController.basic();
   }
 
   Future<void> _loadPeers() async {
@@ -1315,6 +1425,10 @@ class _JournalDetailScreenState extends ConsumerState<JournalDetailScreen> {
     if (_titleCtrl.text.trim().isEmpty) {
       setState(() => _titleError = '标题不能为空');
       return;
+    }
+    // Serialize the live rich-text surface (text + inline image embeds).
+    if (_bodyCtrl != null) {
+      _rich = jsonEncode(_bodyCtrl!.document.toDelta().toJson());
     }
     final db = ref.read(dbProvider);
     final id = _entry.id;
@@ -1582,46 +1696,24 @@ class _JournalDetailScreenState extends ConsumerState<JournalDetailScreen> {
               ),
             ),
           ]),
-          const SizedBox(height: 16),
-          // Rich body.
-          OutlinedButton.icon(
-            icon: const Icon(Icons.edit_note_rounded),
-            label: Text(_rich.isEmpty ? '撰写正文（富文本 · 可插图）' : '编辑正文'),
-            style: OutlinedButton.styleFrom(
-                minimumSize: const Size.fromHeight(48)),
-            onPressed: () async {
-              final r = await Navigator.push<String>(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => QuillEditorScreen(
-                    initialJson: _rich,
-                    title: _titleCtrl.text.isEmpty ? '正文' : _titleCtrl.text,
-                  ),
-                ),
-              );
-              if (r != null) setState(() => _rich = r);
-            },
-          ),
-          if (_rich.isNotEmpty) ...[
-            const SizedBox(height: 8),
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: cs.surfaceContainerHigh,
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Text(
-                quillToPreview(_rich),
-                maxLines: 3,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(color: cs.onSurfaceVariant, height: 1.4),
-              ),
-            ),
-          ],
           const SizedBox(height: 18),
-          // Media.
-          Text('照片', style: Theme.of(context).textTheme.labelLarge),
+          // Rich body — edited inline. Text and images interleave right here;
+          // no secondary editor screen, no "编辑正文" hop.
+          Row(children: [
+            Icon(Icons.notes_rounded, size: 18, color: cs.onSurfaceVariant),
+            const SizedBox(width: 8),
+            Text('正文', style: Theme.of(context).textTheme.labelLarge),
+            const Spacer(),
+            Text('文字与图片可穿插',
+                style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
+          ]),
+          const SizedBox(height: 8),
+          if (_bodyCtrl != null) QuillBodyField(controller: _bodyCtrl!),
+          const SizedBox(height: 18),
+          // Cover / album photos (optional) — feed the list thumbnail and the
+          // view-mode gallery; inline body images upload the same way.
+          Text('封面照片 · 相册（可选）',
+              style: Theme.of(context).textTheme.labelLarge),
           const SizedBox(height: 8),
           Wrap(spacing: 8, children: [
             OutlinedButton.icon(

@@ -132,6 +132,156 @@ class _QuillEditorScreenState extends ConsumerState<QuillEditorScreen> {
   }
 }
 
+/// An inline, page-embeddable rich-text body editor. Unlike [QuillEditorScreen]
+/// it has no Scaffold/AppBar and does not scroll internally
+/// (`scrollable: false`), so it grows with its content inside an outer scroll
+/// view — the body simply *is* part of the page. Text and images interleave
+/// freely; the "插入图片" affordance stores a local file-path embed, the same
+/// portable format the reader understands and the upload queue harvests.
+///
+/// The parent owns the [controller] and reads
+/// `controller.document.toDelta().toJson()` on save.
+class QuillBodyField extends ConsumerStatefulWidget {
+  final q.QuillController controller;
+  final String placeholder;
+  const QuillBodyField({
+    super.key,
+    required this.controller,
+    this.placeholder = '在这里记录你的旅行……文字与图片可自由穿插',
+  });
+
+  @override
+  ConsumerState<QuillBodyField> createState() => _QuillBodyFieldState();
+}
+
+class _QuillBodyFieldState extends ConsumerState<QuillBodyField> {
+  final _picker = ImagePicker();
+
+  Future<void> _insertImage(ImageSource source) async {
+    try {
+      final f = await _picker.pickImage(source: source);
+      if (f == null) return;
+      final ctrl = widget.controller;
+      final sel = ctrl.selection;
+      // Insert at the cursor, or at the end when nothing is focused yet.
+      final docLen = ctrl.document.length;
+      var index = sel.baseOffset < 0 ? docLen - 1 : sel.baseOffset;
+      if (index < 0) index = 0;
+      if (index > docLen - 1) index = docLen - 1;
+      final length = sel.extentOffset - sel.baseOffset;
+      ctrl
+        ..skipRequestKeyboard = true
+        ..replaceText(
+          index,
+          length < 0 ? 0 : length,
+          q.BlockEmbed.image(f.path),
+          null,
+        )
+        ..moveCursorToPosition(index + 1);
+    } catch (e, st) {
+      debugPrint('[QuillBodyField] insertImage failed: $e\n$st');
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('插入图片失败：$e')));
+      }
+    }
+  }
+
+  Future<void> _pickInsertSource() async {
+    final source = await showModalBottomSheet<ImageSource>(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          ListTile(
+            leading: const Icon(Icons.camera_alt_outlined),
+            title: const Text('拍照插入'),
+            onTap: () => Navigator.pop(ctx, ImageSource.camera),
+          ),
+          ListTile(
+            leading: const Icon(Icons.photo_library_outlined),
+            title: const Text('从图库插入'),
+            onTap: () => Navigator.pop(ctx, ImageSource.gallery),
+          ),
+        ]),
+      ),
+    );
+    if (source != null) await _insertImage(source);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    _embedSettings.value = ref.watch(settingsProvider);
+    final cs = Theme.of(context).colorScheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // Compact formatting toolbar + a dedicated insert-image button.
+        Container(
+          decoration: BoxDecoration(
+            color: cs.surfaceContainerHigh,
+            borderRadius: BorderRadius.circular(12),
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: 4),
+          child: Row(children: [
+            Expanded(
+              child: q.QuillSimpleToolbar(
+                controller: widget.controller,
+                config: const q.QuillSimpleToolbarConfig(
+                  showFontFamily: false,
+                  showFontSize: false,
+                  showCodeBlock: false,
+                  showBackgroundColorButton: false,
+                  showSearchButton: false,
+                  showAlignmentButtons: false,
+                  showInlineCode: false,
+                  showDividers: false,
+                  showSubscript: false,
+                  showSuperscript: false,
+                  showClipboardCopy: false,
+                  showClipboardCut: false,
+                  showClipboardPaste: false,
+                  showLineHeightButton: false,
+                  showLink: false,
+                  multiRowsDisplay: false,
+                ),
+              ),
+            ),
+            const SizedBox(width: 2),
+            IconButton(
+              tooltip: '插入图片',
+              icon: const Icon(Icons.add_photo_alternate_outlined),
+              onPressed: _pickInsertSource,
+            ),
+          ]),
+        ),
+        const SizedBox(height: 8),
+        // The editor surface — non-scrolling so the whole page scrolls and the
+        // body grows naturally as content (including inline images) is added.
+        Container(
+          constraints: const BoxConstraints(minHeight: 260),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+          decoration: BoxDecoration(
+            color: cs.surfaceContainerHighest.withValues(alpha: 0.4),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: cs.outlineVariant.withValues(alpha: 0.6)),
+          ),
+          child: q.QuillEditor.basic(
+            controller: widget.controller,
+            config: q.QuillEditorConfig(
+              placeholder: widget.placeholder,
+              scrollable: false,
+              expands: false,
+              padding: EdgeInsets.zero,
+              embedBuilders: [_ImageEmbedBuilder()],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 /// Static settings snapshot used by the embed builder when it needs to
 /// render a `gh-private://` image. Kept as a top-level `ValueNotifier` so
 /// any change pushes a rebuild — embed builders don't have a Riverpod

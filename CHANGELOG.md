@@ -5,6 +5,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 
 ## [Unreleased] — 2026-07-09
 
+### UI（手账：正文改为内联富文本编辑，图文可穿插；列表可直接上传图床）
+
+- **编辑模式下正文即内联富文本区**：进入「✎」编辑后，正文直接是可编辑的富文本，
+  **文字与图片自由穿插**，不再需要点「编辑正文」进二级全屏编辑器。新增可复用组件
+  [`QuillBodyField`](lib/ui/journal/quill_editor_screen.dart)（紧凑格式工具条 + 专用
+  「插入图片」按钮 + `scrollable: false` 的内联 `QuillEditor`，随内容自然增高、整页滚动）。
+  正文由 `_JournalDetailScreenState` 持有的 `QuillController` 承载，保存时序列化为 Delta JSON。
+- **图片=正文内的本地关联链接**：插图存为可移植的本地文件路径 embed（与只读渲染、
+  图床上传队列同一格式）；`_UploadStatusBar._localImages()` 早已同时采集 mediaPaths 与
+  正文内联图，故正文里的图片走同一条图床上传链路。
+- **手账列表可直接上传图床**：列表行在仍有本地未托管图片时显示「⬆ 上传 N」chip
+  （`_ListUploadChip`，本地图统计复用新的 `_entryLocalImages()`），一键入队并 `drainNow()`，
+  无需先打开条目。手账详情页（查看态）的 `_UploadStatusBar` 上传入口保持不变。
+- 「封面照片 · 相册（可选）」区保留（喂列表缩略图与查看态相册），置于正文之下并标注为可选。
+- 真机 6159e157 全流程验证：进编辑 → 正文内联可编辑（保留原着色）→ 工具条插图 →
+  图文穿插 → 保存 → 只读视图正确渲染内联图 + 文字 + 自动进图床上传；列表「上传 N」chip
+  显示正确。`flutter analyze` 干净（两文件 0 问题）。
+
 ### UI（手账：全屏详情页 + 同页编辑，替代二级弹窗；列表/附近卡片重构）
 
 - **点开手账 = 近全屏只读详情页**（`JournalDetailScreen`，`lib/ui/journal/journal_screen.dart`），
