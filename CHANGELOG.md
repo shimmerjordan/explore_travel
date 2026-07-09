@@ -5,6 +5,57 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 
 ## [Unreleased] — 2026-07-09
 
+### UI（手账：全屏详情页 + 同页编辑，替代二级弹窗；列表/附近卡片重构）
+
+- **点开手账 = 近全屏只读详情页**（`JournalDetailScreen`，`lib/ui/journal/journal_screen.dart`），
+  取代原来的小 `AlertDialog` 查看窗。含大标题、时间/级别 meta、**正文区内嵌一栏地图**
+  标识该手账位置（复用同款高德/OSM 瓦片 + GCJ-02 转换 + 青绿定位 pin + 坐标胶囊）、
+  富文本渲染、照片墙（点开全屏画廊）、图床状态。
+- **同页切换编辑模式**：详情页右上「✎」→ 本页变为可编辑——标题、级别（公开/私有
+  SegmentedButton）、归属人、拍照/图库加图与删图、「编辑正文」（富文本内插图）、删除，
+  全部在同一页完成，**不再二级进入编辑弹窗**。新建仍走原单层编辑器。
+- **三个入口统一**改为打开详情页：手账列表、地图手账 pin、首页「附近手账」弹窗
+  （删除了旧的 `showJournalViewer` 弹窗函数）。
+- **手账列表卡重构**：缩略图左置（首图带「+N」多图角标，无图用品牌占位图）+ 标题/日期/
+  预览/定位/上传徽标分层，tonal 面，扫读性更好。
+- **「附近手账」弹窗重构**：拖拽手柄、📍标题 + 「~5km 内 N 条」副标题、tonal 卡片层级、
+  更大圆角。
+- 真机 6159e157 全流程验证：附近弹窗 → 全屏详情（地图栏定位正确）→ 同页编辑 → 列表卡；
+  `flutter analyze` 干净。
+
+### UI（氛围层：雾气 + 光尘，克制且可交互）
+
+- **新增可复用氛围层** [`lib/ui/common/atmosphere.dart`](lib/ui/common/atmosphere.dart)：
+  CustomPainter 绘制**缓慢飘动的柔雾云团**（加色混合的柔光晕）+ **稀疏光尘粒子**
+  （视差、微弱明灭）。呼应本 App「拨开迷雾(Fog of World)」的核心隐喻，是主题内生
+  的氛围，而非廉价装饰。刻意做到**不廉价**：
+  - **慢**：全部运动以 120s 循环的**整数周期**表达，1→0 回绕无缝、永不明显重复；
+  - **低对比**：云/尘低透明置于内容之下，不损文字对比（a11y）；
+  - **可交互**：拖动/悬停会把光尘从指针处**拨开**再缓缓聚回（"伸手拨雾"）；
+  - **尊重 reduced motion**：系统"移除动画"开启时渲染单帧静态、关闭交互；
+  - 性能：`RepaintBoundary` + 预生成粒子、paint 内零分配。
+- **应用到两处 hero**：探索进度页 `_GlobalCard`（青绿覆盖率卡，可交互拨雾）与首页
+  `_FeaturedTile`（更克制、仅氛围）。真机 6159e157 验证：渲染正常、文字清晰；隔 3s
+  两帧 hero 区域 0.17% 像素变化 → 证明动效为"活的"（非静态误画）。
+
+### UI（首页「更多」重构 · 接入 impeccable 设计技能）
+
+- **接入 impeccable 设计技能**（`.claude/skills/impeccable/` + PostToolUse 检测 hook），
+  并为项目落地设计上下文：`PRODUCT.md`（register=product / platform=android / 气质=
+  轻盈·游历·收集乐趣 / 5 条策略原则 / a11y）+ `DESIGN.md`（从 main.dart 主题抽取：
+  M3、seed `#26A69A`、明暗、圆角/字体基线）。
+- **重构首页「更多」功能网格**（`home_screen.dart`）：原本是 **11 张等大全饱和彩虹
+  渐变卡 + 彩色投影**——命中 impeccable 三条反模式（identical card grid / 非激活态
+  重色装饰 / 无层级平铺）。重构为：
+  - **Hero「探索进度」**整宽 primaryContainer 卡（收集乐趣的落点，置于层级顶端）；
+  - 其余入口按意图**分组**（记录与回顾 / 发现与同行 / 数据与设置），层级由使用频率
+    决定，而非平铺；
+  - 磁贴改用 **Material 3 role 色**（primary/secondary/tertiary Container 图标片 +
+    surfaceContainerHigh tonal 面），去掉硬编码彩虹与彩色辉光，自动适配对比；
+  - 触控目标 ≥ 48dp；按压 97% 缩放微反馈**尊重 `disableAnimations`（reduced motion）**。
+  - 路由不变；`flutter analyze` 干净；真机 6159e157 验证渲染与「探索进度」跳转正常
+    （App 为 `ThemeMode.dark` 固定深色，故仅深色需验）。
+
 ### Import（删除后再导入无法恢复 → 备份/恢复对所有模块一劳永逸）
 
 - **备份恢复现在会复活本地删除的行**: 复现步骤「新建手账 → 导出 → 删除该手账 →

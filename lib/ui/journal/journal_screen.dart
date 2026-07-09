@@ -2,13 +2,17 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:drift/drift.dart' show Value;
 import 'package:flutter/material.dart';
+import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
+import 'package:latlong2/latlong.dart';
 import '../../app/providers.dart';
 import '../../data/db/database.dart';
+import '../../services/geo/coord_converter.dart';
 import '../../services/imghost/upload_queue.dart' show UploadRecord;
 import '../../services/imghost/private_image_loader.dart';
+import '../../services/map/tile_providers.dart';
 import '../../services/media/exif_service.dart';
 import '../map/native_file_image_io.dart';
 import 'quill_editor_screen.dart';
@@ -240,118 +244,103 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
                   e.mediaPaths.split('\n').where((p) => p.isNotEmpty).toList();
               final preview = quillToPreview(e.richContent);
               final isSelected = _selected.contains(e.id);
-              return Card(
-                margin:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                color: isSelected
-                    ? Theme.of(context).colorScheme.primaryContainer
-                    : null,
-                child: InkWell(
+              final cs = Theme.of(context).colorScheme;
+              final tt = Theme.of(context).textTheme;
+              return Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+                child: Material(
+                  color: isSelected
+                      ? cs.primaryContainer
+                      : cs.surfaceContainerHigh,
                   borderRadius: BorderRadius.circular(16),
-                  onTap: () async {
-                    if (_selectMode) {
+                  clipBehavior: Clip.antiAlias,
+                  child: InkWell(
+                    onTap: () async {
+                      if (_selectMode) {
+                        _toggleSelect(e.id);
+                        return;
+                      }
+                      await openJournalDetail(context, ref, e);
+                      if (mounted) _bumpRefresh();
+                    },
+                    onLongPress: () {
+                      setState(() => _selectMode = true);
                       _toggleSelect(e.id);
-                      return;
-                    }
-                    final changed =
-                        await showJournalViewer(context, ref, e);
-                    if (changed && mounted) _bumpRefresh();
-                  },
-                  onLongPress: () {
-                    setState(() => _selectMode = true);
-                    _toggleSelect(e.id);
-                  },
-                  child: Padding(
-                    padding: const EdgeInsets.all(14),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            if (_selectMode)
-                              Padding(
-                                padding: const EdgeInsets.only(right: 8),
-                                child: Icon(
-                                  isSelected
-                                      ? Icons.check_circle_rounded
-                                      : Icons.radio_button_unchecked_rounded,
-                                  color: isSelected
-                                      ? Theme.of(context).colorScheme.primary
-                                      : Theme.of(context)
-                                          .colorScheme
-                                          .onSurface
-                                          .withValues(alpha: 0.4),
-                                ),
+                    },
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if (_selectMode)
+                            Padding(
+                              padding:
+                                  const EdgeInsets.only(right: 10, top: 26),
+                              child: Icon(
+                                isSelected
+                                    ? Icons.check_circle_rounded
+                                    : Icons.radio_button_unchecked_rounded,
+                                color: isSelected
+                                    ? cs.primary
+                                    : cs.onSurface.withValues(alpha: 0.4),
                               ),
-                            Expanded(
-                              child: Text(e.title,
-                                  style: Theme.of(context)
-                                      .textTheme
-                                      .titleMedium
-                                      ?.copyWith(
-                                          fontWeight: FontWeight.w600)),
                             ),
-                            // Image-host upload status, right in the list.
-                            if (paths.isNotEmpty)
-                              _UploadStatusBadge(journalId: e.id),
-                            Text(
-                                DateFormat('MM/dd HH:mm').format(e.time),
-                                style: Theme.of(context)
-                                    .textTheme
-                                    .bodySmall
-                                    ?.copyWith(
-                                        color: Theme.of(context)
-                                            .colorScheme
-                                            .onSurface
-                                            .withValues(alpha: 0.5))),
-                          ],
-                        ),
-                        const SizedBox(height: 8),
-                        Text(preview,
-                            maxLines: 3,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                                color: Theme.of(context)
-                                    .colorScheme
-                                    .onSurface
-                                    .withValues(alpha: 0.7),
-                                height: 1.4)),
-                        if (paths.isNotEmpty) ...[
-                          const SizedBox(height: 10),
-                          SizedBox(
-                            height: 72,
-                            child: ListView.builder(
-                              scrollDirection: Axis.horizontal,
-                              itemCount: paths.length,
-                              itemBuilder: (_, i) => Padding(
-                                padding: const EdgeInsets.only(right: 6),
-                                child: JournalMediaThumb(
-                                    path: paths[i], size: 72),
-                              ),
+                          // Leading photo (with +N badge) or a placeholder tile.
+                          _JournalLeading(paths: paths),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(children: [
+                                  Expanded(
+                                    child: Text(
+                                      e.title.isEmpty ? '(无标题)' : e.title,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: tt.titleMedium?.copyWith(
+                                          fontWeight: FontWeight.w600),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Text(DateFormat('MM/dd').format(e.time),
+                                      style: tt.bodySmall?.copyWith(
+                                          color: cs.onSurfaceVariant)),
+                                ]),
+                                if (preview.isNotEmpty) ...[
+                                  const SizedBox(height: 4),
+                                  Text(preview,
+                                      maxLines: 2,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                          color: cs.onSurfaceVariant,
+                                          height: 1.35)),
+                                ],
+                                const SizedBox(height: 8),
+                                Row(children: [
+                                  Icon(Icons.location_on_outlined,
+                                      size: 13, color: cs.onSurfaceVariant),
+                                  const SizedBox(width: 3),
+                                  Flexible(
+                                    child: Text(
+                                      '${e.lat.toStringAsFixed(3)}, ${e.lng.toStringAsFixed(3)}',
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                          fontSize: 11,
+                                          color: cs.onSurfaceVariant),
+                                    ),
+                                  ),
+                                  const Spacer(),
+                                  if (paths.isNotEmpty)
+                                    _UploadStatusBadge(journalId: e.id),
+                                ]),
+                              ],
                             ),
                           ),
                         ],
-                        const SizedBox(height: 8),
-                        Row(
-                          children: [
-                            Icon(Icons.location_on_outlined,
-                                size: 14,
-                                color: Theme.of(context)
-                                    .colorScheme
-                                    .onSurface
-                                    .withValues(alpha: 0.4)),
-                            const SizedBox(width: 4),
-                            Text(
-                                '${e.lat.toStringAsFixed(4)}, ${e.lng.toStringAsFixed(4)}',
-                                style: TextStyle(
-                                    fontSize: 12,
-                                    color: Theme.of(context)
-                                        .colorScheme
-                                        .onSurface
-                                        .withValues(alpha: 0.4))),
-                          ],
-                        ),
-                      ],
+                      ),
                     ),
                   ),
                 ),
@@ -368,92 +357,6 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
 //
 // Both functions return `true` when the database changed (insert / update /
 // delete) so callers can refresh their views.
-
-/// Read-only viewer. Shows title, time, lat/lng, rich-text body and media.
-/// A trailing "编辑" button switches into [showJournalEditor].
-Future<bool> showJournalViewer(
-    BuildContext context, WidgetRef ref, JournalEntry entry) async {
-  bool changed = false;
-  await showDialog<void>(
-    context: context,
-    builder: (ctx) {
-      final paths = entry.mediaPaths
-          .split('\n')
-          .where((p) => p.isNotEmpty)
-          .toList();
-      return AlertDialog(
-        title: Text(entry.title.isEmpty ? '(无标题)' : entry.title),
-        content: SizedBox(
-          width: MediaQuery.of(ctx).size.width * 0.9,
-          child: SingleChildScrollView(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                _MetaLine(
-                  icon: Icons.access_time,
-                  text: DateFormat('yyyy-MM-dd HH:mm').format(entry.time),
-                ),
-                const SizedBox(height: 4),
-                _MetaLine(
-                  icon: Icons.location_on_outlined,
-                  text:
-                      '${entry.lat.toStringAsFixed(5)}, ${entry.lng.toStringAsFixed(5)}',
-                ),
-                const Divider(height: 20),
-                if (entry.richContent.isNotEmpty)
-                  QuillReader(json: entry.richContent)
-                else
-                  Text('(无正文)',
-                      style: TextStyle(color: Theme.of(ctx).hintColor)),
-                if (paths.isNotEmpty) ...[
-                  const SizedBox(height: 12),
-                  SizedBox(
-                    height: 80,
-                    child: ListView.builder(
-                      scrollDirection: Axis.horizontal,
-                      itemCount: paths.length,
-                      itemBuilder: (_, i) => Padding(
-                        padding: const EdgeInsets.only(right: 6),
-                        child: GestureDetector(
-                          onTap: () => Navigator.of(ctx).push(
-                            MaterialPageRoute<void>(
-                              fullscreenDialog: true,
-                              builder: (_) => _FullscreenGallery(
-                                  paths: paths, initialIndex: i),
-                            ),
-                          ),
-                          child: JournalMediaThumb(path: paths[i], size: 80),
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-                _UploadStatusBar(entry: entry),
-              ],
-            ),
-          ),
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('关闭')),
-          FilledButton.icon(
-            icon: const Icon(Icons.edit_outlined, size: 18),
-            label: const Text('编辑'),
-            onPressed: () async {
-              Navigator.pop(ctx);
-              final edited =
-                  await showJournalEditor(context, ref, entry: entry);
-              if (edited) changed = true;
-            },
-          ),
-        ],
-      );
-    },
-  );
-  return changed;
-}
 
 /// Editor dialog. Pass `entry` to edit, omit to create. Returns true if the
 /// DB was changed.
@@ -488,16 +391,16 @@ Future<bool> showJournalEditor(
     }
   }
   DateTime resolvedTime() => entry?.time ?? exifTime ?? DateTime.now();
-  double resolvedLat() =>
-      entry?.lat ?? exifLat ?? pinPos?.lat ?? 0;
-  double resolvedLng() =>
-      entry?.lng ?? exifLng ?? pinPos?.lng ?? 0;
+  double resolvedLat() => entry?.lat ?? exifLat ?? pinPos?.lat ?? 0;
+  double resolvedLng() => entry?.lng ?? exifLng ?? pinPos?.lng ?? 0;
   // Peers ever seen — pulled from chat_messages so we include offline ones
   // too. "self" is always first.
   final db0 = ref.read(dbProvider);
-  final peerRows = await db0.customSelect(
-    'SELECT DISTINCT peer_id, author FROM chat_messages ORDER BY peer_id',
-  ).get();
+  final peerRows = await db0
+      .customSelect(
+        'SELECT DISTINCT peer_id, author FROM chat_messages ORDER BY peer_id',
+      )
+      .get();
   final knownPeers = <({String id, String name})>[
     for (final r in peerRows)
       (
@@ -554,7 +457,8 @@ Future<bool> showJournalEditor(
                             value: null, child: Text('自己')),
                         ...knownPeers.map((p) => DropdownMenuItem<String?>(
                             value: p.id,
-                            child: Text('${p.name}（${p.id.substring(0, p.id.length < 6 ? p.id.length : 6)}…）'))),
+                            child: Text(
+                                '${p.name}（${p.id.substring(0, p.id.length < 6 ? p.id.length : 6)}…）'))),
                       ],
                       onChanged: (v) => setState(() => ownerPeerId = v),
                     ),
@@ -599,8 +503,7 @@ Future<bool> showJournalEditor(
                       MaterialPageRoute(
                         builder: (_) => QuillEditorScreen(
                           initialJson: richContent,
-                          title:
-                              titleCtrl.text.isEmpty ? '正文' : titleCtrl.text,
+                          title: titleCtrl.text.isEmpty ? '正文' : titleCtrl.text,
                         ),
                       ),
                     );
@@ -613,8 +516,8 @@ Future<bool> showJournalEditor(
                   children: [
                     OutlinedButton.icon(
                       onPressed: () async {
-                        final f = await picker.pickImage(
-                            source: ImageSource.camera);
+                        final f =
+                            await picker.pickImage(source: ImageSource.camera);
                         if (f != null) setState(() => mediaPaths.add(f.path));
                       },
                       icon: const Icon(Icons.camera_alt),
@@ -622,8 +525,8 @@ Future<bool> showJournalEditor(
                     ),
                     OutlinedButton.icon(
                       onPressed: () async {
-                        final f = await picker.pickImage(
-                            source: ImageSource.gallery);
+                        final f =
+                            await picker.pickImage(source: ImageSource.gallery);
                         if (f != null) {
                           final gps = await ExifService.readGps(f.path);
                           setState(() {
@@ -769,10 +672,64 @@ class _MetaLine extends StatelessWidget {
         Icon(icon, size: 14, color: c),
         const SizedBox(width: 6),
         Expanded(
-          child: Text(text,
-              style: TextStyle(fontSize: 12, color: c)),
+          child: Text(text, style: TextStyle(fontSize: 12, color: c)),
         ),
       ],
+    );
+  }
+}
+
+/// Leading tile for a journal list row: the first photo with a "+N" badge when
+/// there are more, or a branded placeholder when there are none.
+class _JournalLeading extends StatelessWidget {
+  final List<String> paths;
+  const _JournalLeading({required this.paths});
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    const s = 76.0;
+    if (paths.isEmpty) {
+      return Container(
+        width: s,
+        height: s,
+        decoration: BoxDecoration(
+          color: cs.primaryContainer,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Icon(Icons.auto_stories_outlined,
+            color: cs.onPrimaryContainer, size: 28),
+      );
+    }
+    return SizedBox(
+      width: s,
+      height: s,
+      child: Stack(
+        children: [
+          JournalMediaThumb(path: paths.first, size: s),
+          if (paths.length > 1)
+            Positioned(
+              right: 4,
+              bottom: 4,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.6),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  const Icon(Icons.photo_library_rounded,
+                      size: 11, color: Colors.white),
+                  const SizedBox(width: 3),
+                  Text('${paths.length}',
+                      style: const TextStyle(
+                          fontSize: 10,
+                          color: Colors.white,
+                          fontWeight: FontWeight.w600)),
+                ]),
+              ),
+            ),
+        ],
+      ),
     );
   }
 }
@@ -827,8 +784,7 @@ class _FullscreenGallery extends ConsumerStatefulWidget {
   final int initialIndex;
   const _FullscreenGallery({required this.paths, required this.initialIndex});
   @override
-  ConsumerState<_FullscreenGallery> createState() =>
-      _FullscreenGalleryState();
+  ConsumerState<_FullscreenGallery> createState() => _FullscreenGalleryState();
 }
 
 class _FullscreenGalleryState extends ConsumerState<_FullscreenGallery> {
@@ -845,8 +801,7 @@ class _FullscreenGalleryState extends ConsumerState<_FullscreenGallery> {
   @override
   Widget build(BuildContext context) {
     final s = ref.watch(settingsProvider);
-    const broken =
-        Icon(Icons.broken_image, color: Colors.white54, size: 48);
+    const broken = Icon(Icons.broken_image, color: Colors.white54, size: 48);
     Widget fullImage(String path) {
       if (path.startsWith('gh-private://')) {
         return PrivateAwareImage(
@@ -857,8 +812,7 @@ class _FullscreenGalleryState extends ConsumerState<_FullscreenGallery> {
       }
       if (path.startsWith('http://') || path.startsWith('https://')) {
         return Image.network(path,
-            fit: BoxFit.contain,
-            errorBuilder: (_, __, ___) => broken);
+            fit: BoxFit.contain, errorBuilder: (_, __, ___) => broken);
       }
       // Local file — web-safe via the conditional NativeFileImage.
       return NativeFileImage(path: path, fit: BoxFit.contain);
@@ -894,15 +848,15 @@ class _FullscreenGalleryState extends ConsumerState<_FullscreenGallery> {
               right: 0,
               child: Center(
                 child: Container(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 12, vertical: 6),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                   decoration: BoxDecoration(
                     color: Colors.black54,
                     borderRadius: BorderRadius.circular(20),
                   ),
                   child: Text('${_index + 1} / ${widget.paths.length}',
-                      style: const TextStyle(
-                          color: Colors.white, fontSize: 13)),
+                      style:
+                          const TextStyle(color: Colors.white, fontSize: 13)),
                 ),
               ),
             ),
@@ -1010,8 +964,7 @@ class _UploadStatusBarState extends ConsumerState<_UploadStatusBar> {
       if (_records.any((r) => r.status == 'failed' || r.status == 'pending')) {
         await q.retryAllForJournal(widget.entry.id);
       }
-      messenger.showSnackBar(
-          SnackBar(content: Text('已加入上传队列（$localCount 张）')));
+      messenger.showSnackBar(SnackBar(content: Text('已加入上传队列（$localCount 张）')));
     } finally {
       if (mounted) setState(() => _busy = false);
       await _tick();
@@ -1078,8 +1031,7 @@ class _UploadStatusBarState extends ConsumerState<_UploadStatusBar> {
             else if (showUpload)
               TextButton(
                 onPressed: () => _uploadNow(localImages.length),
-                child: Text(
-                    failed > 0 && localImages.isEmpty ? '重试' : '上传到图床'),
+                child: Text(failed > 0 && localImages.isEmpty ? '重试' : '上传到图床'),
               ),
           ],
         ),
@@ -1098,7 +1050,11 @@ class _UploadStatusBarState extends ConsumerState<_UploadStatusBar> {
   final pending = recs.where((r) => r.status == 'pending').length;
   final done = recs.where((r) => r.status == 'done').length;
   if (failed > 0) {
-    return (icon: Icons.cloud_off_rounded, color: Colors.red, label: '$failed 失败');
+    return (
+      icon: Icons.cloud_off_rounded,
+      color: Colors.red,
+      label: '$failed 失败'
+    );
   }
   if (pending > 0) {
     return (
@@ -1169,8 +1125,7 @@ Future<void> _showUploadQueue(BuildContext context, WidgetRef ref) async {
             future: queue.allRecords(),
             builder: (ctx, snap) {
               final recs = snap.data ?? const <UploadRecord>[];
-              final pending =
-                  recs.where((r) => r.status != 'done').length;
+              final pending = recs.where((r) => r.status != 'done').length;
               return DraggableScrollableSheet(
                 expand: false,
                 initialChildSize: 0.6,
@@ -1254,4 +1209,594 @@ Future<void> _showUploadQueue(BuildContext context, WidgetRef ref) async {
       },
     ),
   );
+}
+
+// ─── Full-screen journal detail (view ⇄ in-place edit) ──────────────────────
+//
+// Replaces the old showJournalViewer→showJournalEditor dialog stack for
+// EXISTING entries: tapping a journal opens a near-fullscreen read-only page
+// (with an embedded location map), and a single "编辑" toggle flips the SAME
+// page into edit mode — title, level, owner, media and rich body all edited in
+// place, no nested dialog. New-entry creation still uses [showJournalEditor].
+
+/// Opens [JournalDetailScreen] for [entry]. Returns true if the entry changed
+/// (edited or deleted) — though callers can also just refresh unconditionally,
+/// since saves/deletes bump [journalRefreshProvider].
+Future<bool> openJournalDetail(
+  BuildContext context,
+  WidgetRef ref,
+  JournalEntry entry, {
+  bool startInEdit = false,
+}) async {
+  final changed = await Navigator.of(context, rootNavigator: true).push<bool>(
+    MaterialPageRoute(
+      builder: (_) =>
+          JournalDetailScreen(entry: entry, startInEdit: startInEdit),
+    ),
+  );
+  return changed ?? false;
+}
+
+class JournalDetailScreen extends ConsumerStatefulWidget {
+  final JournalEntry entry;
+  final bool startInEdit;
+  const JournalDetailScreen({
+    super.key,
+    required this.entry,
+    this.startInEdit = false,
+  });
+  @override
+  ConsumerState<JournalDetailScreen> createState() =>
+      _JournalDetailScreenState();
+}
+
+class _JournalDetailScreenState extends ConsumerState<JournalDetailScreen> {
+  late JournalEntry _entry = widget.entry;
+  late bool _editing = widget.startInEdit;
+  bool _changed = false;
+
+  // Edit buffers.
+  final _titleCtrl = TextEditingController();
+  List<String> _media = [];
+  String _rich = '';
+  String _level = 'public';
+  String? _owner;
+  String? _titleError;
+
+  final _picker = ImagePicker();
+  List<({String id, String name})> _peers = const [];
+
+  @override
+  void initState() {
+    super.initState();
+    _seedBuffers();
+    if (_editing) _loadPeers();
+  }
+
+  @override
+  void dispose() {
+    _titleCtrl.dispose();
+    super.dispose();
+  }
+
+  void _seedBuffers() {
+    _titleCtrl.text = _entry.title;
+    _media = _entry.mediaPaths.split('\n').where((p) => p.isNotEmpty).toList();
+    _rich = _entry.richContent;
+    _level = _entry.level;
+    _owner = _entry.ownerPeerId;
+    _titleError = null;
+  }
+
+  Future<void> _loadPeers() async {
+    final db = ref.read(dbProvider);
+    final rows = await db
+        .customSelect(
+          'SELECT DISTINCT peer_id, author FROM chat_messages ORDER BY peer_id',
+        )
+        .get();
+    if (!mounted) return;
+    setState(() => _peers = [
+          for (final r in rows)
+            (id: r.read<String>('peer_id'), name: r.read<String>('author')),
+        ]);
+  }
+
+  void _enterEdit() {
+    _seedBuffers();
+    setState(() => _editing = true);
+    _loadPeers();
+  }
+
+  List<String> get _mediaPaths =>
+      _entry.mediaPaths.split('\n').where((p) => p.isNotEmpty).toList();
+
+  Future<void> _save() async {
+    if (_titleCtrl.text.trim().isEmpty) {
+      setState(() => _titleError = '标题不能为空');
+      return;
+    }
+    final db = ref.read(dbProvider);
+    final id = _entry.id;
+    await (db.update(db.journalEntries)..where((t) => t.id.equals(id)))
+        .write(JournalEntriesCompanion(
+      title: Value(_titleCtrl.text),
+      richContent: Value(_rich),
+      mediaPaths: Value(_media.join('\n')),
+      level: Value(_level),
+      ownerPeerId: Value(_owner),
+      updatedAt: Value(DateTime.now()),
+    ));
+    await db.customStatement(
+      'UPDATE journal_fts SET title=?, content=? WHERE rowid=?',
+      [_titleCtrl.text, _rich, id],
+    );
+    await ref.read(uploadQueueProvider).enqueueForJournal(
+          journalId: id,
+          localPaths: _media,
+          richContent: _rich,
+        );
+    final updated = await (db.select(db.journalEntries)
+          ..where((t) => t.id.equals(id)))
+        .getSingleOrNull();
+    _changed = true;
+    ref.read(journalRefreshProvider.notifier).state++;
+    if (!mounted) return;
+    setState(() {
+      if (updated != null) _entry = updated;
+      _editing = false;
+    });
+  }
+
+  Future<void> _delete() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dctx) => AlertDialog(
+        title: const Text('删除手账'),
+        content: Text('确定删除「${_entry.title}」？此操作不可撤销。'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(dctx, false),
+              child: const Text('取消')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(dctx, true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final db = ref.read(dbProvider);
+    await ref.read(uploadQueueProvider).deleteAllForJournal(_entry.id);
+    await db.deleteJournalById(_entry.id);
+    ref.read(journalRefreshProvider.notifier).state++;
+    if (!mounted) return;
+    Navigator.pop(context, true);
+  }
+
+  Future<void> _addImage(ImageSource source) async {
+    final f = await _picker.pickImage(source: source);
+    if (f == null || !mounted) return;
+    setState(() => _media.add(f.path));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return PopScope(
+      canPop: true,
+      onPopInvokedWithResult: (didPop, result) {
+        // Carry the changed flag back even on system-back / swipe.
+        if (didPop && result == null && _changed) {
+          // Result already gone; refresh is also covered by the provider bump.
+        }
+      },
+      child: _editing ? _buildEdit(context) : _buildView(context),
+    );
+  }
+
+  // ── View ──────────────────────────────────────────────────────────────
+  Widget _buildView(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final tt = Theme.of(context).textTheme;
+    final paths = _mediaPaths;
+    return Scaffold(
+      body: CustomScrollView(
+        slivers: [
+          SliverAppBar.large(
+            leading:
+                BackButton(onPressed: () => Navigator.pop(context, _changed)),
+            title: Text(
+              _entry.title.isEmpty ? '(无标题)' : _entry.title,
+              style: const TextStyle(fontWeight: FontWeight.w700),
+            ),
+            actions: [
+              IconButton(
+                tooltip: '编辑',
+                icon: const Icon(Icons.edit_outlined),
+                onPressed: _enterEdit,
+              ),
+              PopupMenuButton<String>(
+                onSelected: (v) {
+                  if (v == 'delete') _delete();
+                },
+                itemBuilder: (_) => [
+                  const PopupMenuItem(
+                    value: 'delete',
+                    child: ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: Icon(Icons.delete_outline, color: Colors.red),
+                      title: Text('删除', style: TextStyle(color: Colors.red)),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+          SliverPadding(
+            padding: const EdgeInsets.fromLTRB(16, 4, 16, 40),
+            sliver: SliverList.list(children: [
+              // Meta.
+              Wrap(spacing: 16, runSpacing: 6, children: [
+                _meta(Icons.access_time_rounded,
+                    DateFormat('yyyy-MM-dd HH:mm').format(_entry.time)),
+                if ((_entry.ownerPeerId ?? '').isNotEmpty)
+                  _meta(Icons.person_outline, _peerName(_entry.ownerPeerId!)),
+                _meta(
+                    _entry.level == 'private'
+                        ? Icons.lock_outline
+                        : Icons.public,
+                    _entry.level == 'private' ? '私有' : '公开'),
+              ]),
+              const SizedBox(height: 14),
+              // Location map strip.
+              _LocationMapStrip(lat: _entry.lat, lng: _entry.lng),
+              const SizedBox(height: 18),
+              // Rich body.
+              if (_entry.richContent.isNotEmpty)
+                QuillReader(json: _entry.richContent)
+              else
+                Text('（无正文）', style: TextStyle(color: cs.onSurfaceVariant)),
+              // Media.
+              if (paths.isNotEmpty) ...[
+                const SizedBox(height: 18),
+                Text('照片 · ${paths.length}',
+                    style:
+                        tt.labelMedium?.copyWith(color: cs.onSurfaceVariant)),
+                const SizedBox(height: 8),
+                SizedBox(
+                  height: 96,
+                  child: ListView.separated(
+                    scrollDirection: Axis.horizontal,
+                    itemCount: paths.length,
+                    separatorBuilder: (_, __) => const SizedBox(width: 8),
+                    itemBuilder: (_, i) => GestureDetector(
+                      onTap: () => Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          fullscreenDialog: true,
+                          builder: (_) =>
+                              _FullscreenGallery(paths: paths, initialIndex: i),
+                        ),
+                      ),
+                      child: JournalMediaThumb(path: paths[i], size: 96),
+                    ),
+                  ),
+                ),
+              ],
+              _UploadStatusBar(entry: _entry),
+            ]),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── Edit (in place) ─────────────────────────────────────────────────────
+  Widget _buildEdit(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Scaffold(
+      appBar: AppBar(
+        leading: IconButton(
+          icon: const Icon(Icons.close_rounded),
+          tooltip: '取消',
+          onPressed: () => setState(() => _editing = false),
+        ),
+        title:
+            const Text('编辑手账', style: TextStyle(fontWeight: FontWeight.w700)),
+        actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: FilledButton(
+              onPressed: _save,
+              child: const Text('保存'),
+            ),
+          ),
+        ],
+      ),
+      body: ListView(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 40),
+        children: [
+          // Location + time (read-only context).
+          _LocationMapStrip(lat: _entry.lat, lng: _entry.lng),
+          const SizedBox(height: 8),
+          _meta(Icons.access_time_rounded,
+              DateFormat('yyyy-MM-dd HH:mm').format(_entry.time)),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _titleCtrl,
+            decoration: InputDecoration(
+              labelText: '标题（必填）',
+              errorText: _titleError,
+              border: const OutlineInputBorder(),
+            ),
+            onChanged: (_) {
+              if (_titleError != null) setState(() => _titleError = null);
+            },
+          ),
+          const SizedBox(height: 16),
+          // Level segmented.
+          Row(children: [
+            Icon(Icons.lock_outline, size: 18, color: cs.onSurfaceVariant),
+            const SizedBox(width: 10),
+            Expanded(
+              child: SegmentedButton<String>(
+                segments: const [
+                  ButtonSegment(
+                      value: 'public',
+                      label: Text('公开'),
+                      icon: Icon(Icons.public, size: 16)),
+                  ButtonSegment(
+                      value: 'private',
+                      label: Text('私有'),
+                      icon: Icon(Icons.lock_outline, size: 16)),
+                ],
+                selected: {_level},
+                onSelectionChanged: (s) => setState(() => _level = s.first),
+              ),
+            ),
+          ]),
+          const SizedBox(height: 12),
+          // Owner.
+          Row(children: [
+            Icon(Icons.person_outline, size: 18, color: cs.onSurfaceVariant),
+            const SizedBox(width: 10),
+            Expanded(
+              child: DropdownButtonFormField<String?>(
+                value: _owner,
+                isExpanded: true,
+                decoration: const InputDecoration(
+                  labelText: '归属人',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+                items: [
+                  const DropdownMenuItem<String?>(
+                      value: null, child: Text('自己')),
+                  ..._peers.map((p) => DropdownMenuItem<String?>(
+                        value: p.id,
+                        child: Text(
+                            '${p.name}（${p.id.substring(0, p.id.length < 6 ? p.id.length : 6)}…）'),
+                      )),
+                ],
+                onChanged: (v) => setState(() => _owner = v),
+              ),
+            ),
+          ]),
+          const SizedBox(height: 16),
+          // Rich body.
+          OutlinedButton.icon(
+            icon: const Icon(Icons.edit_note_rounded),
+            label: Text(_rich.isEmpty ? '撰写正文（富文本 · 可插图）' : '编辑正文'),
+            style: OutlinedButton.styleFrom(
+                minimumSize: const Size.fromHeight(48)),
+            onPressed: () async {
+              final r = await Navigator.push<String>(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => QuillEditorScreen(
+                    initialJson: _rich,
+                    title: _titleCtrl.text.isEmpty ? '正文' : _titleCtrl.text,
+                  ),
+                ),
+              );
+              if (r != null) setState(() => _rich = r);
+            },
+          ),
+          if (_rich.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: cs.surfaceContainerHigh,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Text(
+                quillToPreview(_rich),
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(color: cs.onSurfaceVariant, height: 1.4),
+              ),
+            ),
+          ],
+          const SizedBox(height: 18),
+          // Media.
+          Text('照片', style: Theme.of(context).textTheme.labelLarge),
+          const SizedBox(height: 8),
+          Wrap(spacing: 8, children: [
+            OutlinedButton.icon(
+              onPressed: () => _addImage(ImageSource.camera),
+              icon: const Icon(Icons.camera_alt_outlined, size: 18),
+              label: const Text('拍照'),
+            ),
+            OutlinedButton.icon(
+              onPressed: () => _addImage(ImageSource.gallery),
+              icon: const Icon(Icons.photo_library_outlined, size: 18),
+              label: const Text('图库'),
+            ),
+          ]),
+          if (_media.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            SizedBox(
+              height: 76,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                itemCount: _media.length,
+                separatorBuilder: (_, __) => const SizedBox(width: 6),
+                itemBuilder: (_, i) => Stack(
+                  children: [
+                    JournalMediaThumb(path: _media[i], size: 72),
+                    Positioned(
+                      top: 2,
+                      right: 2,
+                      child: GestureDetector(
+                        onTap: () => setState(() => _media.removeAt(i)),
+                        child: const CircleAvatar(
+                          radius: 10,
+                          backgroundColor: Colors.black54,
+                          child:
+                              Icon(Icons.close, size: 13, color: Colors.white),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+          const SizedBox(height: 28),
+          Center(
+            child: TextButton.icon(
+              onPressed: _delete,
+              icon: const Icon(Icons.delete_outline, size: 18),
+              label: const Text('删除这条手账'),
+              style: TextButton.styleFrom(foregroundColor: Colors.red),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _peerName(String id) {
+    for (final p in _peers) {
+      if (p.id == id) return p.name;
+    }
+    return id.length <= 6 ? id : '${id.substring(0, 6)}…';
+  }
+
+  Widget _meta(IconData icon, String text) {
+    final c = Theme.of(context).colorScheme.onSurfaceVariant;
+    return Row(mainAxisSize: MainAxisSize.min, children: [
+      Icon(icon, size: 15, color: c),
+      const SizedBox(width: 5),
+      Text(text, style: TextStyle(fontSize: 13, color: c)),
+    ]);
+  }
+}
+
+/// A compact, lightly-interactive map showing one journal's location. Uses the
+/// app's configured tile provider + the same GCJ-02 conversion as the main map
+/// so the pin lands where it should.
+class _LocationMapStrip extends ConsumerWidget {
+  final double lat, lng; // WGS84
+  const _LocationMapStrip({required this.lat, required this.lng});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final s = ref.watch(settingsProvider);
+    final LatLng disp;
+    if (CoordConverter.needsGcj02(s.mapProvider)) {
+      final g = CoordConverter.wgs84ToGcj02(lat, lng);
+      disp = LatLng(g.lat, g.lng);
+    } else {
+      disp = LatLng(lat, lng);
+    }
+    final cs = Theme.of(context).colorScheme;
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(16),
+      child: SizedBox(
+        height: 168,
+        child: Stack(
+          children: [
+            FlutterMap(
+              options: MapOptions(
+                initialCenter: disp,
+                initialZoom: 14,
+                interactionOptions: const InteractionOptions(
+                  flags: InteractiveFlag.pinchZoom | InteractiveFlag.drag,
+                ),
+              ),
+              children: [
+                buildTileLayer(
+                  provider: s.mapProvider,
+                  style: s.mapStyle,
+                  amapKey: s.amapApiKey,
+                  googleKey: s.googleMapKey,
+                  customOsmUrl: s.customOsmTileUrl,
+                ),
+                MarkerLayer(markers: [
+                  Marker(
+                    point: disp,
+                    width: 44,
+                    height: 50,
+                    alignment: Alignment.bottomCenter,
+                    child: const _LocationPin(),
+                  ),
+                ]),
+              ],
+            ),
+            // Coordinate chip.
+            Positioned(
+              left: 10,
+              bottom: 10,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: cs.surface.withValues(alpha: 0.82),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  '${lat.toStringAsFixed(5)}, ${lng.toStringAsFixed(5)}',
+                  style: TextStyle(
+                      fontSize: 11,
+                      fontFamily: 'monospace',
+                      color: cs.onSurface),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _LocationPin extends StatelessWidget {
+  const _LocationPin();
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 34,
+          height: 34,
+          decoration: BoxDecoration(
+            color: cs.primary,
+            shape: BoxShape.circle,
+            border: Border.all(color: Colors.white, width: 2.5),
+            boxShadow: [
+              BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.3),
+                  blurRadius: 6,
+                  offset: const Offset(0, 2)),
+            ],
+          ),
+          child: Icon(Icons.place_rounded, color: cs.onPrimary, size: 20),
+        ),
+      ],
+    );
+  }
 }

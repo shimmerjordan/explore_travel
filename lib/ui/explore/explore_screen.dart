@@ -7,6 +7,7 @@ import '../../data/iso_countries.dart';
 import '../../data/iso_country_areas.dart';
 import '../../services/fog/fog_engine.dart';
 import '../../services/geo/learned_regions.dart';
+import '../common/atmosphere.dart';
 
 /// Exploration progress, organised by continent → country pixel grid.
 ///
@@ -30,10 +31,12 @@ class _ExploreScreenState extends ConsumerState<ExploreScreen> {
   // countryNameOrCode → optional region map for the country detail sheet
   final Map<String, Map<String, double>> _regionPct = {};
   double _globalPercent = 0;
+
   /// Weighted average per-country progress, weighted by real country area
   /// (km², from [kCountryAreasKm2]). Approximates "how much of Earth's
   /// actual land have I covered" without needing per-cell geocoding.
   double _landPercent = 0;
+
   /// Regions the geocoder has confirmed during real visits. Merged in
   /// "learned overrides bundled" semantics: if a region appears in both
   /// the bundled file and here, [_pct] is replaced by a learned-bbox
@@ -59,8 +62,7 @@ class _ExploreScreenState extends ConsumerState<ExploreScreen> {
     final fog = ref.read(fogEngineProvider);
     final db = ref.read(dbProvider);
     final layers = await db.allLayers();
-    final layerIds =
-        layers.where((l) => l.visible).map((l) => l.id).toList();
+    final layerIds = layers.where((l) => l.visible).map((l) => l.id).toList();
 
     // Same calc as home stats card — both go through
     // [FogEngine.globalExplorationPercent] which is revealed km² / Earth
@@ -75,8 +77,8 @@ class _ExploreScreenState extends ConsumerState<ExploreScreen> {
     // when bundled rects overlap.
     if (data != null) {
       final countries = data['countries'] as Map<String, dynamic>;
-      final regionBboxes =
-          <String, ({double minLat, double minLng, double maxLat, double maxLng})>{};
+      final regionBboxes = <String,
+          ({double minLat, double minLng, double maxLat, double maxLng})>{};
       // For each country, register both the country-level bbox and each
       // of its sub-regions. Keys include a "kind|name" prefix so we can
       // tell them apart when reading back.
@@ -110,18 +112,20 @@ class _ExploreScreenState extends ConsumerState<ExploreScreen> {
       // only country-level bboxes, once with only province-level. Province
       // dedup keeps adjacent provinces honest; country dedup is a no-op
       // for non-overlapping countries but still safe.
-      final countryOnly = <String, ({double minLat, double minLng, double maxLat, double maxLng})>{
+      final countryOnly = <String,
+          ({double minLat, double minLng, double maxLat, double maxLng})>{
         for (final e in regionBboxes.entries)
           if (e.key.startsWith('country|')) e.key: e.value,
       };
-      final provOnly = <String, ({double minLat, double minLng, double maxLat, double maxLng})>{
+      final provOnly = <String,
+          ({double minLat, double minLng, double maxLat, double maxLng})>{
         for (final e in regionBboxes.entries)
           if (e.key.startsWith('prov|')) e.key: e.value,
       };
-      final countryKm2 = await fog.revealedAreaByRegionsKm2(layerIds,
-          regions: countryOnly);
-      final provKm2 = await fog.revealedAreaByRegionsKm2(layerIds,
-          regions: provOnly);
+      final countryKm2 =
+          await fog.revealedAreaByRegionsKm2(layerIds, regions: countryOnly);
+      final provKm2 =
+          await fog.revealedAreaByRegionsKm2(layerIds, regions: provOnly);
 
       for (final entry in countries.entries) {
         final country = entry.key;
@@ -208,8 +212,8 @@ class _ExploreScreenState extends ConsumerState<ExploreScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final totalCountries = kContinents.values
-        .fold<int>(0, (a, list) => a + list.length);
+    final totalCountries =
+        kContinents.values.fold<int>(0, (a, list) => a + list.length);
     final visitedCountries = kContinents.values
         .expand((l) => l)
         .where((e) => _lookupPct(e) > 0)
@@ -319,27 +323,42 @@ class _GlobalCard extends StatelessWidget {
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-      child: Container(
-        padding: const EdgeInsets.all(20),
-        decoration: BoxDecoration(
-          gradient: const LinearGradient(
-            colors: [Color(0xFF26A69A), Color(0xFF00897B)],
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-          ),
-          borderRadius: BorderRadius.circular(18),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(18),
+        child: Stack(
           children: [
-            _row('全球（含海洋）', globalPercent, Icons.public),
-            const SizedBox(height: 14),
-            _row('陆地（按国家面积加权）', landPercent, Icons.landscape_outlined),
-            const SizedBox(height: 12),
-            Text(
-              '已涉足 $visited / $total 个国家/地区',
-              style:
-                  const TextStyle(color: Colors.white70, fontSize: 13),
+            // Base brand gradient.
+            const Positioned.fill(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [Color(0xFF26A69A), Color(0xFF00897B)],
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                  ),
+                ),
+              ),
+            ),
+            // Drifting fog + light motes — the "clearing the fog" motif made
+            // ambient. Drag across the card to part the motes.
+            const Positioned.fill(
+              child: Atmosphere(intensity: 0.9),
+            ),
+            Padding(
+              padding: const EdgeInsets.all(20),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _row('全球（含海洋）', globalPercent, Icons.public),
+                  const SizedBox(height: 14),
+                  _row('陆地（按国家面积加权）', landPercent, Icons.landscape_outlined),
+                  const SizedBox(height: 12),
+                  Text(
+                    '已涉足 $visited / $total 个国家/地区',
+                    style: const TextStyle(color: Colors.white70, fontSize: 13),
+                  ),
+                ],
+              ),
             ),
           ],
         ),
@@ -359,10 +378,11 @@ class _LearnedRegionsCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     // Group by country → unique provinces and unique cities.
-    final byCountry = <String, ({Set<String> provinces, Set<String> cities, int points})>{};
+    final byCountry =
+        <String, ({Set<String> provinces, Set<String> cities, int points})>{};
     for (final r in learned) {
-      final cur = byCountry.putIfAbsent(
-          r.country, () => (provinces: <String>{}, cities: <String>{}, points: 0));
+      final cur = byCountry.putIfAbsent(r.country,
+          () => (provinces: <String>{}, cities: <String>{}, points: 0));
       if (r.province.isNotEmpty) cur.provinces.add(r.province);
       if (r.city.isNotEmpty) cur.cities.add(r.city);
       final cur2 = byCountry[r.country]!;
@@ -373,8 +393,7 @@ class _LearnedRegionsCard extends StatelessWidget {
       );
     }
     final countries = byCountry.keys.toList()
-      ..sort((a, b) =>
-          byCountry[b]!.points.compareTo(byCountry[a]!.points));
+      ..sort((a, b) => byCountry[b]!.points.compareTo(byCountry[a]!.points));
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
@@ -407,12 +426,11 @@ class _LearnedRegionsCard extends StatelessWidget {
                 child: Row(children: [
                   Expanded(
                       child: Text(c,
-                          style: const TextStyle(
-                              fontWeight: FontWeight.w600))),
+                          style: const TextStyle(fontWeight: FontWeight.w600))),
                   Text(
                       '${v.provinces.length} 省 · ${v.cities.length} 市 · ${v.points} 次',
-                      style: TextStyle(
-                          fontSize: 11, color: cs.onSurfaceVariant)),
+                      style:
+                          TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
                 ]),
               );
             }),
@@ -442,8 +460,7 @@ class _ContinentSection extends StatelessWidget {
     final visited = countries.where((c) => pctOf(c) > 0).length;
     final avg = countries.isEmpty
         ? 0.0
-        : countries.fold<double>(0, (a, c) => a + pctOf(c)) /
-            countries.length;
+        : countries.fold<double>(0, (a, c) => a + pctOf(c)) / countries.length;
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
@@ -456,13 +473,11 @@ class _ContinentSection extends StatelessWidget {
               children: [
                 Text(name,
                     style: const TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w700)),
+                        fontSize: 16, fontWeight: FontWeight.w700)),
                 const SizedBox(width: 8),
                 Text(
                   '$visited / ${countries.length} · ${(avg * 100).toStringAsFixed(10)}%',
-                  style: TextStyle(
-                      fontSize: 12, color: cs.onSurfaceVariant),
+                  style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
                 ),
               ],
             ),
@@ -511,13 +526,11 @@ class _ContinentSection extends StatelessWidget {
                     children: [
                       Text(c.name,
                           style: const TextStyle(
-                              fontSize: 18,
-                              fontWeight: FontWeight.w700)),
+                              fontSize: 18, fontWeight: FontWeight.w700)),
                       Text(
                         '${(pct * 100).toStringAsFixed(10)}%',
                         style: TextStyle(
-                            fontSize: 13,
-                            color: Theme.of(context).hintColor),
+                            fontSize: 13, color: Theme.of(context).hintColor),
                       ),
                     ],
                   ),
@@ -540,8 +553,8 @@ class _ContinentSection extends StatelessWidget {
                 pct == 0
                     ? '尚未涉足。boundary 资源中也可能没有此国家的精细网格 —— 显示为 0% 不一定代表完全没去过。'
                     : '暂无行政区划数据',
-                style: TextStyle(
-                    color: Theme.of(context).hintColor, fontSize: 12),
+                style:
+                    TextStyle(color: Theme.of(context).hintColor, fontSize: 12),
               )
             else ...[
               const Text('行政区进度',

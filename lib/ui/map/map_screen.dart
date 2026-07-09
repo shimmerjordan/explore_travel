@@ -53,6 +53,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   LatLng _center = const LatLng(30.6586, 104.0648);
   _EditMode _editMode = _EditMode.none;
   bool _satellite = false;
+
   /// Current camera rotation in degrees, mirrored from `_mapCtrl` via
   /// the `onMapEvent` callback. Reading `_mapCtrl.camera.rotation`
   /// directly during build() throws "FlutterMap not rendered yet" on
@@ -72,6 +73,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   // Raw WGS-84 position — always stored in WGS-84
   double? _wgsLat;
   double? _wgsLng;
+
   /// Heading in degrees (0 = north, clockwise). Sourced from Geolocator
   /// when moving > a small threshold; null when stationary so the arrow
   /// collapses back to a plain dot.
@@ -82,6 +84,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   /// chip top-center on the map. `null` = we've never received a fix
   /// in this session (cold-start or indoors with no GPS lock).
   double? _accuracyMeters;
+
   /// When the last accuracy update arrived. Non-null means "we have had at
   /// least one fix this session", which is all the signal chip needs to
   /// distinguish "located" from "无定位". It deliberately does NOT decay
@@ -187,10 +190,10 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   final Set<int> _hiddenJournalIds = {};
   bool _allPinsHidden = false;
   void _reloadJournalPins() {
-    _journalPinsFuture =
-        ref.read(dbProvider).recentJournal(limit: 100);
+    _journalPinsFuture = ref.read(dbProvider).recentJournal(limit: 100);
     _journalPinsRev++;
   }
+
   StreamSubscription<List<GroupPeer>>? _groupPeerSub;
   Timer? _peerRefreshTimer;
 
@@ -227,8 +230,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
           });
           // Trigger marker re-render every 10s so "stale > 30s" visuals update
           // even when no new peer message arrives.
-          _peerRefreshTimer =
-              Timer.periodic(const Duration(seconds: 10), (_) {
+          _peerRefreshTimer = Timer.periodic(const Duration(seconds: 10), (_) {
             final cur = ref.read(groupPeersProvider);
             ref.read(groupPeersProvider.notifier).state = [...cur];
           });
@@ -352,8 +354,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     ref.read(currentDisplayPositionProvider.notifier).state =
         (lat: _wgsLat!, lng: _wgsLng!);
     if (!ref.read(settingsProvider).geocodingPrewarm) return;
-    final cell =
-        '${(_wgsLat! / 0.01).floor()},${(_wgsLng! / 0.01).floor()}';
+    final cell = '${(_wgsLat! / 0.01).floor()},${(_wgsLng! / 0.01).floor()}';
     final now = DateTime.now();
     if (cell == _lastPrewarmCell) return;
     if (_lastPrewarm != null &&
@@ -399,7 +400,8 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   }
 
   void _simStep() {
-    final dLat = _simStepMeters / 111320.0 * math.cos(_simBearing * math.pi / 180);
+    final dLat =
+        _simStepMeters / 111320.0 * math.cos(_simBearing * math.pi / 180);
     final dLng = _simStepMeters /
         (111320.0 * math.cos(_simLat * math.pi / 180)) *
         math.sin(_simBearing * math.pi / 180);
@@ -468,8 +470,8 @@ class _MapScreenState extends ConsumerState<MapScreen> {
           layerId: l.id,
           lineColor: l.pathColor == null
               ? null
-              : Color(l.pathColor!).withValues(
-                  alpha: (l.pathOpacity ?? 0.6).clamp(0.0, 1.0)),
+              : Color(l.pathColor!)
+                  .withValues(alpha: (l.pathOpacity ?? 0.6).clamp(0.0, 1.0)),
           widthMeters: l.pathWidth ?? settings.trailWidth,
         ),
     ];
@@ -482,8 +484,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
 
     return Scaffold(
       extendBody: true,
-      floatingActionButtonLocation:
-          FloatingActionButtonLocation.centerDocked,
+      floatingActionButtonLocation: FloatingActionButtonLocation.centerDocked,
       floatingActionButton: _CenterRecFab(
         recording: recording,
         onTap: () async {
@@ -510,7 +511,8 @@ class _MapScreenState extends ConsumerState<MapScreen> {
             // Background recording reliably fails on every major
             // Chinese ROM without this. Gated on a SharedPreferences
             // flag so we only ask once per install.
-            if (err == null && defaultTargetPlatform == TargetPlatform.android) {
+            if (err == null &&
+                defaultTargetPlatform == TargetPlatform.android) {
               _maybeOfferPermissionWalkthrough();
             }
           }
@@ -538,191 +540,192 @@ class _MapScreenState extends ConsumerState<MapScreen> {
             onPointerUp: _onPointerUp,
             onPointerCancel: _onPointerUp,
             child: FlutterMap(
-            mapController: _mapCtrl,
-            options: MapOptions(
-              initialCenter: _center,
-              initialZoom: 13,
-              initialRotation: 0,
-              // Floor the zoom so the map always fills the screen — below
-              // this the world is smaller than a tall viewport and the grey
-              // backdrop showed through as a full-white screen. Combined with
-              // the world cameraConstraint below, zoom-out stops at a filled
-              // view (you see most of the world, not blank margins).
-              minZoom: 3,
-              maxZoom: 19,
-              cameraConstraint: CameraConstraint.contain(
-                bounds: LatLngBounds(
-                  const LatLng(-85.05, -180),
-                  const LatLng(85.05, 180),
-                ),
-              ),
-              // A neutral loading-grey for not-yet-fetched tiles — reads as
-              // "map loading", never a black hole, even when a fast zoom
-              // momentarily clears every tile.
-              backgroundColor: const Color(0xFFE6E8EB),
-              interactionOptions: InteractionOptions(
-                // Rotation is opt-in (default off): most two-finger gestures
-                // are just pinch-zoom, so by default we strip the rotate flag
-                // entirely — no accidental tilt. When the user enables it, a
-                // high rotation threshold still ignores small twists during a
-                // pinch, and the top-right compass snaps back to north.
-                flags: settings.allowMapRotation
-                    ? InteractiveFlag.all
-                    : InteractiveFlag.all & ~InteractiveFlag.rotate,
-                rotationThreshold: 25.0,
-              ),
-              onPositionChanged: (camera, hasGesture) {
-                // A user-driven pan/zoom/rotate breaks auto-follow so the
-                // map stops yanking back to centre while they look around.
-                // Programmatic moves (our own follow re-centring, the locate
-                // FAB) report hasGesture == false, so they don't disarm it.
-                if (hasGesture && _followCamera) {
-                  setState(() => _followCamera = false);
-                }
-              },
-              onMapEvent: (e) {
-                // Mirror the camera's rotation into local state so
-                // build() can render the compass chip without ever
-                // touching `_mapCtrl.camera` (which throws before
-                // the first frame). After the first onMapReady the
-                // camera is safe to read here.
-                if (e is MapEventRotate ||
-                    e is MapEventRotateStart ||
-                    e is MapEventRotateEnd ||
-                    e is MapEventMoveEnd) {
-                  if (!mounted) return;
-                  setState(() => _mapRotation = e.camera.rotation);
-                }
-                // Track whether we're pressed against the zoom floor; that's
-                // the only time pinch-in attempts count toward the 3D globe.
-                final atMin = e.camera.zoom <= _kMinZoom + 0.05;
-                if (atMin != _atMinZoom) {
-                  if (mounted) setState(() => _atMinZoom = atMin);
-                }
-                // Zooming back in cancels the streak.
-                if (!atMin && _zoomOutTries != 0) {
-                  _zoomTriesReset?.cancel();
-                  if (mounted) setState(() => _zoomOutTries = 0);
-                }
-                // Web has no two-finger pinch — count mouse-wheel zoom-out
-                // ticks while pressed against the floor as the path into the
-                // 3D globe (parity with the 3× pinch gesture on mobile).
-                if (kIsWeb &&
-                    e is MapEventScrollWheelZoom &&
-                    atMin &&
-                    e.camera.zoom <= _prevZoom + 0.001) {
-                  _registerZoomOutTry();
-                }
-                _prevZoom = e.camera.zoom;
-              },
-              onTap: (tapPos, latlng) => _onMapTap(latlng, activeLayerId),
-              onLongPress: (kDebugMode || ref.read(settingsProvider).debugMode)
-                  ? (tapPos, latlng) {
-                      final wgs =
-                          _fromDisplay(latlng.latitude, latlng.longitude);
-                      setState(() {
-                        _simActive = true;
-                        _simLat = wgs.latitude;
-                        _simLng = wgs.longitude;
-                        _wgsLat = wgs.latitude;
-                        _wgsLng = wgs.longitude;
-                      });
-                    }
-                  : null,
-            ),
-            children: [
-              // Tile layer — always rendered at full brightness. Dark mode
-              // is no longer a client-side invert of the raster (which
-              // dimmed the explored trail too); instead the fog veil below
-              // turns dark, so walked corridors reveal the bright original
-              // map exactly as in light mode while everything else is
-              // pressed dark. See the FogLayer's dark veil below.
-              buildTileLayer(
-                provider: settings.mapProvider,
-                style: settings.mapStyle,
-                amapKey: settings.amapApiKey,
-                googleKey: settings.googleMapKey,
-                customOsmUrl: settings.customOsmTileUrl,
-              ),
-              // Explored-area fog, baked into real map tiles so it pans/zooms
-              // pixel-for-pixel with the base map (fixed thickness, no custom
-              // per-zoom re-rasterisation). Rendered whenever there are visible
-              // layers OR dark mode is on (empty data → a solid dark scrim).
-              // Gated on settings.loaded: painting with the not-yet-loaded
-              // default veil colour / widths flashed a wrong first frame on
-              // every cold start.
-              if (settings.loaded &&
-                  (visibleLayerIds.isNotEmpty || settings.darkMap))
-                FogTileLayer(
-                  db: ref.read(dbProvider),
-                  layerIds: visibleLayerIds,
-                  veil: fogVeil,
-                  mapProvider: settings.mapProvider,
-                  refreshKey: fogRefresh,
-                  // Live reveal/erase rows merge into the snapshot in memory;
-                  // fogRefresh (imports, layer ops) still forces a full reload.
-                  changes: ref.read(fogEngineProvider).changes,
-                ),
-              // Optional decorative coloured line along recorded trails (drawn
-              // over the fog tiles). No-op for imported data (no TrackPoints).
-              if (settings.loaded && visibleLayerIds.isNotEmpty)
-                FogLayer(
-                  db: ref.read(dbProvider),
-                  layers: fogStyles,
-                  penRadiusMeters: settings.fogPenRadius,
-                  refreshKey: fogRefresh,
-                  mapProvider: settings.mapProvider,
-                  livePoints:
-                      ref.read(recordingControllerProvider).livePoints,
-                ),
-              if (displayPos != null)
-                MarkerLayer(markers: [
-                  Marker(
-                    point: displayPos,
-                    width: 36,
-                    height: 36,
-                    child: _LocationDot(
-                        simulated: _simActive, heading: _heading),
+              mapController: _mapCtrl,
+              options: MapOptions(
+                initialCenter: _center,
+                initialZoom: 13,
+                initialRotation: 0,
+                // Floor the zoom so the map always fills the screen — below
+                // this the world is smaller than a tall viewport and the grey
+                // backdrop showed through as a full-white screen. Combined with
+                // the world cameraConstraint below, zoom-out stops at a filled
+                // view (you see most of the world, not blank margins).
+                minZoom: 3,
+                maxZoom: 19,
+                cameraConstraint: CameraConstraint.contain(
+                  bounds: LatLngBounds(
+                    const LatLng(-85.05, -180),
+                    const LatLng(85.05, 180),
                   ),
-                ]),
-              _PeerTrailsLayer(toDisplay: _toDisplay),
-              // Journal pins — tappable thumbnail bubbles for every recent
-              // entry. Loaded once and refreshed on save/delete. Hidden
-              // wholesale (when [_allPinsHidden]) or per-pin (when its id is
-              // in [_hiddenJournalIds]).
-              if (!_allPinsHidden)
-                FutureBuilder<List<db_t.JournalEntry>>(
-                  key: ValueKey('journal-pins-$_journalPinsRev'),
-                  future: _journalPinsFuture,
-                  builder: (ctx, snap) {
-                    final list = (snap.data ?? const <db_t.JournalEntry>[])
-                        .where((j) => !_hiddenJournalIds.contains(j.id))
-                        .toList();
-                    if (list.isEmpty) return const SizedBox.shrink();
-                    // Pin size. On NATIVE pins scale with zoom; on WEB the
-                    // per-frame rebuild of every marker is the main zoom jank,
-                    // so pins are a FIXED size there (no camera read at all).
-                    // Native reads the camera through a QUANTISED bucket
-                    // (0.1 zoom): the builder below re-runs per frame, but it
-                    // returns the CACHED MarkerLayer instance until the bucket
-                    // actually flips, so the O(entries) marker/pin subtree —
-                    // including Image.file thumbnails — is not rebuilt while
-                    // panning or during sub-bucket zoom.
-                    if (kIsWeb) return _buildPinLayer(list, 1.0);
-                    return _ZoomBucketed(
-                      buckets: 10, // 0.1-zoom steps
-                      builder: (ctx, zoomBucket) {
-                        final double scale = math
-                            .pow(2.0, zoomBucket - 16.0)
-                            .toDouble()
-                            .clamp(0.5, 3.0);
-                        return _buildPinLayer(list, scale);
-                      },
-                    );
-                  },
                 ),
-            ],
-          ),
+                // A neutral loading-grey for not-yet-fetched tiles — reads as
+                // "map loading", never a black hole, even when a fast zoom
+                // momentarily clears every tile.
+                backgroundColor: const Color(0xFFE6E8EB),
+                interactionOptions: InteractionOptions(
+                  // Rotation is opt-in (default off): most two-finger gestures
+                  // are just pinch-zoom, so by default we strip the rotate flag
+                  // entirely — no accidental tilt. When the user enables it, a
+                  // high rotation threshold still ignores small twists during a
+                  // pinch, and the top-right compass snaps back to north.
+                  flags: settings.allowMapRotation
+                      ? InteractiveFlag.all
+                      : InteractiveFlag.all & ~InteractiveFlag.rotate,
+                  rotationThreshold: 25.0,
+                ),
+                onPositionChanged: (camera, hasGesture) {
+                  // A user-driven pan/zoom/rotate breaks auto-follow so the
+                  // map stops yanking back to centre while they look around.
+                  // Programmatic moves (our own follow re-centring, the locate
+                  // FAB) report hasGesture == false, so they don't disarm it.
+                  if (hasGesture && _followCamera) {
+                    setState(() => _followCamera = false);
+                  }
+                },
+                onMapEvent: (e) {
+                  // Mirror the camera's rotation into local state so
+                  // build() can render the compass chip without ever
+                  // touching `_mapCtrl.camera` (which throws before
+                  // the first frame). After the first onMapReady the
+                  // camera is safe to read here.
+                  if (e is MapEventRotate ||
+                      e is MapEventRotateStart ||
+                      e is MapEventRotateEnd ||
+                      e is MapEventMoveEnd) {
+                    if (!mounted) return;
+                    setState(() => _mapRotation = e.camera.rotation);
+                  }
+                  // Track whether we're pressed against the zoom floor; that's
+                  // the only time pinch-in attempts count toward the 3D globe.
+                  final atMin = e.camera.zoom <= _kMinZoom + 0.05;
+                  if (atMin != _atMinZoom) {
+                    if (mounted) setState(() => _atMinZoom = atMin);
+                  }
+                  // Zooming back in cancels the streak.
+                  if (!atMin && _zoomOutTries != 0) {
+                    _zoomTriesReset?.cancel();
+                    if (mounted) setState(() => _zoomOutTries = 0);
+                  }
+                  // Web has no two-finger pinch — count mouse-wheel zoom-out
+                  // ticks while pressed against the floor as the path into the
+                  // 3D globe (parity with the 3× pinch gesture on mobile).
+                  if (kIsWeb &&
+                      e is MapEventScrollWheelZoom &&
+                      atMin &&
+                      e.camera.zoom <= _prevZoom + 0.001) {
+                    _registerZoomOutTry();
+                  }
+                  _prevZoom = e.camera.zoom;
+                },
+                onTap: (tapPos, latlng) => _onMapTap(latlng, activeLayerId),
+                onLongPress:
+                    (kDebugMode || ref.read(settingsProvider).debugMode)
+                        ? (tapPos, latlng) {
+                            final wgs =
+                                _fromDisplay(latlng.latitude, latlng.longitude);
+                            setState(() {
+                              _simActive = true;
+                              _simLat = wgs.latitude;
+                              _simLng = wgs.longitude;
+                              _wgsLat = wgs.latitude;
+                              _wgsLng = wgs.longitude;
+                            });
+                          }
+                        : null,
+              ),
+              children: [
+                // Tile layer — always rendered at full brightness. Dark mode
+                // is no longer a client-side invert of the raster (which
+                // dimmed the explored trail too); instead the fog veil below
+                // turns dark, so walked corridors reveal the bright original
+                // map exactly as in light mode while everything else is
+                // pressed dark. See the FogLayer's dark veil below.
+                buildTileLayer(
+                  provider: settings.mapProvider,
+                  style: settings.mapStyle,
+                  amapKey: settings.amapApiKey,
+                  googleKey: settings.googleMapKey,
+                  customOsmUrl: settings.customOsmTileUrl,
+                ),
+                // Explored-area fog, baked into real map tiles so it pans/zooms
+                // pixel-for-pixel with the base map (fixed thickness, no custom
+                // per-zoom re-rasterisation). Rendered whenever there are visible
+                // layers OR dark mode is on (empty data → a solid dark scrim).
+                // Gated on settings.loaded: painting with the not-yet-loaded
+                // default veil colour / widths flashed a wrong first frame on
+                // every cold start.
+                if (settings.loaded &&
+                    (visibleLayerIds.isNotEmpty || settings.darkMap))
+                  FogTileLayer(
+                    db: ref.read(dbProvider),
+                    layerIds: visibleLayerIds,
+                    veil: fogVeil,
+                    mapProvider: settings.mapProvider,
+                    refreshKey: fogRefresh,
+                    // Live reveal/erase rows merge into the snapshot in memory;
+                    // fogRefresh (imports, layer ops) still forces a full reload.
+                    changes: ref.read(fogEngineProvider).changes,
+                  ),
+                // Optional decorative coloured line along recorded trails (drawn
+                // over the fog tiles). No-op for imported data (no TrackPoints).
+                if (settings.loaded && visibleLayerIds.isNotEmpty)
+                  FogLayer(
+                    db: ref.read(dbProvider),
+                    layers: fogStyles,
+                    penRadiusMeters: settings.fogPenRadius,
+                    refreshKey: fogRefresh,
+                    mapProvider: settings.mapProvider,
+                    livePoints:
+                        ref.read(recordingControllerProvider).livePoints,
+                  ),
+                if (displayPos != null)
+                  MarkerLayer(markers: [
+                    Marker(
+                      point: displayPos,
+                      width: 36,
+                      height: 36,
+                      child: _LocationDot(
+                          simulated: _simActive, heading: _heading),
+                    ),
+                  ]),
+                _PeerTrailsLayer(toDisplay: _toDisplay),
+                // Journal pins — tappable thumbnail bubbles for every recent
+                // entry. Loaded once and refreshed on save/delete. Hidden
+                // wholesale (when [_allPinsHidden]) or per-pin (when its id is
+                // in [_hiddenJournalIds]).
+                if (!_allPinsHidden)
+                  FutureBuilder<List<db_t.JournalEntry>>(
+                    key: ValueKey('journal-pins-$_journalPinsRev'),
+                    future: _journalPinsFuture,
+                    builder: (ctx, snap) {
+                      final list = (snap.data ?? const <db_t.JournalEntry>[])
+                          .where((j) => !_hiddenJournalIds.contains(j.id))
+                          .toList();
+                      if (list.isEmpty) return const SizedBox.shrink();
+                      // Pin size. On NATIVE pins scale with zoom; on WEB the
+                      // per-frame rebuild of every marker is the main zoom jank,
+                      // so pins are a FIXED size there (no camera read at all).
+                      // Native reads the camera through a QUANTISED bucket
+                      // (0.1 zoom): the builder below re-runs per frame, but it
+                      // returns the CACHED MarkerLayer instance until the bucket
+                      // actually flips, so the O(entries) marker/pin subtree —
+                      // including Image.file thumbnails — is not rebuilt while
+                      // panning or during sub-bucket zoom.
+                      if (kIsWeb) return _buildPinLayer(list, 1.0);
+                      return _ZoomBucketed(
+                        buckets: 10, // 0.1-zoom steps
+                        builder: (ctx, zoomBucket) {
+                          final double scale = math
+                              .pow(2.0, zoomBucket - 16.0)
+                              .toDouble()
+                              .clamp(0.5, 3.0);
+                          return _buildPinLayer(list, scale);
+                        },
+                      );
+                    },
+                  ),
+              ],
+            ),
           ),
           if (_editMode != _EditMode.none)
             Positioned(
@@ -751,13 +754,12 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                     SliderTheme(
                       data: SliderTheme.of(context).copyWith(
                         trackHeight: 2,
-                        thumbShape: const RoundSliderThumbShape(
-                            enabledThumbRadius: 8),
-                        overlayShape: const RoundSliderOverlayShape(
-                            overlayRadius: 14),
+                        thumbShape:
+                            const RoundSliderThumbShape(enabledThumbRadius: 8),
+                        overlayShape:
+                            const RoundSliderOverlayShape(overlayRadius: 14),
                         activeTrackColor: Colors.white,
-                        inactiveTrackColor:
-                            Colors.white.withValues(alpha: 0.3),
+                        inactiveTrackColor: Colors.white.withValues(alpha: 0.3),
                         thumbColor: Colors.white,
                         overlayColor: Colors.white24,
                       ),
@@ -861,9 +863,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
             child: Row(
               children: [
                 _MapChip(
-                  icon: _satellite
-                      ? Icons.satellite_alt
-                      : Icons.map_outlined,
+                  icon: _satellite ? Icons.satellite_alt : Icons.map_outlined,
                   onTap: () {
                     setState(() => _satellite = !_satellite);
                     ref.read(settingsProvider.notifier).update((p) =>
@@ -882,8 +882,8 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                   },
                   onTap: () {
                     final providers = MapProvider.values;
-                    final next = providers[(settings.mapProvider.index + 1) %
-                        providers.length];
+                    final next = providers[
+                        (settings.mapProvider.index + 1) % providers.length];
                     ref
                         .read(settingsProvider.notifier)
                         .update((p) => p.copyWith(mapProvider: next));
@@ -1006,7 +1006,8 @@ class _MapScreenState extends ConsumerState<MapScreen> {
             ),
           ),
           // ─── Debug simulation panel ───
-          if ((kDebugMode || ref.watch(settingsProvider).debugMode) && _simActive)
+          if ((kDebugMode || ref.watch(settingsProvider).debugMode) &&
+              _simActive)
             Positioned(
               left: 12,
               bottom: 80,
@@ -1023,7 +1024,8 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                 },
               ),
             ),
-          if ((kDebugMode || ref.watch(settingsProvider).debugMode) && !_simActive)
+          if ((kDebugMode || ref.watch(settingsProvider).debugMode) &&
+              !_simActive)
             Positioned(
               left: 12,
               bottom: 80,
@@ -1046,8 +1048,8 @@ class _MapScreenState extends ConsumerState<MapScreen> {
               child: IgnorePointer(
                 child: Center(
                   child: Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 12, vertical: 5),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
                     decoration: BoxDecoration(
                       color: Colors.black.withValues(alpha: 0.55),
                       borderRadius: BorderRadius.circular(20),
@@ -1068,8 +1070,8 @@ class _MapScreenState extends ConsumerState<MapScreen> {
               child: IgnorePointer(
                 child: Center(
                   child: Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 14, vertical: 8),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
                     decoration: BoxDecoration(
                       color: Colors.black.withValues(alpha: 0.62),
                       borderRadius: BorderRadius.circular(20),
@@ -1078,8 +1080,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                       kIsWeb
                           ? '🌐 再点「−」缩小 ${3 - _zoomOutTries} 次进入 3D 地球'
                           : '🌐 再捏合缩小 ${3 - _zoomOutTries} 次进入 3D 地球',
-                      style: const TextStyle(
-                          color: Colors.white, fontSize: 13),
+                      style: const TextStyle(color: Colors.white, fontSize: 13),
                     ),
                   ),
                 ),
@@ -1186,8 +1187,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     if (_wgsLat == null || _wgsLng == null) {
       // Top toast so this doesn't dock to the bottom Scaffold and
       // hide the centred REC button. Same UX as "已开始记录" etc.
-      TopToast.show(context, '还没有位置',
-          background: Colors.orange.shade700);
+      TopToast.show(context, '还没有位置', background: Colors.orange.shade700);
       return;
     }
     final db = ref.read(dbProvider);
@@ -1208,24 +1208,42 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     showModalBottomSheet<void>(
       useRootNavigator: true,
       context: context,
-      backgroundColor: Theme.of(context).colorScheme.surfaceContainerHigh,
+      showDragHandle: true,
+      backgroundColor: Theme.of(context).colorScheme.surfaceContainerLow,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
       builder: (sheetCtx) => SafeArea(
         child: SizedBox(
-          height: MediaQuery.of(context).size.height * 0.5,
+          height: MediaQuery.of(context).size.height * 0.55,
           child: Column(
             children: [
               Padding(
-                padding: const EdgeInsets.fromLTRB(16, 16, 8, 8),
+                padding: const EdgeInsets.fromLTRB(20, 0, 12, 10),
                 child: Row(
                   children: [
-                    const Expanded(
-                      child: Text('附近 ~5km 的旅行手账',
-                          style: TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w600)),
+                    Icon(Icons.near_me_rounded,
+                        size: 20, color: Theme.of(context).colorScheme.primary),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Text('附近的旅行手账',
+                              style: TextStyle(
+                                  fontSize: 17, fontWeight: FontWeight.w700)),
+                          Text(
+                              near.isEmpty
+                                  ? '~5km 内暂无'
+                                  : '~5km 内 ${near.length} 条',
+                              style: TextStyle(
+                                  fontSize: 12,
+                                  color: Theme.of(context)
+                                      .colorScheme
+                                      .onSurfaceVariant)),
+                        ],
+                      ),
                     ),
                     FilledButton.icon(
                       icon: const Icon(Icons.add_rounded, size: 18),
@@ -1241,27 +1259,24 @@ class _MapScreenState extends ConsumerState<MapScreen> {
               const Divider(height: 1),
               Expanded(
                 child: near.isEmpty
-                    ? const Center(
-                        child: Text('附近还没有手账，点右上角"新建"立即创建'))
+                    ? const Center(child: Text('附近还没有手账，点右上角"新建"立即创建'))
                     : ListView.builder(
                         padding: const EdgeInsets.symmetric(
                             horizontal: 12, vertical: 8),
                         itemCount: near.length,
                         itemBuilder: (_, i) {
                           final j = near[i];
-                          final distance = _distanceMeters(
-                              lat, lng, j.lat, j.lng);
+                          final distance =
+                              _distanceMeters(lat, lng, j.lat, j.lng);
                           return _JournalCard(
                             entry: j,
                             distanceMeters: distance,
                             onTap: () async {
                               Navigator.pop(context);
                               _mapCtrl.move(_toDisplay(j.lat, j.lng), 16);
-                              final changed = await journal_ui
-                                  .showJournalViewer(context, ref, j);
-                              if (changed && mounted) {
-                                setState(_reloadJournalPins);
-                              }
+                              await journal_ui.openJournalDetail(
+                                  context, ref, j);
+                              if (mounted) setState(_reloadJournalPins);
                             },
                           );
                         },
@@ -1361,8 +1376,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           GestureDetector(
-                            onTap: () =>
-                                _editDisplayName(sheetCtx, sheetRef),
+                            onTap: () => _editDisplayName(sheetCtx, sheetRef),
                             child: Row(
                               children: [
                                 Flexible(
@@ -1446,15 +1460,15 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                           value: lvl.progress,
                           minHeight: 8,
                           backgroundColor: Colors.white24,
-                          valueColor: const AlwaysStoppedAnimation(
-                              Color(0xFFFFD54F)),
+                          valueColor:
+                              const AlwaysStoppedAnimation(Color(0xFFFFD54F)),
                         ),
                       ),
                       const SizedBox(height: 6),
                       Text(
                         'Lv ${lvl.level}  ·  ${(lvl.progress * 100).toStringAsFixed(0)}%  ·  已探索 ${_fmtArea(exploredKm2)}',
-                        style:
-                            const TextStyle(color: Colors.white70, fontSize: 11),
+                        style: const TextStyle(
+                            color: Colors.white70, fontSize: 11),
                       ),
                     ],
                   ),
@@ -1472,11 +1486,9 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                 const SizedBox(height: 16),
                 Row(
                   children: [
-                    Expanded(
-                        child: _StatTile('${tiles.length}', '迷雾区块')),
+                    Expanded(child: _StatTile('${tiles.length}', '迷雾区块')),
                     Expanded(child: _StatTile('$journalCount', '手账数')),
-                    Expanded(
-                        child: _StatTile('${layers.length}', '图层数')),
+                    Expanded(child: _StatTile('${layers.length}', '图层数')),
                   ],
                 ),
                 const SizedBox(height: 20),
@@ -1518,8 +1530,8 @@ class _MapScreenState extends ConsumerState<MapScreen> {
       // gossip frame, so refuse rather than chain-degrade everyone.
       if (b64.length > 40000) {
         if (ctx.mounted) {
-          ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(
-              content: Text('图片过大，请选择更小或更低质量的照片')));
+          ScaffoldMessenger.of(ctx).showSnackBar(
+              const SnackBar(content: Text('图片过大，请选择更小或更低质量的照片')));
         }
         return;
       }
@@ -1535,8 +1547,8 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   }
 
   Future<void> _editDisplayName(BuildContext ctx, WidgetRef ref) async {
-    final ctrl = TextEditingController(
-        text: ref.read(settingsProvider).displayName);
+    final ctrl =
+        TextEditingController(text: ref.read(settingsProvider).displayName);
     final ok = await showDialog<bool>(
       context: ctx,
       builder: (dctx) => AlertDialog(
@@ -1620,11 +1632,8 @@ class _MapScreenState extends ConsumerState<MapScreen> {
           rotate: true,
           child: GestureDetector(
             onTap: () async {
-              final changed =
-                  await journal_ui.showJournalViewer(context, ref, j);
-              if (changed && mounted) {
-                setState(_reloadJournalPins);
-              }
+              await journal_ui.openJournalDetail(context, ref, j);
+              if (mounted) setState(_reloadJournalPins);
             },
             onLongPress: () => _showPinHideMenu(j),
             child: FittedBox(
@@ -1799,6 +1808,7 @@ class _SimPanel extends StatelessWidget {
 
 class _LocationDot extends StatelessWidget {
   final bool simulated;
+
   /// Degrees clockwise from north. Null → plain dot, no arrow.
   final double? heading;
   const _LocationDot({this.simulated = false, this.heading});
@@ -1925,7 +1935,6 @@ class _MapFab extends StatelessWidget {
   }
 }
 
-
 double _distanceMeters(double lat1, double lng1, double lat2, double lng2) {
   const r = 6371000.0;
   final dLat = (lat2 - lat1) * math.pi / 180;
@@ -1950,16 +1959,15 @@ class _JournalCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final paths = entry.mediaPaths
-        .split('\n')
-        .where((p) => p.isNotEmpty)
-        .toList();
+    final paths =
+        entry.mediaPaths.split('\n').where((p) => p.isNotEmpty).toList();
     final preview = _previewText(entry.richContent);
     final distLabel = distanceMeters < 1000
         ? '${distanceMeters.toStringAsFixed(0)} m'
         : '${(distanceMeters / 1000).toStringAsFixed(1)} km';
     return Card(
       margin: const EdgeInsets.only(bottom: 10),
+      color: Theme.of(context).colorScheme.surfaceContainerHigh,
       clipBehavior: Clip.antiAlias,
       child: InkWell(
         onTap: onTap,
@@ -1970,7 +1978,7 @@ class _JournalCard extends StatelessWidget {
             children: [
               if (paths.isNotEmpty)
                 ClipRRect(
-                  borderRadius: BorderRadius.circular(8),
+                  borderRadius: BorderRadius.circular(10),
                   child: SizedBox(
                     width: 72,
                     height: 72,
@@ -2010,7 +2018,8 @@ class _JournalCard extends StatelessWidget {
                           padding: const EdgeInsets.symmetric(
                               horizontal: 8, vertical: 2),
                           decoration: BoxDecoration(
-                            color: const Color(0xFF26A69A).withValues(alpha: 0.2),
+                            color:
+                                const Color(0xFF26A69A).withValues(alpha: 0.2),
                             borderRadius: BorderRadius.circular(10),
                           ),
                           child: Text(distLabel,
@@ -2279,7 +2288,8 @@ class _CenterRecFabState extends State<_CenterRecFab>
 
   @override
   Widget build(BuildContext context) {
-    final color = widget.recording ? Colors.red.shade700 : const Color(0xFF26A69A);
+    final color =
+        widget.recording ? Colors.red.shade700 : const Color(0xFF26A69A);
     return SizedBox(
       width: 64,
       height: 64,
@@ -2346,8 +2356,7 @@ class _ProfileCard extends ConsumerWidget {
         borderRadius: BorderRadius.circular(24),
         onTap: onTap,
         child: Padding(
-          padding:
-              const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
           child: Row(
             children: [
               _SelfAvatar(
@@ -2395,8 +2404,7 @@ class _StatTile extends StatelessWidget {
                   fontWeight: FontWeight.w700)),
           const SizedBox(height: 2),
           Text(label,
-              style: const TextStyle(
-                  color: Colors.white60, fontSize: 11)),
+              style: const TextStyle(color: Colors.white60, fontSize: 11)),
         ],
       ),
     );
@@ -2507,12 +2515,10 @@ class _PeerMarker extends StatelessWidget {
               color: avatarImg == null ? shown : null,
               image: avatarImg,
               shape: BoxShape.circle,
-              border: Border.all(
-                  color: stale ? Colors.grey : shown, width: 3),
+              border: Border.all(color: stale ? Colors.grey : shown, width: 3),
               boxShadow: [
                 BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.4),
-                    blurRadius: 6),
+                    color: Colors.black.withValues(alpha: 0.4), blurRadius: 6),
               ],
             ),
             alignment: Alignment.center,
@@ -2549,14 +2555,10 @@ class _JournalPin extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final firstImage = entry.mediaPaths
-        .split('\n')
-        .where((p) => p.isNotEmpty)
-        .where((p) {
+    final firstImage =
+        entry.mediaPaths.split('\n').where((p) => p.isNotEmpty).where((p) {
       final l = p.toLowerCase();
-      return !(l.endsWith(".mp4") ||
-          l.endsWith(".mov") ||
-          l.endsWith(".mkv"));
+      return !(l.endsWith(".mp4") || l.endsWith(".mov") || l.endsWith(".mkv"));
     }).firstOrNull;
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -2569,8 +2571,7 @@ class _JournalPin extends StatelessWidget {
             border: Border.all(color: Colors.white, width: 2),
             boxShadow: [
               BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.35),
-                  blurRadius: 4),
+                  color: Colors.black.withValues(alpha: 0.35), blurRadius: 4),
             ],
           ),
           clipBehavior: Clip.antiAlias,
@@ -2646,7 +2647,6 @@ class _PinTailPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
-
 
 // Removed: _FogDiagBadge corner overlay. Diagnostics now live in the
 // debug screen so they don't overlap the map style button. Stub kept to
@@ -2789,8 +2789,7 @@ class _LayerChip extends StatelessWidget {
                                   fontWeight: l.id == liveActive
                                       ? FontWeight.w700
                                       : FontWeight.w500)),
-                          subtitle:
-                              Text(l.id == liveActive ? '★ 当前活动图层' : ''),
+                          subtitle: Text(l.id == liveActive ? '★ 当前活动图层' : ''),
                           trailing: IconButton(
                             icon: Icon(l.visible
                                 ? Icons.visibility
@@ -2915,10 +2914,29 @@ class _SignalChipState extends State<_SignalChip> {
       return (bars: 0, color: Colors.grey, label: '无定位');
     }
     final acc = widget.accuracyMeters ?? 9999;
-    if (acc <= 10) return (bars: 4, color: const Color(0xFF66BB6A), label: '强 · ±${acc.toStringAsFixed(0)} m');
-    if (acc <= 30) return (bars: 3, color: const Color(0xFFAED581), label: '良好 · ±${acc.toStringAsFixed(0)} m');
-    if (acc <= 80) return (bars: 2, color: const Color(0xFFFFB74D), label: '一般 · ±${acc.toStringAsFixed(0)} m');
-    return (bars: 1, color: const Color(0xFFE57373), label: '弱 · ±${acc.toStringAsFixed(0)} m');
+    if (acc <= 10)
+      return (
+        bars: 4,
+        color: const Color(0xFF66BB6A),
+        label: '强 · ±${acc.toStringAsFixed(0)} m'
+      );
+    if (acc <= 30)
+      return (
+        bars: 3,
+        color: const Color(0xFFAED581),
+        label: '良好 · ±${acc.toStringAsFixed(0)} m'
+      );
+    if (acc <= 80)
+      return (
+        bars: 2,
+        color: const Color(0xFFFFB74D),
+        label: '一般 · ±${acc.toStringAsFixed(0)} m'
+      );
+    return (
+      bars: 1,
+      color: const Color(0xFFE57373),
+      label: '弱 · ±${acc.toStringAsFixed(0)} m'
+    );
   }
 
   @override
@@ -2951,9 +2969,7 @@ class _SignalChipState extends State<_SignalChip> {
           Text(
             s.label,
             style: TextStyle(
-                color: s.color,
-                fontSize: 11.5,
-                fontWeight: FontWeight.w600),
+                color: s.color, fontSize: 11.5, fontWeight: FontWeight.w600),
           ),
         ],
       ),

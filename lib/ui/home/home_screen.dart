@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 import '../../app/providers.dart';
+import '../common/atmosphere.dart';
 
 class HomeScreen extends ConsumerWidget {
   const HomeScreen({super.key});
@@ -13,30 +14,32 @@ class HomeScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final cs = Theme.of(context).colorScheme;
     final settings = ref.watch(settingsProvider);
-    // 地图与群组已集成在首页底部导航栏，这里不重复列出。
-    final tiles = <_HomeTile>[
-      _HomeTile('图层与标签', Icons.layers_rounded, '/layers',
-          gradient: const [Color(0xFF42A5F5), Color(0xFF1E88E5)]),
-      _HomeTile('旅行手账', Icons.auto_stories_rounded, '/journal',
-          gradient: const [Color(0xFFAB47BC), Color(0xFF8E24AA)]),
-      _HomeTile('回放 / 总结', Icons.route_rounded, '/playback',
-          gradient: const [Color(0xFFFF7043), Color(0xFFF4511E)]),
-      _HomeTile('探索进度', Icons.explore_rounded, '/explore',
-          gradient: const [Color(0xFF66BB6A), Color(0xFF43A047)]),
-      _HomeTile('AI 旅游规划', Icons.auto_awesome_rounded, '/ai',
-          gradient: const [Color(0xFFFFCA28), Color(0xFFFFA000)]),
-      _HomeTile('旅行歌单', Icons.headphones_rounded, '/music',
-          gradient: const [Color(0xFFEC407A), Color(0xFFD81B60)]),
-      _HomeTile('排行榜', Icons.leaderboard_rounded, '/leaderboard',
-          gradient: const [Color(0xFF5C6BC0), Color(0xFF3949AB)]),
-      _HomeTile('导出与导入', Icons.cloud_sync_rounded, '/backup',
-          gradient: const [Color(0xFF26C6DA), Color(0xFF00ACC1)]),
-      _HomeTile('手账图床', Icons.image_outlined, '/imghost',
-          gradient: const [Color(0xFF9CCC65), Color(0xFF7CB342)]),
-      _HomeTile('组队配置', Icons.groups_rounded, '/group/setup',
-          gradient: const [Color(0xFF7E57C2), Color(0xFF5E35B1)]),
-      _HomeTile('设置', Icons.tune_rounded, '/settings',
-          gradient: const [Color(0xFF78909C), Color(0xFF546E7A)]),
+
+    // 地图与群组已在底部导航；这里不重复。功能不再平铺成等大彩色卡片，而是
+    //  · 一个「探索进度」主入口(收集乐趣的落点，做成 hero)
+    //  · 按意图分组的紧凑入口，层级由使用频率决定(见 PRODUCT.md 原则 4)
+    // 颜色走 Material 3 role(容器色自动适配明暗/对比)，而非硬编码彩虹。
+    const hero = _HomeItem('探索进度', Icons.explore_rounded, '/explore',
+        subtitle: '看看你点亮了多少世界');
+    final sections = <_HomeSection>[
+      const _HomeSection('记录与回顾', _Tint.primary, [
+        _HomeItem('旅行手账', Icons.auto_stories_rounded, '/journal'),
+        _HomeItem('回放 / 总结', Icons.route_rounded, '/playback'),
+        _HomeItem('图层与标签', Icons.layers_rounded, '/layers'),
+        _HomeItem('手账图床', Icons.image_outlined, '/imghost'),
+      ]),
+      const _HomeSection('发现与同行', _Tint.tertiary, [
+        _HomeItem('AI 旅游规划', Icons.auto_awesome_rounded, '/ai'),
+        _HomeItem('旅行歌单', Icons.headphones_rounded, '/music'),
+        _HomeItem('排行榜', Icons.leaderboard_rounded, '/leaderboard'),
+        _HomeItem('组队配置', Icons.groups_rounded, '/group/setup'),
+      ]),
+      _HomeSection('数据与设置', _Tint.secondary, [
+        const _HomeItem('导出与导入', Icons.cloud_sync_rounded, '/backup'),
+        const _HomeItem('设置', Icons.tune_rounded, '/settings'),
+        if (settings.debugMode)
+          const _HomeItem('调试面板', Icons.bug_report_outlined, '/debug'),
+      ]),
     ];
 
     return Scaffold(
@@ -64,60 +67,273 @@ class HomeScreen extends ConsumerWidget {
               ),
             ],
           ),
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: SwitchListTile.adaptive(
-                title: const Text('后台地理预热'),
-                subtitle: const Text('地图平移时偷偷预查行政区，写入本地缓存'),
-                secondary: const Icon(Icons.travel_explore_rounded),
-                value: settings.geocodingPrewarm,
-                onChanged: (v) => ref
-                    .read(settingsProvider.notifier)
-                    .update((p) => p.copyWith(geocodingPrewarm: v)),
-              ),
-            ),
-          ),
+
+          // Hero：核心探索入口，收集乐趣的落点。
           SliverPadding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-            sliver: SliverGrid(
-              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 3,
-                mainAxisSpacing: 12,
-                crossAxisSpacing: 12,
-                childAspectRatio: 0.95,
-              ),
-              delegate: SliverChildBuilderDelegate(
-                (context, i) {
-                  final t = tiles[i];
-                  return _TileCard(tile: t);
-                },
-                childCount: tiles.length,
-              ),
-            ),
+            padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+            sliver: SliverToBoxAdapter(child: _FeaturedTile(item: hero)),
           ),
-          if (settings.debugMode)
-            SliverToBoxAdapter(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: _TileCard(
-                  tile: _HomeTile('调试面板', Icons.bug_report_outlined,
-                      '/debug',
-                      gradient: const [Color(0xFFEF5350), Color(0xFFC62828)]),
+
+          // 分组入口。
+          for (final section in sections) ...[
+            SliverToBoxAdapter(child: _SectionHeader(section.title)),
+            SliverPadding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+              sliver: SliverGrid(
+                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 2,
+                  mainAxisSpacing: 10,
+                  crossAxisSpacing: 10,
+                  mainAxisExtent: 62,
+                ),
+                delegate: SliverChildBuilderDelegate(
+                  (context, i) =>
+                      _CompactTile(item: section.items[i], tint: section.tint),
+                  childCount: section.items.length,
                 ),
               ),
             ),
-          SliverToBoxAdapter(child: _VersionTap()),
+          ],
+
+          // 快捷设置：后台地理预热(高频开关，就近可达)。
+          SliverPadding(
+            padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+            sliver: SliverToBoxAdapter(
+              child: Material(
+                color: cs.surfaceContainerHigh,
+                borderRadius: BorderRadius.circular(16),
+                clipBehavior: Clip.antiAlias,
+                child: SwitchListTile.adaptive(
+                  title: const Text('后台地理预热'),
+                  subtitle: const Text('地图平移时偷偷预查行政区，写入本地缓存'),
+                  secondary: Icon(Icons.travel_explore_rounded,
+                      color: cs.onSurfaceVariant),
+                  value: settings.geocodingPrewarm,
+                  onChanged: (v) => ref
+                      .read(settingsProvider.notifier)
+                      .update((p) => p.copyWith(geocodingPrewarm: v)),
+                ),
+              ),
+            ),
+          ),
+
+          const SliverToBoxAdapter(child: _VersionTap()),
         ],
       ),
     );
   }
 }
 
+/// 分组小标题：Material `titleSmall`，muted，克制。
+class _SectionHeader extends StatelessWidget {
+  final String title;
+  const _SectionHeader(this.title);
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 12, 16, 8),
+      child: Text(
+        title,
+        style: Theme.of(context).textTheme.titleSmall?.copyWith(
+              color: cs.onSurfaceVariant,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.2,
+            ),
+      ),
+    );
+  }
+}
+
+/// Hero 入口：整宽、primary 容器色、图标 + 标题 + 副标题 + 前进指示。
+/// 这是"收集乐趣"的落点——比其它入口更重，建立层级。
+class _FeaturedTile extends StatelessWidget {
+  final _HomeItem item;
+  const _FeaturedTile({required this.item});
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final tt = Theme.of(context).textTheme;
+    return _Pressable(
+      color: cs.primaryContainer,
+      radius: 20,
+      onTap: () => context.push(item.route),
+      child: Stack(
+        children: [
+          // Faint drifting haze — a quiet echo of the exploration surface it
+          // opens (ambient only; the tap owns interaction here).
+          const Positioned.fill(
+            child: Atmosphere(intensity: 0.5, interactive: false),
+          ),
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: Row(
+              children: [
+                Container(
+                  width: 52,
+                  height: 52,
+                  decoration: BoxDecoration(
+                    color: cs.primary,
+                    borderRadius: BorderRadius.circular(15),
+                  ),
+                  child: Icon(item.icon, color: cs.onPrimary, size: 28),
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(item.label,
+                          style: tt.titleMedium?.copyWith(
+                            color: cs.onPrimaryContainer,
+                            fontWeight: FontWeight.w700,
+                          )),
+                      if (item.subtitle != null) ...[
+                        const SizedBox(height: 2),
+                        Text(item.subtitle!,
+                            style: tt.bodySmall?.copyWith(
+                              color:
+                                  cs.onPrimaryContainer.withValues(alpha: 0.75),
+                            )),
+                      ],
+                    ],
+                  ),
+                ),
+                Icon(Icons.chevron_right_rounded,
+                    color: cs.onPrimaryContainer.withValues(alpha: 0.55)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 紧凑入口：tonal 面 + 角色色图标片 + 标签。同组共享同一色相，克制、
+/// 一致，触控目标 ≥ 48dp。
+class _CompactTile extends StatelessWidget {
+  final _HomeItem item;
+  final _Tint tint;
+  const _CompactTile({required this.item, required this.tint});
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final (chipBg, chipFg) = _chipColors(cs, tint);
+    return _Pressable(
+      color: cs.surfaceContainerHigh,
+      radius: 16,
+      onTap: () => context.push(item.route),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 10),
+        child: Row(
+          children: [
+            Container(
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(
+                color: chipBg,
+                borderRadius: BorderRadius.circular(11),
+              ),
+              child: Icon(item.icon, color: chipFg, size: 21),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                item.label,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                      color: cs.onSurface,
+                      fontWeight: FontWeight.w600,
+                      height: 1.15,
+                    ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+(Color, Color) _chipColors(ColorScheme cs, _Tint t) {
+  switch (t) {
+    case _Tint.primary:
+      return (cs.primaryContainer, cs.onPrimaryContainer);
+    case _Tint.secondary:
+      return (cs.secondaryContainer, cs.onSecondaryContainer);
+    case _Tint.tertiary:
+      return (cs.tertiaryContainer, cs.onTertiaryContainer);
+  }
+}
+
+/// 按压微反馈：97% 缩放 + 110ms ease-out，呼应 M3 容器响应，轻盈。
+/// 尊重系统"移除动画"(reduced motion)：关闭时不缩放。
+class _Pressable extends StatefulWidget {
+  final Color color;
+  final double radius;
+  final VoidCallback onTap;
+  final Widget child;
+  const _Pressable({
+    required this.color,
+    required this.radius,
+    required this.onTap,
+    required this.child,
+  });
+  @override
+  State<_Pressable> createState() => _PressableState();
+}
+
+class _PressableState extends State<_Pressable> {
+  bool _pressed = false;
+  @override
+  Widget build(BuildContext context) {
+    final reduceMotion = MediaQuery.of(context).disableAnimations;
+    return AnimatedScale(
+      duration: const Duration(milliseconds: 110),
+      curve: Curves.easeOut,
+      scale: (_pressed && !reduceMotion) ? 0.97 : 1.0,
+      child: Material(
+        color: widget.color,
+        borderRadius: BorderRadius.circular(widget.radius),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: widget.onTap,
+          onTapDown: (_) => setState(() => _pressed = true),
+          onTapUp: (_) => setState(() => _pressed = false),
+          onTapCancel: () => setState(() => _pressed = false),
+          child: widget.child,
+        ),
+      ),
+    );
+  }
+}
+
+class _HomeItem {
+  final String label;
+  final IconData icon;
+  final String route;
+  final String? subtitle;
+  const _HomeItem(this.label, this.icon, this.route, {this.subtitle});
+}
+
+enum _Tint { primary, secondary, tertiary }
+
+class _HomeSection {
+  final String title;
+  final _Tint tint;
+  final List<_HomeItem> items;
+  const _HomeSection(this.title, this.tint, this.items);
+}
+
 /// Tap the version label 10 times to flip [AppSettings.debugMode]. No
 /// visible counter — by design — but each tap nudges a SnackBar past 7
 /// taps so the user knows something's happening.
 class _VersionTap extends ConsumerStatefulWidget {
+  const _VersionTap();
   @override
   ConsumerState<_VersionTap> createState() => _VersionTapState();
 }
@@ -162,7 +378,7 @@ class _VersionTapState extends ConsumerState<_VersionTap> {
   Widget build(BuildContext context) {
     final debug = ref.watch(settingsProvider).debugMode;
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 32),
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
       child: Center(
         child: GestureDetector(
           onTap: _onTap,
@@ -178,92 +394,6 @@ class _VersionTapState extends ConsumerState<_VersionTap> {
       ),
     );
   }
-}
-
-/// Press-scale animation on every home tile — taps feel responsive
-/// even before the route transition starts. 96 % scale + 80 ms ease
-/// matches the M3 motion guidance for "container response". The card
-/// also gains a soft glow border via the gradient end-colour, picked up
-/// in the BoxDecoration boxShadow.
-class _TileCard extends StatefulWidget {
-  final _HomeTile tile;
-  const _TileCard({required this.tile});
-  @override
-  State<_TileCard> createState() => _TileCardState();
-}
-
-class _TileCardState extends State<_TileCard> {
-  bool _pressed = false;
-  @override
-  Widget build(BuildContext context) {
-    final tile = widget.tile;
-    return AnimatedScale(
-      duration: const Duration(milliseconds: 120),
-      curve: Curves.easeOut,
-      scale: _pressed ? 0.96 : 1.0,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 180),
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(18),
-          boxShadow: [
-            BoxShadow(
-              color: tile.gradient.last.withValues(alpha: _pressed ? 0.45 : 0.25),
-              blurRadius: _pressed ? 18 : 12,
-              offset: const Offset(0, 6),
-              spreadRadius: -2,
-            ),
-          ],
-        ),
-        child: Material(
-          borderRadius: BorderRadius.circular(18),
-          clipBehavior: Clip.antiAlias,
-          child: InkWell(
-            onTap: () => context.push(tile.route),
-            onTapDown: (_) => setState(() => _pressed = true),
-            onTapUp: (_) => setState(() => _pressed = false),
-            onTapCancel: () => setState(() => _pressed = false),
-            child: Ink(
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  colors: tile.gradient,
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                ),
-              ),
-              child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(tile.icon, size: 34, color: Colors.white),
-                    const SizedBox(height: 10),
-                    Text(
-                      tile.label,
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                        height: 1.2,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _HomeTile {
-  final String label;
-  final IconData icon;
-  final String route;
-  final List<Color> gradient;
-  _HomeTile(this.label, this.icon, this.route, {required this.gradient});
 }
 
 /// Avatar widget — base64 JPEG when set, otherwise a hue-from-seed
@@ -322,8 +452,7 @@ Future<void> _showProfileSheet(BuildContext context, WidgetRef ref) async {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              Text('个人资料',
-                  style: Theme.of(sheetCtx).textTheme.titleLarge),
+              Text('个人资料', style: Theme.of(sheetCtx).textTheme.titleLarge),
               const SizedBox(height: 16),
               Stack(
                 alignment: Alignment.bottomRight,
@@ -363,8 +492,7 @@ Future<void> _showProfileSheet(BuildContext context, WidgetRef ref) async {
                   labelText: '昵称',
                   border: OutlineInputBorder(),
                 ),
-                onChanged: (v) =>
-                    n.update((p) => p.copyWith(displayName: v)),
+                onChanged: (v) => n.update((p) => p.copyWith(displayName: v)),
               ),
               const SizedBox(height: 16),
               if ((s.selfPeerId ?? '').isNotEmpty)
@@ -440,8 +568,8 @@ Future<void> _pickAvatar(BuildContext context, WidgetRef ref) async {
     final b64 = base64.encode(bytes);
     if (b64.length > 40000) {
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('图片过大，请选择更小或更低质量的照片')));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('图片过大，请选择更小或更低质量的照片')));
       }
       return;
     }
