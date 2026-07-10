@@ -6,6 +6,7 @@ import '../../app/providers.dart';
 import '../../services/leaderboard/leaderboard_contributors.dart';
 import '../../services/leaderboard/leaderboard_model.dart';
 import '../../services/leaderboard/leaderboard_service.dart';
+import '../about/about_screen.dart' show openServerGuide;
 import '../common/pixel.dart';
 
 /// Decentralised leaderboard screen — two tabs:
@@ -98,6 +99,9 @@ class _LeaderboardScreenState extends ConsumerState<LeaderboardScreen> {
                   case 'share_id':
                     await _shareSelfId();
                     break;
+                  case 'guide':
+                    if (mounted) await openServerGuide(context, client: true);
+                    break;
                 }
               },
               itemBuilder: (_) => const [
@@ -136,6 +140,14 @@ class _LeaderboardScreenState extends ConsumerState<LeaderboardScreen> {
                     child: ListTile(
                         leading: Icon(Icons.cloud_outlined),
                         title: Text('配置社区服务器'),
+                        contentPadding: EdgeInsets.zero,
+                        dense: true)),
+                PopupMenuDivider(),
+                PopupMenuItem(
+                    value: 'guide',
+                    child: ListTile(
+                        leading: Icon(Icons.menu_book_outlined),
+                        title: Text('自建服务器指南'),
                         contentPadding: EdgeInsets.zero,
                         dense: true)),
               ],

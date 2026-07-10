@@ -1,0 +1,59 @@
+# explore_journal backend — compose deployment.
+#
+#   基本用法（ECS 上直接暴露端口 / 前面自己套 Nginx）:
+#     docker compose up -d
+#
+#   经 frp 暴露（ECS 无公网入方向 / 想复用现有 frps）:
+#     先填好 deploy/frpc.toml，然后
+#     docker compose --profile frp up -d
+#
+#   经 Cloudflare Tunnel 暴露（免公网 IP、自动 HTTPS/WSS）:
+#     export TUNNEL_TOKEN=eyJ...   # cloudflared 面板生成的 token
+#     docker compose --profile cloudflare up -d
+#
+# 三种方式可叠加。资源占用：服务本体常驻内存 ~40 MB，空闲 CPU ≈ 0。
+
+services:
+  backend:
+    build: .
+    image: explore-journal-backend:latest
+    container_name: ej-backend
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ej-data:/data
+    environment:
+      # 见 README.md「配置项」一节；不设 token 即公开可用。
+      TRUST_PROXY: "1"
+      LB_WRITE_TOKEN: "${LB_WRITE_TOKEN:-}"
+      GROUP_TOKEN: "${GROUP_TOKEN:-}"
+      LOG_LEVEL: info
+    # 小实例友好：硬性内存上限，防止意外增长挤占同机其他服务。
+    mem_limit: 256m
+    cpus: 0.5
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # ── 可选：frpc 旁路容器（--profile frp）────────────────────────────
+  frpc:
+    image: snowdreamtech/frpc:0.61.1
+    container_name: ej-frpc
+    restart: unless-stopped
+    profiles: [frp]
+    network_mode: "service:backend" # 直接以 127.0.0.1:8080 访问后端
+    volumes:
+      - ./deploy/frpc.toml:/etc/frp/frpc.toml:ro
+
+  # ── 可选：Cloudflare Tunnel 旁路容器（--profile cloudflare）────────
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: ej-cloudflared
+    restart: unless-stopped
+    profiles: [cloudflare]
+    network_mode: "service:backend"
+    command: tunnel --no-autoupdate run --token ${TUNNEL_TOKEN:-}
+
+volumes:
+  ej-data:

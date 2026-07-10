@@ -1,0 +1,55 @@
+name: Backend (leaderboard + group relay)
+
+# Validates backends/ on every change: unit suite (incl. the Dart-generated
+# cross-language signature vector), then the production Docker image is
+# built and driven through the full container-level E2E — all API
+# endpoints, data correctness, WS relay, token enforcement, and
+# volume persistence across `docker restart`.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backends/**'
+      - '.github/workflows/backend.yml'
+  pull_request:
+    paths:
+      - 'backends/**'
+      - '.github/workflows/backend.yml'
+  workflow_dispatch: {}
+
+concurrency:
+  group: backend-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-docker-e2e:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backends
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Unit + integration suite: canonical-JSON/Ed25519 cross-language
+      # vector, leaderboard API behaviour (LWW/TOFU/token/persistence),
+      # WS relay routing. Zero npm dependencies → no install step.
+      - name: Unit tests (node --test)
+        run: npm test
+
+      # Build the production image and run the container-level E2E twice
+      # (open mode + auth mode). This is the exact image an ECS deploy
+      # would run, including non-root user, volume and healthcheck.
+      - name: Docker E2E (build image + full API/data/relay/persistence)
+        run: ./scripts/docker-e2e.sh
+
+      - name: Container logs on failure
+        if: failure()
+        run: docker ps -a && docker ps -aq --filter name=ej-e2e | head -1 | xargs -r docker logs | tail -100

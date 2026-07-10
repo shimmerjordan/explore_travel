@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../app/providers.dart';
 import '../../models/models.dart';
+import '../about/about_screen.dart' show openServerGuide;
 
 /// Standalone group setup. Intentionally minimal:
 ///   - run mode (auto-on toggle + live status)
@@ -369,6 +370,48 @@ class GroupSetupScreen extends ConsumerWidget {
               onTap: () => context.push('/group/diag'),
             ),
           ],
+          if (transport == GroupTransport.relay) ...[
+            const _SectionHeader('云中继服务器'),
+            _Banner(
+              icon: Icons.cloud_outlined,
+              title: '工作方式',
+              body: '所有成员各连一条 WebSocket 到你自建的后端（仓库 backends/ 目录，'
+                  'Docker 一键部署），服务器在群组房间内转发消息。无需打洞、'
+                  '无需同一网络，是最省心的跨网方案。\n\n'
+                  '强烈建议设置上方的「共享口令」：消息将端到端加密，'
+                  '服务器只能看到密文（零知识转发）。部署与配置详见'
+                  '「自建服务器指南」。',
+              tint: cs.tertiary,
+            ),
+            _TextSetting(
+              Icons.dns_outlined,
+              '服务器地址',
+              s.relayServerUrl ?? '',
+              (v) => n.update((p) => p.copyWith(relayServerUrl: v.trim())),
+              hint: 'https://ej.example.com 或 http://IP:8080',
+            ),
+            _TextSetting(
+              Icons.key_rounded,
+              '中继令牌',
+              s.relayToken ?? '',
+              (v) => n.update((p) => p.copyWith(relayToken: v.trim())),
+              hint: '与服务器 GROUP_TOKEN 一致（可空）',
+              obscure: true,
+            ),
+            ListTile(
+              leading: const Icon(Icons.menu_book_outlined),
+              title: const Text('自建服务器指南'),
+              subtitle: const Text(
+                  'ECS + Docker + frpc / Cloudflare Tunnel 部署与客户端配置'),
+              onTap: () => openServerGuide(context),
+            ),
+            ListTile(
+              leading: const Icon(Icons.bug_report_outlined),
+              title: const Text('诊断日志'),
+              subtitle: const Text('看中继连接 / 重连 / 解密过程 —— 连不上先看这里'),
+              onTap: () => context.push('/group/diag'),
+            ),
+          ],
           const SizedBox(height: 40),
         ],
       ),
@@ -577,6 +620,7 @@ class _TransportPicker extends StatelessWidget {
       GroupTransport.lan,
       GroupTransport.webrtc,
       GroupTransport.frp,
+      GroupTransport.relay,
     ];
     return Column(
       children: options.map((t) {

@@ -1,0 +1,29 @@
+# frpc 配置样例 — 把 ECS 上的后端经 frps 暴露到公网。
+# 复制为 deploy/frpc.toml 后填入你的 frps 信息。
+#
+# 用法：docker compose --profile frp up -d
+# （frpc 容器与 backend 共享网络命名空间，因此 localIP 用 127.0.0.1）
+
+serverAddr = "your-frps-host.example.com"
+serverPort = 7000
+auth.token = "your-frps-token"
+
+# 建议开启 TLS 到 frps，避免中间链路明文（组队消息本身可端到端加密，
+# 排行榜条目自带签名，但 HTTP 头等元数据仍值得保护）。
+transport.tls.enable = true
+
+# 方式 A：TCP 直通 —— 客户端 baseUrl 填 http://frps-host:18080
+[[proxies]]
+name = "ej-backend-tcp"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 8080
+remotePort = 18080
+
+# 方式 B：HTTP 虚拟主机（frps 需配置 vhostHTTPPort），支持多服务共用 80 口
+# [[proxies]]
+# name = "ej-backend-http"
+# type = "http"
+# localIP = "127.0.0.1"
+# localPort = 8080
+# customDomains = ["ej.example.com"]

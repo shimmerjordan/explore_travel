@@ -309,7 +309,9 @@ class GroupLifecycle {
             prev.webrtcSignalingPollSec != next.webrtcSignalingPollSec ||
             prev.webrtcIceServers != next.webrtcIceServers ||
             prev.lanScanIp != next.lanScanIp ||
-            prev.lanScanCidrBits != next.lanScanCidrBits);
+            prev.lanScanCidrBits != next.lanScanCidrBits ||
+            prev.relayServerUrl != next.relayServerUrl ||
+            prev.relayToken != next.relayToken);
     if (identityChanged && _started) {
       await stop();
     }
@@ -352,6 +354,8 @@ class GroupLifecycle {
       frpDashboardUrl: s.frpDashboardUrl,
       frpDashboardUser: s.frpDashboardUser,
       frpDashboardPass: s.frpDashboardPass,
+      relayServerUrl: s.relayServerUrl ?? '',
+      relayToken: s.relayToken,
     );
   }
 

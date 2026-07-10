@@ -1,0 +1,7 @@
+test/
+deploy/
+data/
+docker-compose.yml
+Dockerfile
+README.md
+*.log

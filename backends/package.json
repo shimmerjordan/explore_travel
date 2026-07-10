@@ -1,0 +1,14 @@
+{
+  "name": "explore-journal-backends",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Self-hosted backend for explore_journal: community leaderboard + group relay. Zero runtime dependencies.",
+  "main": "server/server.js",
+  "scripts": {
+    "start": "node server/server.js",
+    "test": "node --test --test-force-exit test/*.test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

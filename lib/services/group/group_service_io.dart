@@ -7,6 +7,7 @@ import 'frp_group_service_io.dart';
 import 'group_diagnostics.dart';
 import 'group_types.dart';
 import 'multicast_lock_io.dart';
+import 'relay_group_service_io.dart';
 import 'webrtc_group_service_io.dart';
 export 'group_types.dart';
 
@@ -82,6 +83,7 @@ abstract class GroupService {
   ///   1 → zerotier    (also LAN mDNS + TCP — ZT is just the underlay)
   ///   2 → webrtc      (RTCDataChannel + WebDAV signaling)
   ///   3 → frp         (embedded frpc XTCP hole punch + TCP mesh)
+  ///   4 → relay       (WebSocket fan-out via the self-hosted backend)
   static GroupService create({
     required int transport,
     required String selfId,
@@ -108,7 +110,21 @@ abstract class GroupService {
     String? frpDashboardUrl,
     String? frpDashboardUser,
     String? frpDashboardPass,
+    // relay-only:
+    String relayServerUrl = '',
+    String? relayToken,
   }) {
+    if (transport == 4) {
+      return RelayGroupService(
+        selfId: selfId,
+        selfName: selfName,
+        groupId: groupId,
+        selfColor: selfColor,
+        crypto: crypto,
+        serverUrl: relayServerUrl,
+        token: relayToken,
+      );
+    }
     if (transport == 3) {
       return FrpGroupService(
         selfId: selfId,

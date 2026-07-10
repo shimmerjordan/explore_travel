@@ -61,6 +61,8 @@ abstract class GroupService {
     String? frpDashboardUrl,
     String? frpDashboardUser,
     String? frpDashboardPass,
+    String relayServerUrl = '',
+    String? relayToken,
   }) =>
       _NoopGroupService();
 }

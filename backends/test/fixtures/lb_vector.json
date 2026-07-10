@@ -1,0 +1,34 @@
+{
+  "entry": {
+    "peerId": "test-peer-0001",
+    "publicKey": "dVxMuSVsp83ErP3Gz+7ahJAX5bn5UU6ZGRvWfgsNQnY=",
+    "displayName": "测试者 Tester ✓",
+    "avatarBase64": "",
+    "globalKm2": 12345.6789012345,
+    "globalPercent": 0.0024204821,
+    "monthKm2": {
+      "2026-04": 12.3,
+      "2026-05": 4.5,
+      "2026-07": 0.0186378065
+    },
+    "statsAt": "2026-07-10T08:30:12.345Z",
+    "signature": "4+7t/j75AUCxFnHZ12pJhmwnepoZX3oua1V6HUmW8Gggwwvc7yMQuhGLcTzBBYCQ7hUkwG6FtCnOsUryBCYSDg=="
+  },
+  "canonical": "{\"avatarBase64\":\"\",\"displayName\":\"测试者 Tester ✓\",\"globalKm2\":12345.6789012345,\"globalPercent\":0.0024204821,\"monthKm2\":{\"2026-04\":12.3,\"2026-05\":4.5,\"2026-07\":0.0186378065},\"peerId\":\"test-peer-0001\",\"publicKey\":\"dVxMuSVsp83ErP3Gz+7ahJAX5bn5UU6ZGRvWfgsNQnY=\",\"statsAt\":\"2026-07-10T08:30:12.345Z\"}",
+  "contentHash": "8746cba16b241d48",
+  "tampered": {
+    "peerId": "test-peer-0001",
+    "publicKey": "dVxMuSVsp83ErP3Gz+7ahJAX5bn5UU6ZGRvWfgsNQnY=",
+    "displayName": "测试者 Tester ✓",
+    "avatarBase64": "",
+    "globalKm2": 999999.0,
+    "globalPercent": 0.0024204821,
+    "monthKm2": {
+      "2026-04": 12.3,
+      "2026-05": 4.5,
+      "2026-07": 0.0186378065
+    },
+    "statsAt": "2026-07-10T08:30:12.345Z",
+    "signature": "4+7t/j75AUCxFnHZ12pJhmwnepoZX3oua1V6HUmW8Gggwwvc7yMQuhGLcTzBBYCQ7hUkwG6FtCnOsUryBCYSDg=="
+  }
+}

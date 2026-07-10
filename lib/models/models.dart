@@ -46,7 +46,7 @@ enum MapStyle { standard, satellite, hybrid }
 ///
 /// IMPORTANT: enum order is the on-disk index (see prefs.dart toJson/fromJson)
 /// and the transport int passed to GroupService.create — only ever APPEND.
-enum GroupTransport { lan, zerotier, webrtc, frp }
+enum GroupTransport { lan, zerotier, webrtc, frp, relay }
 
 extension GroupTransportX on GroupTransport {
   /// Maps the legacy `zerotier` value to `lan` so the rest of the code only
@@ -58,6 +58,7 @@ extension GroupTransportX on GroupTransport {
         GroupTransport.lan => '局域网 / 虚拟局域网',
         GroupTransport.webrtc => 'WebRTC + WebDAV 信令',
         GroupTransport.frp => 'frp XTCP 打洞（内置 frpc）',
+        GroupTransport.relay => '云中继服务器（自建后端）',
         _ => '局域网 / 虚拟局域网',
       };
 
@@ -70,6 +71,10 @@ extension GroupTransportX on GroupTransport {
         GroupTransport.frp =>
           '配一台远端 frp 服务端（frps），内置的 frpc 通过 XTCP 打洞直连其他成员。'
               '服务器只协助打洞、几乎不占带宽，可组大型虚拟局域网。',
+        GroupTransport.relay =>
+          '最省心的跨网方案：所有成员连到同一台自建后端（backends/ 一键 Docker '
+              '部署），WebSocket 中继转发。配合共享口令实现端到端加密，'
+              '服务器只见密文。',
         _ => '',
       };
 }

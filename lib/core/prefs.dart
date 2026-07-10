@@ -114,6 +114,14 @@ class AppSettings {
   final String? frpDashboardUser;
   final String? frpDashboardPass;
 
+  // ── 云中继 transport (GroupTransport.relay) ────────────────────────────
+  /// Self-hosted backend base URL (backends/ in this repo), e.g.
+  /// `https://ej.example.com` or `http://1.2.3.4:8080`. The client derives
+  /// the WebSocket endpoint (`/group/v1/ws`) from it. Empty disables.
+  final String? relayServerUrl;
+  /// Optional access token — must equal the server's `GROUP_TOKEN`.
+  final String? relayToken;
+
   // ── Image host (for journal photos) ───────────────────────────────────
   /// 'none' | 'github' | 'custom'
   final String imgHostKind;
@@ -259,6 +267,8 @@ class AppSettings {
     this.frpDashboardUrl,
     this.frpDashboardUser,
     this.frpDashboardPass,
+    this.relayServerUrl,
+    this.relayToken,
     this.imgHostKind = 'none',
     this.autoUploadImages = true,
     this.githubPat,
@@ -348,6 +358,8 @@ class AppSettings {
     String? frpDashboardUrl,
     String? frpDashboardUser,
     String? frpDashboardPass,
+    String? relayServerUrl,
+    String? relayToken,
     String? imgHostKind,
     bool? autoUploadImages,
     String? githubPat,
@@ -436,6 +448,8 @@ class AppSettings {
         frpDashboardUrl: frpDashboardUrl ?? this.frpDashboardUrl,
         frpDashboardUser: frpDashboardUser ?? this.frpDashboardUser,
         frpDashboardPass: frpDashboardPass ?? this.frpDashboardPass,
+        relayServerUrl: relayServerUrl ?? this.relayServerUrl,
+        relayToken: relayToken ?? this.relayToken,
         imgHostKind: imgHostKind ?? this.imgHostKind,
         autoUploadImages: autoUploadImages ?? this.autoUploadImages,
         githubPat: githubPat ?? this.githubPat,
@@ -537,6 +551,8 @@ class AppSettings {
         'frpDashboardUrl': frpDashboardUrl,
         'frpDashboardUser': frpDashboardUser,
         'frpDashboardPass': frpDashboardPass,
+        'relayServerUrl': relayServerUrl,
+        'relayToken': relayToken,
         'imgHostKind': imgHostKind,
         'autoUploadImages': autoUploadImages,
         'githubPat': githubPat,
@@ -634,6 +650,8 @@ class AppSettings {
         frpDashboardUrl: j['frpDashboardUrl'],
         frpDashboardUser: j['frpDashboardUser'],
         frpDashboardPass: j['frpDashboardPass'],
+        relayServerUrl: j['relayServerUrl'],
+        relayToken: j['relayToken'],
         imgHostKind: j['imgHostKind'] ?? 'none',
         autoUploadImages: j['autoUploadImages'] as bool? ?? true,
         githubPat: j['githubPat'],

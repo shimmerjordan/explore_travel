@@ -23,11 +23,32 @@ const String _kRepoName = 'explore_travel';
 /// adding a doc means: drop the .md into `docs/` AND append a row here.
 const List<({String path, String title, String summary})> _kDocs = [
   (
+    path: 'docs/self-host-server-deploy.md',
+    title: '自建服务器 · 部署指南',
+    summary: '排行榜+组队后端：ECS 上 Docker 一键部署，frpc / Cloudflare Tunnel 暴露公网',
+  ),
+  (
+    path: 'docs/self-host-client-config.md',
+    title: '自建服务器 · 客户端配置',
+    summary: '排行榜同步与组队云中继的逐步接入配置、排障与流量说明',
+  ),
+  (
     path: 'docs/leaderboard-server-api.md',
     title: '社区榜单服务器 API',
     summary: 'REST 4+1 端点 / Ed25519 验签 / LWW + TOFU 规范，社区维护者实现参考',
   ),
 ];
+
+/// Public entry so other screens (group setup, leaderboard) can deep-link
+/// straight into a bundled guide without duplicating the viewer.
+Future<void> openServerGuide(BuildContext context, {bool client = false}) =>
+    _openDoc(
+      context,
+      client
+          ? 'docs/self-host-client-config.md'
+          : 'docs/self-host-server-deploy.md',
+      client ? '自建服务器 · 客户端配置' : '自建服务器 · 部署指南',
+    );
 
 /// Project contributors. The app has no live GitHub API integration —
 /// keeping this hardcoded means the credits page works offline. Add

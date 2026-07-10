@@ -5,6 +5,61 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 
 ## [Unreleased] — 2026-07-10
 
+### 新增（自建后端 `backends/`：排行榜服务器 + 组队云中继，Docker/ECS/frpc/CF Tunnel）
+
+排行榜与组队此前完全靠"规避后端"的手段（P2P gossip、GitHub PR、局域网多播、
+frp 打洞、WebRTC+WebDAV 信令）。本次补上可选的自建后端，让互不见面的用户能同步
+排行榜、组队在任何网络下可连通——同时保持"无后端也完整可用"的原设计。
+
+- **服务端**（[backends/](backends/)）：零依赖 Node（≥20）单进程单端口，模块注册制
+  （`(cfg) => {name, routes?, onUpgrade?, status?, shutdown?}`，加模块=加一个文件+一行）。
+  - **排行榜模块**：完整实现 [docs/leaderboard-server-api.md](docs/leaderboard-server-api.md)
+    v1（`/entries` CRUD、`/monthly/{ym}`、`/index` 探针）；服务端 Ed25519 验签
+    （canonical JSON 与 Dart `_sortedJson` 逐字节一致，有 Dart 生成的交叉验证向量锁定，
+    见 [tool/gen_lb_vector.dart](tool/gen_lb_vector.dart)）+ TOFU 公钥锁定 + LWW +
+    未来时钟拒收；全量响应缓存单 Buffer + ETag/304；每 IP 限流（读60/写10每分）；
+    JSON 防抖原子持久化，SIGTERM 落盘，重启不丢。
+  - **组队中继模块**：`/group/v1/ws` 手写 RFC6455 WebSocket（无依赖），按群组分房间
+    转发；**零知识**——负载原样直转（配共享口令即端到端加密，服务器只见密文）；
+    定向消息走 `@peerId|` 路由前缀（1:1 聊天/语音不广播全房间）；单连接限速
+    （50条/s、512KB/s）+ 慢消费者断开 + 30s ping 重连保活 + 房间上限（默认32）。
+  - **测试**：`npm test` 22 用例全绿（Dart 签名向量跨语言验签、API 全行为、
+    LWW/TOFU/token、持久化重启、WS 广播/定向/隔离/鉴权）。
+  - **部署**：Dockerfile（node:22-alpine 非 root + healthcheck，实测 RSS 11 MB /
+    CPU 0.02%）；docker-compose 内置可选 `--profile frp`（frpc 旁路容器）与
+    `--profile cloudflare`（cloudflared 旁路容器）两种公网暴露；样例配置在
+    [backends/deploy/](backends/deploy/)。
+- **客户端**：
+  - 新增联机方式 **云中继服务器**（`GroupTransport.relay`，enum 尾部追加不破坏旧配置）：
+    [relay_group_service_io.dart](lib/services/group/relay_group_service_io.dart) 复用
+    与 LAN/frp 完全相同的线格式（JSON 行 + `v1|` 加密帧），WebSocket 自动重连
+    （2→30s 退避）、25s hello 心跳出席、75s 静默剔除；闲时每成员 ~10 B/s。
+  - 组队设置页新增中继配置区（服务器地址/中继令牌/指南/诊断入口）；
+    prefs 新增 `relayServerUrl`/`relayToken`，纳入 GroupLifecycle 身份变更重建。
+  - 排行榜的「配置社区服务器/同步社区服务器」原有功能与新后端开箱互通（无改动）。
+  - **关于页新增两篇内置文档**：《自建服务器·部署指南》（ECS+Docker+frpc+CF Tunnel
+    全流程）与《自建服务器·客户端配置》（排行榜/组队逐步接入+排障+流量说明）；
+    组队设置与排行榜菜单均有直达入口。
+- **验证与自动化测试（三层）**：
+  - **Flutter 集成层**（spawn 真实 Node 后端，共享 [test/helpers/spawn_backend.dart](test/helpers/spawn_backend.dart)）：
+    [test/relay_group_service_test.dart](test/relay_group_service_test.dart) 覆盖出席、
+    全部消息类型（聊天/位置/PTT 语音字节往返/音乐同步/自定义 gossip）、定向路由、
+    端到端加密偷听者零解码、房间隔离、**服务器重启后客户端自动重连**（~4s 恢复）；
+    [test/leaderboard_server_client_test.dart](test/leaderboard_server_client_test.dart)
+    用 App 自己的 LeaderboardService+HttpLeaderboardClient 验证 push→fetch **逐字节
+    数据正确性**（double 精度/中文/月度表/contentHash）、拉回条目客户端验签通过、
+    服务器端 LWW/TOFU/伪造 422 从客户端视角生效、/monthly //index 与推送数据一致。
+  - **Docker 容器层**（[backends/scripts/docker-e2e.sh](backends/scripts/docker-e2e.sh)
+    + [backends/test/docker-e2e.test.js](backends/test/docker-e2e.test.js)）：构建生产
+    镜像后按生产形态（volume+healthcheck+非 root）跑两轮——开放模式 17 用例（全 API
+    面、数据正确性、100KB 大帧中继、unicode 直转、状态计数器、**`docker restart`
+    后数据逐字节存活**）+ 鉴权模式 5 用例（双 token 强制）+ healthcheck 转 healthy。
+  - **CI**（[.github/workflows/backend.yml](.github/workflows/backend.yml)）：backends/
+    任何改动触发——`npm test`（23 用例含 Dart 跨语言签名向量）→ 构建 Docker 镜像 →
+    跑完整容器级 E2E，失败时自动吐容器日志。
+  - 全套 Flutter 226 测试通过；`flutter analyze` 0 错误 0 警告；真机验证组队设置 UI
+    与应用内指南渲染。
+
 ### 修复（冷启动地图偶发无迷雾/无轨迹，需点定位或缩放才出现）
 
 - **根因**：flutter_map 7.0.2 的 `TileLayer.reset` 流本身是坏的（订阅是

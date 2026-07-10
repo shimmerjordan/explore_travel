@@ -1,0 +1,25 @@
+# Cloudflare Tunnel 两种接入方式：
+#
+# 方式 A（推荐，compose 已内置）：面板 token 模式，零配置文件
+#   1. Cloudflare Zero Trust → Networks → Tunnels → Create tunnel
+#   2. 选 Docker，复制 token
+#   3. Public hostname 添加:  ej.yourdomain.com → HTTP://localhost:8080
+#      （WebSocket 默认放行，无需额外设置）
+#   4. export TUNNEL_TOKEN=eyJ...
+#      docker compose --profile cloudflare up -d
+#
+# 方式 B：本地配置文件模式（cloudflared tunnel create 生成凭据后）
+#   把本文件复制为 ~/.cloudflared/config.yml 并运行
+#   cloudflared tunnel run ej-backend
+
+tunnel: ej-backend
+credentials-file: /home/user/.cloudflared/<TUNNEL-UUID>.json
+
+ingress:
+  - hostname: ej.yourdomain.com
+    service: http://localhost:8080
+    originRequest:
+      # WebSocket 长连接（组队中继）：关掉 chunked 缓冲、放宽空闲超时
+      noTLSVerify: false
+      keepAliveTimeout: 90s
+  - service: http_status:404
