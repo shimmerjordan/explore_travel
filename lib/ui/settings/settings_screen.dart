@@ -25,6 +25,41 @@ class SettingsScreen extends ConsumerWidget {
           ),
           SliverList(
             delegate: SliverChildListDelegate([
+              _SectionHeader('外观'),
+              _buildTile(
+                context,
+                icon: Icons.palette_outlined,
+                title: '主题',
+                subtitle: switch (s.themePref) {
+                  'light' => '轻快 · 亮色',
+                  'system' => '跟随系统',
+                  _ => '暗黑 · 夜行',
+                },
+                trailing: SegmentedButton<String>(
+                  style: const ButtonStyle(
+                    visualDensity: VisualDensity.compact,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                  segments: const [
+                    ButtonSegment(
+                        value: 'light',
+                        icon: Icon(Icons.wb_sunny_outlined, size: 15),
+                        label: Text('轻快', style: TextStyle(fontSize: 11))),
+                    ButtonSegment(
+                        value: 'dark',
+                        icon: Icon(Icons.nightlight_outlined, size: 15),
+                        label: Text('暗黑', style: TextStyle(fontSize: 11))),
+                    ButtonSegment(
+                        value: 'system',
+                        icon: Icon(Icons.hdr_auto_outlined, size: 15),
+                        label: Text('系统', style: TextStyle(fontSize: 11))),
+                  ],
+                  selected: {s.themePref},
+                  onSelectionChanged: (v) => ref
+                      .read(settingsProvider.notifier)
+                      .update((p) => p.copyWith(themePref: v.first)),
+                ),
+              ),
               _SectionHeader('记录与迷雾'),
               _buildTile(
                 context,
@@ -336,7 +371,7 @@ class _TextSetting extends StatelessWidget {
               autofocus: true,
               decoration: InputDecoration(
                 border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12)),
+                    borderRadius: BorderRadius.circular(4)),
               ),
             ),
             actions: [
@@ -388,7 +423,7 @@ class _InfoTile extends StatelessWidget {
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: Theme.of(context).colorScheme.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(4),
         border: Border.all(
             color: Theme.of(context).colorScheme.outline.withValues(alpha: 0.2)),
       ),

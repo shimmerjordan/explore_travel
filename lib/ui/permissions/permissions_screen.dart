@@ -186,7 +186,7 @@ class _PermissionsScreenState extends State<PermissionsScreen>
             padding: const EdgeInsets.all(14),
             decoration: BoxDecoration(
               color: allGood ? cs.primaryContainer : cs.errorContainer,
-              borderRadius: BorderRadius.circular(14),
+              borderRadius: BorderRadius.circular(6),
             ),
             child: Row(
               children: [
@@ -352,7 +352,7 @@ class _PermissionRow extends StatelessWidget {
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: cs.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(14),
+        borderRadius: BorderRadius.circular(6),
         border: Border.all(
           color: stateColor.withValues(alpha: 0.25),
           width: 1,

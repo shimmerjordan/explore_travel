@@ -172,6 +172,10 @@ class AppSettings {
   /// viewer.
   final bool debugMode;
 
+  /// UI theme: 'dark' | 'light' | 'system'. Defaults to the light "轻快"
+  /// scheme; 暗黑/跟随系统 via 设置 → 外观.
+  final String themePref;
+
   /// When true, the map tile layer is rendered through an invert-style
   /// `ColorFilter` so light raster tiles look like a dark theme. None
   /// of the upstream providers (高德 / Google / OSM) expose a real
@@ -279,6 +283,7 @@ class AppSettings {
     this.importClearBeforeImport = false,
     this.backupSelectedModules = const [],
     this.debugMode = false,
+    this.themePref = 'light',
     this.darkMap = false,
     this.avatarBase64 = '',
     this.leaderboardPrivateKey = '',
@@ -366,6 +371,7 @@ class AppSettings {
     bool? importClearBeforeImport,
     List<String>? backupSelectedModules,
     bool? debugMode,
+    String? themePref,
     bool? darkMap,
     String? avatarBase64,
     String? leaderboardPrivateKey,
@@ -460,6 +466,7 @@ class AppSettings {
         backupSelectedModules:
             backupSelectedModules ?? this.backupSelectedModules,
         debugMode: debugMode ?? this.debugMode,
+        themePref: themePref ?? this.themePref,
         darkMap: darkMap ?? this.darkMap,
         avatarBase64: avatarBase64 ?? this.avatarBase64,
         leaderboardPrivateKey:
@@ -553,6 +560,7 @@ class AppSettings {
         'importClearBeforeImport': importClearBeforeImport,
         'backupSelectedModules': backupSelectedModules,
         'debugMode': debugMode,
+        'themePref': themePref,
         'darkMap': darkMap,
         'avatarBase64': avatarBase64,
         'leaderboardPrivateKey': leaderboardPrivateKey,
@@ -652,6 +660,7 @@ class AppSettings {
             (j['backupSelectedModules'] as List?)?.cast<String>() ??
                 const [],
         debugMode: j['debugMode'] ?? false,
+        themePref: j['themePref']?.toString() ?? 'light',
         darkMap: j['darkMap'] ?? false,
         avatarBase64: j['avatarBase64']?.toString() ?? '',
         leaderboardPrivateKey:

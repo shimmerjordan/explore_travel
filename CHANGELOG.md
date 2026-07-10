@@ -3,7 +3,116 @@
 All notable changes to Explore Journal are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow SemVer once releases start.
 
-## [Unreleased] — 2026-07-09
+## [Unreleased] — 2026-07-10
+
+### 修复（冷启动地图偶发无迷雾/无轨迹，需点定位或缩放才出现）
+
+- **根因**：flutter_map 7.0.2 的 `TileLayer.reset` 流本身是坏的（订阅是
+  `late final`，只在 dispose 被引用，从未激活），项目改用 `additionalOptions`
+  换代触发就地重载；但 `reloadImages` **只重载已存在的 TileImage** ——冷启动时
+  fog 行从 DB 异步到达，若此刻瓦片管理器里还没有当前相机的瓦片（图层插入早于
+  布局/相机就绪、且其后无任何地图事件），就永远不会加载，直到用户平移/缩放/点
+  定位触发地图事件。
+- **修复**（[fog_tile_provider.dart](lib/services/map/fog_tile_provider.dart)）：
+  快照在「空 ↔ 有数据」间翻转时给 TileLayer 换 `ValueKey` 强制重挂载——重挂载
+  必然执行 initState→didChangeDependencies→按当前相机全量 load-and-prune；
+  数据保持非空的后续更新仍走无闪烁的就地重载路径。另外 generation 改用跨实例
+  单调种子，避免退出再进入地图页时新快照撞上旧 ImageCache 键。
+- 真机验证：连续 3 次冷启动（零交互）迷雾蒙版 + 已走走廊全部首屏直出；
+  `flutter test test/fog_tile_bake_test.dart` 3/3 通过。
+
+### 性能（探索进度首开 10s+ → 0.7s：双组归属一次跑 + 块级快路径 + 精简取数）
+
+- `computeAggregates` 支持 **regions2 第二归属组**：国家与省份两个独立归属
+  pass 在同一次取数、同一个 isolate 运行内完成（探索页从 2 次调用 → 1 次）。
+- **块级快路径**（`_RegionGroup.classify`）：若某候选 bbox 完全包含整个 64×64
+  块、且没有更小面积的候选部分相交，则整块所有亮像素必然归它 →
+  `popcount×cellArea` 一步归属，跳过 4096 像素循环。绝大多数块（~600m 见方 vs
+  省级 bbox）走快路径，仅边界块回退逐像素——**数学等价，真机数值逐位一致**。
+- 取数改精简三列 `customSelect`（tile_x/tile_y/bitmap），砍掉全行 drift
+  数据类反序列化开销。
+- debug 构建输出 `[FogAgg] rows/fetch/total` 计时日志（assert 内，release 剥离）。
+- 真机实测（46872 行, 33 国+50 省+1 learned）：**fetch 407ms + 计算 ~330ms =
+  736ms**，页面亚秒级完整呈现；`fog_engine_test.dart` 20/20 通过。
+
+### 性能（修复探索进度/个人卡/排行榜卡死 ANR：雾聚合移入后台 isolate + 缓存）
+
+- **根因**：fog_tiles 在 FOW 导入后有 ~46872 行 × 512B 位图；旧代码在**主 isolate**
+  做合并/popcount/区域归属（探索页最重路径 = 每个亮像素 × 数百个区域 bbox 判定），
+  且探索页每个 learned 省份再全量扫一遍库、个人卡同样的全球扫描连做三遍 →
+  9 秒级 ANR（logcat: Skipped 1593 frames）。
+- **修复**（[fog_engine.dart](lib/services/fog/fog_engine.dart)）：
+  - 新增 `computeAggregates(layerIds, {regions, bboxes})` → `FogAggregates`
+    （globalKm2 / 按区域归属 km² / 按 bbox km²）：行数据打包为平坦
+    Int32List+Uint8List 后送 `compute()` 后台 isolate；isolate 内 256 查表
+    popcount、跨图层 OR 合并（视图零拷贝、重复才复制）、**区域归属加
+    per-block 候选预筛**（数百 bbox → 通常 0–5 个）。
+  - **结果缓存**：键 = layerIds + 引擎写入修订号 + `COUNT(*)/MAX(rowid)` 探针
+    （捕捉不经引擎的批量导入）+ 参数签名；容量 6 的小 LRU。二次进入秒开。
+  - 旧三方法（globalExplorationPercent / revealedAreaInBboxKm2 /
+    revealedAreaByRegionsKm2）改为薄封装，所有调用方自动受益。
+- **调用方改造**：探索页 = 2 次聚合调用（country/prov 归属各一次，learned
+  bboxes + 全球数搭车）替代 3+N 次全量扫描；个人资料卡 = 1 次聚合 +
+  `COUNT(*)` 区块数（原来三次全量扫描）；排行榜自动走缓存。
+- `PixelDitherFade` 加 RepaintBoundary（滚动时不再重画数万方块）。
+- 真机验证：探索页计算全程 UI 流畅（spinner 活跃、0 跳帧 0 ANR），数值与旧版
+  **完全一致**（0.0001077767% / 0.0003959564% / 亚洲 0.0186378065%）；个人卡
+  3 秒内弹出（原 9 秒 ANR）。
+
+### UI（像素风 v2：像素字体全局化 + 轻快亮主题 + 组件重构）
+
+- **像素字体全局化**（按用户要求）：`fontFamily: 'PixelZh'` 进 ThemeData——正文、
+  按钮、二三级标题、tip、引用全部像素字；生僻字/emoji 自动回退系统字体。
+  **国旗 emoji 修复**：探索页旗帜 Text 显式 `fontFamily: 'Roboto'`（否则
+  regional-indicator 被像素字体渲染成字母方块）。
+- **轻快亮主题 + 外观开关**：`AppSettings.themePref`（'light' 默认 /'dark'/'system'），
+  设置页新增「外观 → 主题」三段开关（轻快/暗黑/系统），实时切换。亮色 =
+  vibrant 种子 + 薄荷纸底 `#F3FAF8`；暗色提亮为 `#14212C`（脱离纯黑）。
+- **圆角回调**（按用户反馈"不要全方形"）：按钮/输入框 10、卡片 8、FAB 12、
+  对话框 14、底板 16——脆但友好；阶梯像素角仍保留给 hero 面板。
+- **菜单/下拉重构**：popup/menu/dropdown 统一「道具面板」样式——tonal 面 +
+  1.5px 描边 + 低阴影，替代默认 Material 浮影。
+
+### UI（全 App 像素风设计语言：像素作表达层，M3 作骨架）
+
+FOW「点亮地图」本就是游戏机制，像素语言承载「收集乐趣」。原则：**展示层说像素话，
+正文/标签/控件保持系统字体与 Material 3 语义**（product register 禁止 display 字体
+进标签）；有物理含义的圆形（定位点、精度圈、头像）保留圆形。
+
+- **中文像素字体**：缝合像素字体 fusion-pixel-font 12px 简中（OFL，许可证随包）→
+  `assets/fonts/FusionPixelZh.ttf`，family `PixelZh`。仅用于 display 时刻。
+- **像素设计系统** [`lib/ui/common/pixel.dart`](lib/ui/common/pixel.dart)：
+  `PixelText`（display/headline/label，12 的倍数对齐像素网格）、`PixelPanel`
+  （阶梯像素角面板 + 描边 + 裁剪）、`PixelBlockBar`（8-bit 血条式分段进度）、
+  `PixelDitherFade`（4×4 Bayer 抖动渐隐，替代 gradient scrim）、`PixelBadge`、
+  `PixelSprite` + `PixelSprites`（地图/书/指南针/脚印/音符/云 手绘像素图元）、
+  `PixelScanlines`、量化/网格吸附工具函数。
+- **Atmosphere 新增 `AtmosphereStyle.pixel`（默认）**：8-bit 天气——三朵手绘像素云
+  横向漂移（整数圈无缝回绕）+ 方形光尘吸附 3px 网格、闪烁量化为 4 档（blink 而非
+  breathe），指针拨开交互与 reduced-motion 静帧保留。
+- **全局主题硬边化**（main.dart，明暗双主题统一 `_buildTheme`）：卡片/按钮/FAB/输入
+  框/对话框/弹层圆角从 10–16 收到 2–8；新增 elevated/outlined/text button、dialog、
+  bottomSheet、popupMenu、inputDecoration 的 shape 主题。
+- **逐页落地**：
+  - 首页：App 名与「探索进度」像素字；hero 换 PixelPanel + 像素地图 sprite +
+    像素氛围；分组标题加像素方块色标（=分组色钥匙）；紧凑入口方形图标片。
+  - 探索进度：hero 卡 PixelPanel + Bayer 抖动 + 像素云；两个大百分比像素字；
+    进度条全部换 PixelBlockBar（含国家详情 sheet）；国家旗格改硬角方块。
+  - 地图：右侧按钮堆/工具方形化；图层胶囊+方块色标；录制键方形化（图标语义
+    不变：圆点=录制/方块=停止，脉冲量化 4 档）；等级卡 Lv 像素字 + 块状经验条；
+    资料卡/统计片/横幅胶囊硬边化；底部导航徽点方块化。
+  - 手账：列表标题像素字、书本 sprite 占位、硬角卡片/缩略图/徽章；详情地图条、
+    坐标胶囊、画廊页码硬边化。
+  - 回放/总结：标题像素字；统计四联数（次记录/km/小时/采样点）像素字；
+    播放器面板/速度片/信息条硬边化。
+  - 排行榜：标题像素字；前三名名次像素字 + 奖牌色。
+  - 歌单：标题像素字；收藏空状态加像素音符 sprite + 教学文案。
+  - 其余（设置/备份/图层/组队/AI 规划/关于/聊天/图床/权限/globe/toast）：
+    硬编码大圆角统一收紧到 3–10。
+- 真机 6159e157 验证：地图浮层/首页/探索/手账列表+详情/回放/排行榜/歌单逐页截图
+  确认。`flutter analyze` 0 error 0 warning（17 个 info 均为历史遗留）。
+- **已知问题（改造前就存在，未动）**：排行榜刷新触发的重型雾数据聚合在主线程
+  运行，可造成 ~9s ANR（logcat 中 07-09 旧版本即有同签名 ANR）。待专项优化。
 
 ### UI（手账：正文改为内联富文本编辑，图文可穿插；列表可直接上传图床）
 

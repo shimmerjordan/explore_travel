@@ -51,7 +51,7 @@ class TopToast {
                             .colorScheme
                             .inverseSurface
                             .withValues(alpha: 0.92),
-                    borderRadius: BorderRadius.circular(12),
+                    borderRadius: BorderRadius.circular(4),
                     boxShadow: const [
                       BoxShadow(
                         color: Color(0x33000000),

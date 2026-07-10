@@ -6,6 +6,7 @@ import '../../app/providers.dart';
 import '../../services/leaderboard/leaderboard_contributors.dart';
 import '../../services/leaderboard/leaderboard_model.dart';
 import '../../services/leaderboard/leaderboard_service.dart';
+import '../common/pixel.dart';
 
 /// Decentralised leaderboard screen — two tabs:
 ///   * 全球榜  — sorted by `globalKm2` desc
@@ -66,7 +67,9 @@ class _LeaderboardScreenState extends ConsumerState<LeaderboardScreen> {
       length: 2,
       child: Scaffold(
         appBar: AppBar(
-          title: const Text('排行榜'),
+          title: Text('排行榜',
+              style: PixelText.headline
+                  .copyWith(color: Theme.of(context).colorScheme.onSurface)),
           bottom: const TabBar(tabs: [
             Tab(text: '全球'),
             Tab(text: '本月'),
@@ -593,21 +596,21 @@ class _Row extends StatelessWidget {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
+              // 名次是收集时刻：前三名用像素展示字 + 奖牌色。
               SizedBox(
                 width: 24,
                 child: Text(
                   '$rank',
-                  style: TextStyle(
-                    fontWeight:
-                        rank <= 3 ? FontWeight.w900 : FontWeight.normal,
-                    color: rank == 1
-                        ? Colors.amber.shade700
-                        : rank == 2
-                            ? Colors.grey
-                            : rank == 3
-                                ? Colors.brown
-                                : null,
-                  ),
+                  style: rank <= 3
+                      ? PixelText.label.copyWith(
+                          fontSize: 14,
+                          color: rank == 1
+                              ? Colors.amber.shade600
+                              : rank == 2
+                                  ? Colors.grey.shade400
+                                  : Colors.brown.shade300,
+                        )
+                      : const TextStyle(),
                 ),
               ),
               _Avatar(b64: entry.avatarBase64, peerId: entry.peerId),
@@ -677,7 +680,7 @@ class _Chip extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
       decoration: BoxDecoration(
         color: warn ? c.errorContainer : c.secondaryContainer,
-        borderRadius: BorderRadius.circular(6),
+        borderRadius: BorderRadius.circular(3),
       ),
       child: Text(label,
           style: TextStyle(

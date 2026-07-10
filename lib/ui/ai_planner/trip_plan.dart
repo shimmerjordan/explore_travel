@@ -173,7 +173,7 @@ class TripMiniMapCard extends ConsumerWidget {
     return Card(
       margin: const EdgeInsets.symmetric(vertical: 8, horizontal: 0),
       clipBehavior: Clip.antiAlias,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [

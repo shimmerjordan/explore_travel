@@ -228,7 +228,7 @@ class _AiPlannerScreenState extends ConsumerState<AiPlannerScreen> {
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: Colors.amber.shade900.withValues(alpha: 0.3),
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(4),
         border: Border.all(color: Colors.amber.withValues(alpha: 0.3)),
       ),
       child: Row(
@@ -303,7 +303,7 @@ class _AiPlannerScreenState extends ConsumerState<AiPlannerScreen> {
               labelText: '出发地',
               hintText: _resolvingLocation ? '正在获取当前位置…' : null,
               border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12)),
+                  borderRadius: BorderRadius.circular(4)),
               isDense: true,
               suffixIcon: IconButton(
                 tooltip: '用当前位置',
@@ -340,7 +340,7 @@ class _AiPlannerScreenState extends ConsumerState<AiPlannerScreen> {
             decoration: InputDecoration(
               labelText: '偏好 / 期待',
               border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12)),
+                  borderRadius: BorderRadius.circular(4)),
               isDense: true,
             ),
             maxLines: 2,
@@ -351,7 +351,7 @@ class _AiPlannerScreenState extends ConsumerState<AiPlannerScreen> {
             decoration: InputDecoration(
               labelText: '备注（行程禁忌、特殊要求等）',
               border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12)),
+                  borderRadius: BorderRadius.circular(4)),
               isDense: true,
             ),
             maxLines: 2,
@@ -430,7 +430,7 @@ class _AiPlannerScreenState extends ConsumerState<AiPlannerScreen> {
         decoration: InputDecoration(
           labelText: label,
           border:
-              OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+              OutlineInputBorder(borderRadius: BorderRadius.circular(4)),
           isDense: true,
         ),
         keyboardType: TextInputType.number,
@@ -442,7 +442,7 @@ class _AiPlannerScreenState extends ConsumerState<AiPlannerScreen> {
         decoration: InputDecoration(
           labelText: label,
           border:
-              OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+              OutlineInputBorder(borderRadius: BorderRadius.circular(4)),
           isDense: true,
         ),
         child: DropdownButtonHideUnderline(
@@ -648,7 +648,7 @@ class _MessageBubble extends StatelessWidget {
                 color: isUser
                     ? cs.primaryContainer
                     : cs.surfaceContainerHigh,
-                borderRadius: BorderRadius.circular(12),
+                borderRadius: BorderRadius.circular(4),
               ),
               child: isUser
                   ? SelectableText(content,

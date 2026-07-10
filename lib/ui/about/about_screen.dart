@@ -66,7 +66,7 @@ class AboutScreen extends ConsumerWidget {
                             c.primary,
                             c.primary.withValues(alpha: 0.6),
                           ]),
-                          borderRadius: BorderRadius.circular(14),
+                          borderRadius: BorderRadius.circular(6),
                         ),
                         child: const Icon(Icons.explore_outlined,
                             color: Colors.white, size: 32),
@@ -295,7 +295,7 @@ class _VersionTapBadgeState extends ConsumerState<_VersionTapBadge>
           scale: _pulse,
           child: Material(
             color: c.secondaryContainer,
-            borderRadius: BorderRadius.circular(20),
+            borderRadius: BorderRadius.circular(6),
             clipBehavior: Clip.antiAlias,
             child: InkWell(
               onTap: _onTap,

@@ -122,7 +122,7 @@ class FavoritesMapScreen extends ConsumerWidget {
       context: context,
       backgroundColor: Theme.of(context).colorScheme.surface,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(10)),
       ),
       builder: (_) => Padding(
         padding: const EdgeInsets.all(20),
@@ -144,7 +144,7 @@ class FavoritesMapScreen extends ConsumerWidget {
                 height: 48,
                 decoration: BoxDecoration(
                   color: Colors.deepPurple.withValues(alpha: 0.15),
-                  borderRadius: BorderRadius.circular(12),
+                  borderRadius: BorderRadius.circular(4),
                 ),
                 child: const Icon(Icons.music_note_rounded,
                     color: Colors.deepPurple),

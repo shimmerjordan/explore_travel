@@ -7,6 +7,7 @@ import 'package:latlong2/latlong.dart';
 import '../../app/providers.dart';
 import '../../data/db/database.dart';
 import '../../services/map/tile_providers.dart';
+import '../common/pixel.dart';
 
 /// 回放总结：以"一次有效记录（开始→停止，≥10 个点）"为单位的列表，
 /// 顶部年/月筛选。点击进入单次回放。在回放里可叠加：
@@ -109,8 +110,9 @@ class _PlaybackScreenState extends ConsumerState<PlaybackScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('回放 / 总结',
-            style: TextStyle(fontWeight: FontWeight.w700)),
+        title: Text('回放 / 总结',
+            style: PixelText.headline
+                .copyWith(color: Theme.of(context).colorScheme.onSurface)),
         actions: [
           IconButton(
             icon: const Icon(Icons.refresh_rounded),
@@ -273,16 +275,16 @@ class _PeriodSummary extends StatelessWidget {
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: cs.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(14),
+        borderRadius: BorderRadius.circular(6),
         border: Border.all(color: cs.outline.withValues(alpha: 0.2)),
       ),
       child: Row(
         children: [
           _stat('${sessions.length}', '次记录'),
           const SizedBox(width: 8),
-          _stat('${totalKm.toStringAsFixed(1)}', 'km'),
+          _stat(totalKm.toStringAsFixed(1), 'km'),
           const SizedBox(width: 8),
-          _stat('${(totalMin / 60).toStringAsFixed(1)}', '小时'),
+          _stat((totalMin / 60).toStringAsFixed(1), '小时'),
           const SizedBox(width: 8),
           _stat('$totalPts', '采样点'),
         ],
@@ -293,9 +295,8 @@ class _PeriodSummary extends StatelessWidget {
   Widget _stat(String value, String label) => Expanded(
         child: Column(
           children: [
-            Text(value,
-                style: const TextStyle(
-                    fontSize: 18, fontWeight: FontWeight.w700)),
+            Text(value, style: PixelText.label.copyWith(fontSize: 16)),
+            const SizedBox(height: 2),
             Text(label, style: const TextStyle(fontSize: 11)),
           ],
         ),
@@ -560,7 +561,7 @@ class _PlayerScreenState extends ConsumerState<_PlayerScreen> {
               padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
               decoration: BoxDecoration(
                 color: const Color(0xFF1A2733).withValues(alpha: 0.92),
-                borderRadius: BorderRadius.circular(16),
+                borderRadius: BorderRadius.circular(6),
               ),
               child: Row(
                 children: [
@@ -637,7 +638,7 @@ class _PlayerScreenState extends ConsumerState<_PlayerScreen> {
                           horizontal: 8, vertical: 4),
                       decoration: BoxDecoration(
                         color: Colors.white12,
-                        borderRadius: BorderRadius.circular(6),
+                        borderRadius: BorderRadius.circular(3),
                       ),
                       child: Text('${_speed.toStringAsFixed(0)}×',
                           style: const TextStyle(
@@ -688,7 +689,7 @@ class _PlayerSummary extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       decoration: BoxDecoration(
         color: const Color(0xFF1A2733).withValues(alpha: 0.85),
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(4),
       ),
       child: Text(
         '${session.distanceKm.toStringAsFixed(2)} km · '

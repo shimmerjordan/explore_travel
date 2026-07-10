@@ -15,6 +15,7 @@ import '../../services/imghost/upload_queue.dart' show UploadRecord;
 import '../../services/imghost/private_image_loader.dart';
 import '../../services/map/tile_providers.dart';
 import '../../services/media/exif_service.dart';
+import '../common/pixel.dart';
 import '../map/native_file_image_io.dart';
 import 'quill_editor_screen.dart';
 
@@ -165,8 +166,12 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
                 onPressed: _exitSelect,
               )
             : null,
-        title: Text(_selectMode ? '已选 ${_selected.length} 条' : '旅行手账',
-            style: const TextStyle(fontWeight: FontWeight.w700)),
+        title: _selectMode
+            ? Text('已选 ${_selected.length} 条',
+                style: const TextStyle(fontWeight: FontWeight.w700))
+            : Text('旅行手账',
+                style: PixelText.headline
+                    .copyWith(color: Theme.of(context).colorScheme.onSurface)),
         actions: _selectMode
             ? [
                 IconButton(
@@ -217,7 +222,7 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
                     .withValues(alpha: 0.5),
                 contentPadding: const EdgeInsets.symmetric(vertical: 0),
                 border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(28),
+                  borderRadius: BorderRadius.circular(6),
                   borderSide: BorderSide.none,
                 ),
               ),
@@ -254,7 +259,7 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
                   color: isSelected
                       ? cs.primaryContainer
                       : cs.surfaceContainerHigh,
-                  borderRadius: BorderRadius.circular(16),
+                  borderRadius: BorderRadius.circular(6),
                   clipBehavior: Clip.antiAlias,
                   child: InkWell(
                     onTap: () async {
@@ -696,10 +701,15 @@ class _JournalLeading extends StatelessWidget {
         height: s,
         decoration: BoxDecoration(
           color: cs.primaryContainer,
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(4),
         ),
-        child: Icon(Icons.auto_stories_outlined,
-            color: cs.onPrimaryContainer, size: 28),
+        child: Center(
+          child: PixelSprite(
+            rows: PixelSprites.book,
+            color: cs.onPrimaryContainer,
+            cell: 4,
+          ),
+        ),
       );
     }
     return SizedBox(
@@ -716,7 +726,7 @@ class _JournalLeading extends StatelessWidget {
                 padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                 decoration: BoxDecoration(
                   color: Colors.black.withValues(alpha: 0.6),
-                  borderRadius: BorderRadius.circular(8),
+                  borderRadius: BorderRadius.circular(3),
                 ),
                 child: Row(mainAxisSize: MainAxisSize.min, children: [
                   const Icon(Icons.photo_library_rounded,
@@ -766,7 +776,7 @@ class JournalMediaThumb extends ConsumerWidget {
       child = NativeFileImage(path: path);
     }
     return ClipRRect(
-      borderRadius: BorderRadius.circular(6),
+      borderRadius: BorderRadius.circular(4),
       child: Container(
         width: size,
         height: size,
@@ -854,7 +864,7 @@ class _FullscreenGalleryState extends ConsumerState<_FullscreenGallery> {
                       const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                   decoration: BoxDecoration(
                     color: Colors.black54,
-                    borderRadius: BorderRadius.circular(20),
+                    borderRadius: BorderRadius.circular(4),
                   ),
                   child: Text('${_index + 1} / ${widget.paths.length}',
                       style:
@@ -998,7 +1008,7 @@ class _UploadStatusBarState extends ConsumerState<_UploadStatusBar> {
         padding: const EdgeInsets.fromLTRB(10, 8, 6, 8),
         decoration: BoxDecoration(
           color: cs.surfaceContainerHighest,
-          borderRadius: BorderRadius.circular(8),
+          borderRadius: BorderRadius.circular(4),
         ),
         child: Row(
           children: [
@@ -1093,7 +1103,7 @@ class _UploadStatusBadge extends ConsumerWidget {
               padding: const EdgeInsets.only(right: 8),
               child: InkWell(
                 onTap: () => _showUploadQueue(context, ref),
-                borderRadius: BorderRadius.circular(20),
+                borderRadius: BorderRadius.circular(4),
                 child: Row(mainAxisSize: MainAxisSize.min, children: [
                   Icon(st.icon, size: 15, color: st.color),
                   const SizedBox(width: 3),
@@ -1183,7 +1193,7 @@ class _ListUploadChipState extends ConsumerState<_ListUploadChip> {
       padding: const EdgeInsets.only(right: 8),
       child: InkWell(
         onTap: _busy ? null : () => _upload(local.length),
-        borderRadius: BorderRadius.circular(20),
+        borderRadius: BorderRadius.circular(4),
         child: Row(mainAxisSize: MainAxisSize.min, children: [
           if (_busy)
             const SizedBox(
@@ -1806,7 +1816,7 @@ class _LocationMapStrip extends ConsumerWidget {
     }
     final cs = Theme.of(context).colorScheme;
     return ClipRRect(
-      borderRadius: BorderRadius.circular(16),
+      borderRadius: BorderRadius.circular(6),
       child: SizedBox(
         height: 168,
         child: Stack(
@@ -1846,7 +1856,7 @@ class _LocationMapStrip extends ConsumerWidget {
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 decoration: BoxDecoration(
                   color: cs.surface.withValues(alpha: 0.82),
-                  borderRadius: BorderRadius.circular(8),
+                  borderRadius: BorderRadius.circular(3),
                 ),
                 child: Text(
                   '${lat.toStringAsFixed(5)}, ${lng.toStringAsFixed(5)}',

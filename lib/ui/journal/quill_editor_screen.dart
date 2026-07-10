@@ -220,7 +220,7 @@ class _QuillBodyFieldState extends ConsumerState<QuillBodyField> {
         Container(
           decoration: BoxDecoration(
             color: cs.surfaceContainerHigh,
-            borderRadius: BorderRadius.circular(12),
+            borderRadius: BorderRadius.circular(6),
           ),
           padding: const EdgeInsets.symmetric(horizontal: 4),
           child: Row(children: [
@@ -263,7 +263,7 @@ class _QuillBodyFieldState extends ConsumerState<QuillBodyField> {
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
           decoration: BoxDecoration(
             color: cs.surfaceContainerHighest.withValues(alpha: 0.4),
-            borderRadius: BorderRadius.circular(12),
+            borderRadius: BorderRadius.circular(6),
             border: Border.all(color: cs.outlineVariant.withValues(alpha: 0.6)),
           ),
           child: q.QuillEditor.basic(

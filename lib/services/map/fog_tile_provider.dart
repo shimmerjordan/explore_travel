@@ -458,14 +458,20 @@ class FogTileLayer extends StatefulWidget {
 }
 
 class _FogTileLayerState extends State<FogTileLayer> {
+  /// Monotonic base across ALL FogTileLayer instances in this process. The
+  /// baked-tile ImageCache key is (x,y,z,dim,generation) — if every state
+  /// started again at generation 0, leaving and re-entering the map would
+  /// collide with cached tiles baked from a DIFFERENT snapshot.
+  static int _generationSeed = 0;
+
   late final FogTileProvider _provider = FogTileProvider(FogSnapshot(
     rows: const [],
     veil: widget.veil,
     mapProvider: widget.mapProvider,
-    generation: 0,
+    generation: _generation,
   ));
   String _dataKey = '';
-  int _generation = 0;
+  late int _generation = (_generationSeed += 1 << 20);
 
   /// In-memory mirror of the visible layers' fog rows, keyed by
   /// (tileX,tileY,layerId). Full reloads replace it; delta events patch it.
@@ -558,6 +564,14 @@ class _FogTileLayerState extends State<FogTileLayer> {
 
   @override
   Widget build(BuildContext context) => TileLayer(
+        // Remount when the snapshot flips empty↔non-empty. The in-place
+        // reload below only re-bakes TileImages that ALREADY exist — on a
+        // cold start the fog rows arrive from the DB after the layer
+        // mounted, and if no tile had loaded yet (camera not laid out, no
+        // map event since) nothing would ever load until the user pans or
+        // zooms ("地图没有迷雾，点一下定位才出现"). A remount is guaranteed
+        // to run a fresh load-and-prune pass against the current camera.
+        key: ValueKey('fog-tiles-${_rows.isEmpty ? 'empty' : 'data'}'),
         tileProvider: _provider,
         // Changing this on a data change is what triggers an in-place reload.
         additionalOptions: {'gen': '$_generation'},

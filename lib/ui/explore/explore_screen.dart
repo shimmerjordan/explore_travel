@@ -8,6 +8,7 @@ import '../../data/iso_country_areas.dart';
 import '../../services/fog/fog_engine.dart';
 import '../../services/geo/learned_regions.dart';
 import '../common/atmosphere.dart';
+import '../common/pixel.dart';
 
 /// Exploration progress, organised by continent → country pixel grid.
 ///
@@ -42,6 +43,7 @@ class _ExploreScreenState extends ConsumerState<ExploreScreen> {
   /// the bundled file and here, [_pct] is replaced by a learned-bbox
   /// progress estimate.
   List<LearnedRegion> _learned = const [];
+  Map<String, double> _learnedRevealedKm2 = const {};
   bool _loading = false;
 
   @override
@@ -64,12 +66,23 @@ class _ExploreScreenState extends ConsumerState<ExploreScreen> {
     final layers = await db.allLayers();
     final layerIds = layers.where((l) => l.visible).map((l) => l.id).toList();
 
-    // Same calc as home stats card — both go through
-    // [FogEngine.globalExplorationPercent] which is revealed km² / Earth
-    // surface (510 072 000 km²). Keeps the two numbers consistent.
-    _globalPercent = await fog.globalExplorationPercent(layerIds);
     _pct.clear();
     _regionPct.clear();
+
+    // Learned regions are needed up-front now: their bboxes ride along in
+    // the same aggregate call instead of one full fog walk per province.
+    _learned = await ref.read(learnedRegionsProvider).all();
+    final learnedBboxes = <String,
+        ({double minLat, double minLng, double maxLat, double maxLng})>{
+      for (final r in _learned)
+        if (r.province.isNotEmpty && r.city.isEmpty)
+          'learned|${r.country}|${r.province}': (
+            minLat: r.minLat,
+            minLng: r.minLng,
+            maxLat: r.maxLat,
+            maxLng: r.maxLng,
+          ),
+    };
 
     // Build ONE flat (country|province → bbox) map and let the engine
     // attribute each revealed pixel to the SMALLEST containing bbox —
@@ -122,10 +135,16 @@ class _ExploreScreenState extends ConsumerState<ExploreScreen> {
         for (final e in regionBboxes.entries)
           if (e.key.startsWith('prov|')) e.key: e.value,
       };
-      final countryKm2 =
-          await fog.revealedAreaByRegionsKm2(layerIds, regions: countryOnly);
-      final provKm2 =
-          await fog.revealedAreaByRegionsKm2(layerIds, regions: provOnly);
+      // ONE aggregate call: country attribution + province attribution are
+      // independent passes computed in the same isolate run over one fetch;
+      // learned bboxes + the global number ride along too.
+      const earthSurfaceKm2 = 510072000.0;
+      final agg = await fog.computeAggregates(layerIds,
+          regions: countryOnly, regions2: provOnly, bboxes: learnedBboxes);
+      _globalPercent = (agg.globalKm2 / earthSurfaceKm2).clamp(0.0, 1.0);
+      final countryKm2 = agg.regions;
+      final provKm2 = agg.regions2;
+      _learnedRevealedKm2 = agg.bboxes;
 
       for (final entry in countries.entries) {
         final country = entry.key;
@@ -150,21 +169,26 @@ class _ExploreScreenState extends ConsumerState<ExploreScreen> {
       }
     }
 
+    // No boundary asset? Still compute the global number + learned bboxes
+    // in one aggregate pass.
+    if (data == null) {
+      const earthSurfaceKm2 = 510072000.0;
+      final agg =
+          await fog.computeAggregates(layerIds, bboxes: learnedBboxes);
+      _globalPercent = (agg.globalKm2 / earthSurfaceKm2).clamp(0.0, 1.0);
+      _learnedRevealedKm2 = agg.bboxes;
+    }
+
     // Learned regions override bundled. Use each learned bbox as both
     // numerator scope AND denominator — the bbox grows as the user visits
     // more places, so % is "fraction of your personal bbox covered". For a
     // single-point visit, bbox ≈ a point ≈ near-zero area, giving a tiny
-    // non-zero number rather than a fake 100%.
-    _learned = await ref.read(learnedRegionsProvider).all();
+    // non-zero number rather than a fake 100%. Revealed km² per bbox was
+    // already computed in the aggregate call above.
     for (final r in _learned) {
       if (r.province.isEmpty || r.city.isNotEmpty) continue; // province only
-      final revealedKm2 = await fog.revealedAreaInBboxKm2(
-        layerIds,
-        minLat: r.minLat,
-        minLng: r.minLng,
-        maxLat: r.maxLat,
-        maxLng: r.maxLng,
-      );
+      final revealedKm2 =
+          _learnedRevealedKm2['learned|${r.country}|${r.province}'] ?? 0;
       final bboxKm2 =
           FogEngine.bboxAreaKm2(r.minLat, r.minLng, r.maxLat, r.maxLng);
       final pct = bboxKm2 <= 0 ? 0.0 : (revealedKm2 / bboxKm2).clamp(0.0, 1.0);
@@ -223,8 +247,9 @@ class _ExploreScreenState extends ConsumerState<ExploreScreen> {
       body: CustomScrollView(
         slivers: [
           SliverAppBar.large(
-            title: const Text('探索进度',
-                style: TextStyle(fontWeight: FontWeight.w700)),
+            title: Text('探索进度',
+                style: PixelText.headline
+                    .copyWith(color: Theme.of(context).colorScheme.onSurface)),
             actions: [
               IconButton(
                 icon: const Icon(Icons.refresh_rounded),
@@ -279,10 +304,6 @@ class _GlobalCard extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // Stacked instead of single-row: 10-decimal % is ~13 chars wide
-        // at 18pt bold — combined with the label and icon it overflowed
-        // narrow screens by a few px. Putting % on its own line removes
-        // the squeeze entirely and reads cleaner anyway.
         Row(children: [
           Icon(icon, color: Colors.white, size: 18),
           const SizedBox(width: 8),
@@ -295,25 +316,22 @@ class _GlobalCard extends StatelessWidget {
                     letterSpacing: 1)),
           ),
         ]),
-        const SizedBox(height: 2),
+        const SizedBox(height: 4),
+        // The collection stat IS the celebration — pixel display face.
         FittedBox(
           fit: BoxFit.scaleDown,
           alignment: Alignment.centerLeft,
           child: Text('${(pct * 100).toStringAsFixed(10)}%',
-              style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 18,
-                  fontWeight: FontWeight.w800)),
+              style: PixelText.headline.copyWith(color: Colors.white)),
         ),
-        const SizedBox(height: 4),
-        ClipRRect(
-          borderRadius: BorderRadius.circular(4),
-          child: LinearProgressIndicator(
-            value: pct,
-            minHeight: 5,
-            backgroundColor: Colors.white24,
-            valueColor: const AlwaysStoppedAnimation(Colors.white),
-          ),
+        const SizedBox(height: 6),
+        // 8-bit health bar: progress as discrete blocks.
+        PixelBlockBar(
+          value: pct,
+          cells: 24,
+          cellHeight: 7,
+          color: Colors.white,
+          emptyColor: Colors.white24,
         ),
       ],
     );
@@ -323,24 +341,21 @@ class _GlobalCard extends StatelessWidget {
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(18),
+      child: PixelPanel(
+        color: const Color(0xFF00897B),
+        borderColor: const Color(0xFF26A69A),
+        step: 4,
+        steps: 2,
+        clipChild: true,
         child: Stack(
           children: [
-            // Base brand gradient.
+            // Dither fade toward the foot of the card — the pixel answer to
+            // the old gradient, gives the panel weight without banding.
             const Positioned.fill(
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    colors: [Color(0xFF26A69A), Color(0xFF00897B)],
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                  ),
-                ),
-              ),
+              child: PixelDitherFade(color: Color(0xFF00695C), cell: 4),
             ),
-            // Drifting fog + light motes — the "clearing the fog" motif made
-            // ambient. Drag across the card to part the motes.
+            // Drifting pixel clouds + square motes — the "clearing the fog"
+            // motif in 8-bit. Drag across the card to part the motes.
             const Positioned.fill(
               child: Atmosphere(intensity: 0.9),
             ),
@@ -401,7 +416,7 @@ class _LearnedRegionsCard extends StatelessWidget {
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
           color: cs.surfaceContainerHigh,
-          borderRadius: BorderRadius.circular(16),
+          borderRadius: BorderRadius.circular(6),
           border: Border.all(color: cs.outline.withValues(alpha: 0.2)),
         ),
         child: Column(
@@ -518,7 +533,8 @@ class _ContinentSection extends StatelessWidget {
             Row(
               children: [
                 Text(_codeToFlagEmoji(c.code),
-                    style: const TextStyle(fontSize: 32)),
+                    style:
+                        const TextStyle(fontSize: 32, fontFamily: 'Roboto')),
                 const SizedBox(width: 12),
                 Expanded(
                   child: Column(
@@ -538,14 +554,12 @@ class _ContinentSection extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 8),
-            ClipRRect(
-              borderRadius: BorderRadius.circular(4),
-              child: LinearProgressIndicator(
-                value: pct,
-                minHeight: 6,
-                backgroundColor:
-                    Theme.of(context).colorScheme.surfaceContainerHigh,
-              ),
+            PixelBlockBar(
+              value: pct,
+              cells: 24,
+              cellHeight: 8,
+              color: const Color(0xFF26A69A),
+              emptyColor: Theme.of(context).colorScheme.surfaceContainerHigh,
             ),
             const SizedBox(height: 16),
             if (regions == null || regions.isEmpty)
@@ -603,8 +617,7 @@ class _CountryPixel extends StatelessWidget {
       message: '${entry.name} · ${(pct * 100).toStringAsFixed(10)}%',
       child: GestureDetector(
         onTap: onTap,
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(4),
+        child: ClipRect(
           child: Container(
             width: 40,
             height: 40,
@@ -622,7 +635,11 @@ class _CountryPixel extends StatelessWidget {
                 Center(
                   child: Text(
                     flag,
-                    style: const TextStyle(fontSize: 32, height: 1),
+                    // Explicit system face: the global PixelZh font renders
+                    // regional-indicator pairs as letter tiles instead of
+                    // falling back to the color-emoji font.
+                    style: const TextStyle(
+                        fontSize: 32, height: 1, fontFamily: 'Roboto'),
                   ),
                 ),
                 // Greyscale veil for unvisited; transparent for fully

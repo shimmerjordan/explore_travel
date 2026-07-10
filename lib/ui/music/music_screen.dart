@@ -7,6 +7,7 @@ import 'package:just_audio/just_audio.dart' show PlayerState;
 import '../../app/providers.dart';
 import '../../data/db/database.dart';
 import '../../services/music/music_service.dart';
+import '../common/pixel.dart';
 
 /// Music screen: search → play → favorite, plus an AI-driven "make me a
 /// travel playlist" tab that derives keywords from current location and mood.
@@ -229,7 +230,9 @@ class _MusicScreenState extends ConsumerState<MusicScreen> {
       length: 3,
       child: Scaffold(
         appBar: AppBar(
-          title: const Text('旅行歌单'),
+          title: Text('旅行歌单',
+              style: PixelText.headline
+                  .copyWith(color: Theme.of(context).colorScheme.onSurface)),
           actions: [
             Consumer(builder: (context, ref, _) {
               final s = ref.watch(settingsProvider);
@@ -495,7 +498,15 @@ class _MusicScreenState extends ConsumerState<MusicScreen> {
         }
         final favs = snap.data!;
         if (favs.isEmpty) {
-          return const Center(child: Text('还没有收藏，长按一首歌试试'));
+          final cs = Theme.of(context).colorScheme;
+          return Center(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              PixelSprite(
+                  rows: PixelSprites.note, color: cs.primary, cell: 5),
+              const SizedBox(height: 12),
+              const Text('还没有收藏，长按一首歌试试'),
+            ]),
+          );
         }
         return ListView.builder(
           itemCount: favs.length,

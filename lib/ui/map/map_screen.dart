@@ -25,6 +25,7 @@ import 'native_file_image_io.dart';
 import '../../services/map/fog_layer.dart';
 import '../../services/map/fog_tile_provider.dart';
 import '../../services/map/tile_providers.dart';
+import '../common/pixel.dart';
 import '../journal/journal_screen.dart' as journal_ui;
 import '../import/track_import_flow.dart';
 import '../widgets/top_toast.dart';
@@ -739,7 +740,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                           ? Colors.redAccent
                           : const Color(0xFF26A69A))
                       .withValues(alpha: 0.9),
-                  borderRadius: BorderRadius.circular(12),
+                  borderRadius: BorderRadius.circular(6),
                 ),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
@@ -1052,7 +1053,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                         const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
                     decoration: BoxDecoration(
                       color: Colors.black.withValues(alpha: 0.55),
-                      borderRadius: BorderRadius.circular(20),
+                      borderRadius: BorderRadius.circular(4),
                     ),
                     child: const Text('只读 · 展示模式',
                         style: TextStyle(color: Colors.white, fontSize: 12)),
@@ -1074,7 +1075,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                         const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
                     decoration: BoxDecoration(
                       color: Colors.black.withValues(alpha: 0.62),
-                      borderRadius: BorderRadius.circular(20),
+                      borderRadius: BorderRadius.circular(4),
                     ),
                     child: Text(
                       kIsWeb
@@ -1211,7 +1212,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
       showDragHandle: true,
       backgroundColor: Theme.of(context).colorScheme.surfaceContainerLow,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(10)),
       ),
       builder: (sheetCtx) => SafeArea(
         child: SizedBox(
@@ -1294,19 +1295,24 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     final fog = ref.read(fogEngineProvider);
     final layers = await db.allLayers();
     final layerIds = layers.where((l) => l.visible).map((l) => l.id).toList();
-    final pct = await fog.globalExplorationPercent(layerIds);
-    final tiles = await db.fogTilesForLayers(layerIds, FogEngine.tileZoom);
+    // ONE cached background-isolate aggregate powers both the global % and
+    // the level XP (same number, different scale). The old code walked the
+    // full fog table three times on the main isolate — seconds of frozen UI
+    // after a big FOW import.
+    const earthSurfaceKm2 = 510072000.0;
+    final agg = await fog.computeAggregates(layerIds);
+    final pct = (agg.globalKm2 / earthSurfaceKm2).clamp(0.0, 1.0);
+    final exploredKm2 = agg.globalKm2;
+    // Block count for the stat tile via COUNT(*) — not a 45k-row fetch.
+    final tileCountRow = layerIds.isEmpty
+        ? null
+        : await db.customSelect(
+            'SELECT COUNT(*) AS c FROM fog_tiles '
+            'WHERE zoom = ${FogEngine.tileZoom} '
+            'AND layer_id IN (${layerIds.join(",")})',
+          ).getSingle();
+    final fogBlockCount = tileCountRow?.read<int>('c') ?? 0;
     final journalCount = (await db.recentJournal(limit: 1000)).length;
-    // Level XP = total explored *path area* (km²) across all visible layers,
-    // Mercator-corrected — the area actually walked / revealed, not a raw
-    // block count.
-    final exploredKm2 = await fog.revealedAreaInBboxKm2(
-      layerIds,
-      minLat: -85.05,
-      minLng: -180,
-      maxLat: 85.05,
-      maxLng: 180,
-    );
     final lvl = _levelForArea(exploredKm2);
     if (!context.mounted) return;
     showModalBottomSheet<void>(
@@ -1314,7 +1320,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
       context: context,
       backgroundColor: const Color(0xFF1A2733),
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(10)),
       ),
       builder: (_) => SafeArea(
         // Wrap in Consumer so the avatar + name update live when the
@@ -1423,7 +1429,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                       begin: Alignment.topLeft,
                       end: Alignment.bottomRight,
                     ),
-                    borderRadius: BorderRadius.circular(16),
+                    borderRadius: BorderRadius.circular(6),
                   ),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -1435,13 +1441,11 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                                 horizontal: 10, vertical: 4),
                             decoration: BoxDecoration(
                               color: Colors.white.withValues(alpha: 0.22),
-                              borderRadius: BorderRadius.circular(20),
+                              borderRadius: BorderRadius.circular(3),
                             ),
                             child: Text('Lv ${lvl.level}',
-                                style: const TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 16,
-                                    fontWeight: FontWeight.w800)),
+                                style: PixelText.label.copyWith(
+                                    fontSize: 14, color: Colors.white)),
                           ),
                           const Spacer(),
                           Text(
@@ -1454,15 +1458,12 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                         ],
                       ),
                       const SizedBox(height: 10),
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(6),
-                        child: LinearProgressIndicator(
-                          value: lvl.progress,
-                          minHeight: 8,
-                          backgroundColor: Colors.white24,
-                          valueColor:
-                              const AlwaysStoppedAnimation(Color(0xFFFFD54F)),
-                        ),
+                      PixelBlockBar(
+                        value: lvl.progress,
+                        cells: 20,
+                        cellHeight: 8,
+                        color: const Color(0xFFFFD54F),
+                        emptyColor: Colors.white24,
                       ),
                       const SizedBox(height: 6),
                       Text(
@@ -1486,7 +1487,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                 const SizedBox(height: 16),
                 Row(
                   children: [
-                    Expanded(child: _StatTile('${tiles.length}', '迷雾区块')),
+                    Expanded(child: _StatTile('$fogBlockCount', '迷雾区块')),
                     Expanded(child: _StatTile('$journalCount', '手账数')),
                     Expanded(child: _StatTile('${layers.length}', '图层数')),
                   ],
@@ -1712,7 +1713,7 @@ class _SimPanel extends StatelessWidget {
       padding: const EdgeInsets.all(8),
       decoration: BoxDecoration(
         color: Colors.deepPurple.withValues(alpha: 0.85),
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(6),
         boxShadow: [
           BoxShadow(
             color: Colors.black.withValues(alpha: 0.4),
@@ -1876,9 +1877,9 @@ class _MapChip extends StatelessWidget {
       padding: const EdgeInsets.only(right: 4),
       child: Material(
         color: Colors.black45,
-        borderRadius: BorderRadius.circular(20),
+        borderRadius: BorderRadius.circular(4),
         child: InkWell(
-          borderRadius: BorderRadius.circular(20),
+          borderRadius: BorderRadius.circular(4),
           onTap: onTap,
           child: Padding(
             padding: EdgeInsets.symmetric(
@@ -1918,12 +1919,14 @@ class _MapFab extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Hard-cornered square stack — the pixel take on map controls (the round
+    // dots on the map itself keep their physical meaning; chrome goes 8-bit).
     return Material(
       elevation: 3,
-      shape: const CircleBorder(),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
       color: active ? (activeColor ?? Colors.blue) : const Color(0xFF1A2733),
       child: InkWell(
-        customBorder: const CircleBorder(),
+        borderRadius: BorderRadius.circular(6),
         onTap: onTap,
         child: SizedBox(
           width: 44,
@@ -1978,7 +1981,7 @@ class _JournalCard extends StatelessWidget {
             children: [
               if (paths.isNotEmpty)
                 ClipRRect(
-                  borderRadius: BorderRadius.circular(10),
+                  borderRadius: BorderRadius.circular(4),
                   child: SizedBox(
                     width: 72,
                     height: 72,
@@ -1989,14 +1992,17 @@ class _JournalCard extends StatelessWidget {
                 Container(
                   width: 72,
                   height: 72,
-                  decoration: BoxDecoration(
-                    color: Theme.of(context)
-                        .colorScheme
-                        .primary
-                        .withValues(alpha: 0.15),
-                    borderRadius: BorderRadius.circular(8),
+                  color: Theme.of(context)
+                      .colorScheme
+                      .primary
+                      .withValues(alpha: 0.15),
+                  child: Center(
+                    child: PixelSprite(
+                      rows: PixelSprites.book,
+                      color: Theme.of(context).colorScheme.primary,
+                      cell: 4,
+                    ),
                   ),
-                  child: const Icon(Icons.book_outlined, size: 28),
                 ),
               const SizedBox(width: 12),
               Expanded(
@@ -2017,11 +2023,7 @@ class _JournalCard extends StatelessWidget {
                         Container(
                           padding: const EdgeInsets.symmetric(
                               horizontal: 8, vertical: 2),
-                          decoration: BoxDecoration(
-                            color:
-                                const Color(0xFF26A69A).withValues(alpha: 0.2),
-                            borderRadius: BorderRadius.circular(10),
-                          ),
+                          color: const Color(0xFF26A69A).withValues(alpha: 0.2),
                           child: Text(distLabel,
                               style: const TextStyle(
                                   fontSize: 11,
@@ -2234,12 +2236,9 @@ class _NavItem extends StatelessWidget {
                   right: -3,
                   top: -3,
                   child: Container(
-                    width: 7,
-                    height: 7,
-                    decoration: const BoxDecoration(
-                      color: Color(0xFF4CAF50),
-                      shape: BoxShape.circle,
-                    ),
+                    width: 6,
+                    height: 6,
+                    color: const Color(0xFF4CAF50),
                   ),
                 ),
             ],
@@ -2296,7 +2295,11 @@ class _CenterRecFabState extends State<_CenterRecFab>
       child: AnimatedBuilder(
         animation: _pulse,
         builder: (_, child) {
-          final t = widget.recording ? _pulse.value : 0.0;
+          // Pulse steps through 4 discrete sizes — a sprite-sheet blink, not
+          // a smooth breath. (0 when idle.)
+          final t = widget.recording
+              ? (_pulse.value * 4).floorToDouble() / 4
+              : 0.0;
           return Stack(
             alignment: Alignment.center,
             children: [
@@ -2306,7 +2309,7 @@ class _CenterRecFabState extends State<_CenterRecFab>
                   height: 64 + t * 16,
                   decoration: BoxDecoration(
                     color: color.withValues(alpha: 0.18 * (1 - t)),
-                    shape: BoxShape.circle,
+                    borderRadius: BorderRadius.circular(12),
                   ),
                 ),
               child!,
@@ -2314,17 +2317,19 @@ class _CenterRecFabState extends State<_CenterRecFab>
           );
         },
         child: Material(
-          shape: const CircleBorder(),
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
           color: color,
           elevation: 6,
           shadowColor: color.withValues(alpha: 0.5),
           child: InkWell(
-            customBorder: const CircleBorder(),
+            borderRadius: BorderRadius.circular(10),
             onTap: widget.onTap,
             child: SizedBox(
               width: 60,
               height: 60,
               child: Icon(
+                // Media semantics stay standard: dot = record, square = stop.
                 widget.recording
                     ? Icons.stop_rounded
                     : Icons.fiber_manual_record_rounded,
@@ -2351,9 +2356,9 @@ class _ProfileCard extends ConsumerWidget {
     final s = ref.watch(settingsProvider);
     return Material(
       color: Colors.black.withValues(alpha: 0.45),
-      borderRadius: BorderRadius.circular(24),
+      borderRadius: BorderRadius.circular(4),
       child: InkWell(
-        borderRadius: BorderRadius.circular(24),
+        borderRadius: BorderRadius.circular(4),
         onTap: onTap,
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
@@ -2393,15 +2398,14 @@ class _StatTile extends StatelessWidget {
       padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
       decoration: BoxDecoration(
         color: Colors.white.withValues(alpha: 0.05),
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(4),
       ),
       child: Column(
         children: [
+          // Stats are collection numbers — pixel display face.
           Text(value,
-              style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 18,
-                  fontWeight: FontWeight.w700)),
+              style: PixelText.label
+                  .copyWith(fontSize: 16, color: Colors.white)),
           const SizedBox(height: 2),
           Text(label,
               style: const TextStyle(color: Colors.white60, fontSize: 11)),
@@ -2699,21 +2703,21 @@ class _LayerChip extends StatelessWidget {
     return Material(
       elevation: 3,
       color: const Color(0xFF1A2733),
-      borderRadius: BorderRadius.circular(20),
+      borderRadius: BorderRadius.circular(4),
       child: InkWell(
-        borderRadius: BorderRadius.circular(20),
+        borderRadius: BorderRadius.circular(4),
         onTap: () => _showMenu(context),
         child: Padding(
           padding: const EdgeInsets.fromLTRB(10, 6, 12, 6),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
+              // 像素方块色标（图层颜色钥匙），与首页分组色标同语言。
               Container(
-                width: 12,
-                height: 12,
+                width: 10,
+                height: 10,
                 decoration: BoxDecoration(
                   color: Color(active.colorValue),
-                  shape: BoxShape.circle,
                   border: Border.all(color: Colors.white24, width: 1),
                 ),
               ),
@@ -2946,7 +2950,7 @@ class _SignalChipState extends State<_SignalChip> {
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
       decoration: BoxDecoration(
         color: Colors.black.withValues(alpha: 0.55),
-        borderRadius: BorderRadius.circular(18),
+        borderRadius: BorderRadius.circular(4),
         border: Border.all(color: s.color.withValues(alpha: 0.6), width: 1),
       ),
       child: Row(

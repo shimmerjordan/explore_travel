@@ -26,7 +26,8 @@ import 'ui/leaderboard/leaderboard_screen.dart';
 import 'ui/about/about_screen.dart';
 import 'ui/permissions/permissions_screen.dart';
 import 'app/providers.dart'
-    show groupLifecycleProvider, dbProvider, runStartupDbMaintenance;
+    show groupLifecycleProvider, dbProvider, runStartupDbMaintenance,
+        settingsProvider;
 import 'services/vault/auth_controller.dart';
 import 'ui/auth/login_screen.dart';
 import 'services/debug/log_buffer.dart';
@@ -174,6 +175,12 @@ class _ExploreJournalAppState extends ConsumerState<ExploreJournalApp> {
     ],
   );
 
+  ThemeMode get _themeMode => switch (ref.watch(settingsProvider).themePref) {
+        'light' => ThemeMode.light,
+        'system' => ThemeMode.system,
+        _ => ThemeMode.dark,
+      };
+
   @override
   Widget build(BuildContext context) {
     // Eagerly instantiate so it begins reacting to settings on launch.
@@ -183,7 +190,7 @@ class _ExploreJournalAppState extends ConsumerState<ExploreJournalApp> {
             title: 'Explore Journal',
             theme: _lightTheme,
             darkTheme: _darkTheme,
-            themeMode: ThemeMode.dark,
+            themeMode: _themeMode,
             routerConfig: _router,
             localizationsDelegates: _localizationsDelegates,
             supportedLocales: _supportedLocales,
@@ -197,7 +204,7 @@ class _ExploreJournalAppState extends ConsumerState<ExploreJournalApp> {
         title: 'Explore Journal',
         theme: _lightTheme,
         darkTheme: _darkTheme,
-        themeMode: ThemeMode.dark,
+        themeMode: _themeMode,
         routerConfig: _router,
         localizationsDelegates: _localizationsDelegates,
         supportedLocales: _supportedLocales,
@@ -221,96 +228,131 @@ class _ExploreJournalAppState extends ConsumerState<ExploreJournalApp> {
     Locale('en'),
   ];
 
-  static final _lightTheme = ThemeData(
-    useMaterial3: true,
-    colorScheme: ColorScheme.fromSeed(
+  // ── Pixel design language, v2 ─────────────────────────────────────────
+  // The FOW metaphor is a game mechanic; the whole app speaks pixel now:
+  //  · 缝合像素字体 as the GLOBAL text face (body, labels, buttons, tips) —
+  //    per explicit user preference; glyph fallback handles rare chars.
+  //  · Friendly-but-crisp radii (buttons keep a visible curve; panels stay
+  //    chunky). Stepped pixel corners remain reserved for hero panels.
+  //  · Menus/dropdowns get flat tonal surfaces with a 1.5px outline —
+  //    "inventory panel" read instead of floating Material shadows.
+  //  · Light scheme is the "轻快" mode: vibrant seed, airy tinted surfaces.
+  static ThemeData _buildTheme(Brightness brightness) {
+    final dark = brightness == Brightness.dark;
+    final scheme = ColorScheme.fromSeed(
       seedColor: const Color(0xFF26A69A),
-      brightness: Brightness.light,
-    ),
-    cardTheme: CardThemeData(
-      elevation: 0,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-    ),
-    appBarTheme: const AppBarTheme(
-      centerTitle: true,
-      elevation: 0,
-      scrolledUnderElevation: 1,
-    ),
-    floatingActionButtonTheme: FloatingActionButtonThemeData(
-      elevation: 2,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-    ),
-    snackBarTheme: const SnackBarThemeData(
-      behavior: SnackBarBehavior.floating,
-    ),
-    listTileTheme: const ListTileThemeData(
-      shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.all(Radius.circular(12))),
-      contentPadding: EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-    ),
-    chipTheme: ChipThemeData(
-      shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(10)),
-      side: BorderSide.none,
-    ),
-    filledButtonTheme: FilledButtonThemeData(
-      style: FilledButton.styleFrom(
-          shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12))),
-    ),
-    segmentedButtonTheme: SegmentedButtonThemeData(
-      style: ButtonStyle(
-        shape: WidgetStatePropertyAll(RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12))),
-      ),
-    ),
-  );
+      brightness: brightness,
+      // Light mode carries the "轻快" personality: punchier chroma.
+      dynamicSchemeVariant:
+          dark ? DynamicSchemeVariant.tonalSpot : DynamicSchemeVariant.vibrant,
+    );
+    RoundedRectangleBorder box(double r) =>
+        RoundedRectangleBorder(borderRadius: BorderRadius.circular(r));
+    final outline = scheme.outlineVariant.withValues(alpha: dark ? 0.5 : 0.9);
 
-  static final _darkTheme = ThemeData(
-    useMaterial3: true,
-    colorScheme: ColorScheme.fromSeed(
-      seedColor: const Color(0xFF26A69A),
-      brightness: Brightness.dark,
-    ),
-    scaffoldBackgroundColor: const Color(0xFF0F1923),
-    cardTheme: CardThemeData(
-      elevation: 0,
-      color: const Color(0xFF1A2733),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-    ),
-    appBarTheme: const AppBarTheme(
-      centerTitle: true,
-      elevation: 0,
-      scrolledUnderElevation: 0,
-      backgroundColor: Color(0xFF0F1923),
-    ),
-    floatingActionButtonTheme: FloatingActionButtonThemeData(
-      elevation: 2,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-    ),
-    snackBarTheme: const SnackBarThemeData(
-      behavior: SnackBarBehavior.floating,
-    ),
-    listTileTheme: const ListTileThemeData(
-      shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.all(Radius.circular(12))),
-      contentPadding: EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-    ),
-    chipTheme: ChipThemeData(
-      shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(10)),
-      side: BorderSide.none,
-    ),
-    filledButtonTheme: FilledButtonThemeData(
-      style: FilledButton.styleFrom(
-          shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12))),
-    ),
-    segmentedButtonTheme: SegmentedButtonThemeData(
-      style: ButtonStyle(
-        shape: WidgetStatePropertyAll(RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12))),
+    final base = ThemeData(
+      useMaterial3: true,
+      colorScheme: scheme,
+      // Global pixel face. 14sp body in a 12px-grid font stays legible;
+      // missing glyphs fall back to the system face automatically.
+      fontFamily: 'PixelZh',
+      // Dark stays moody but lifts off pure-black; light is an airy
+      // teal-tinted paper so the map and tonal panels breathe.
+      scaffoldBackgroundColor:
+          dark ? const Color(0xFF14212C) : const Color(0xFFF3FAF8),
+      cardTheme: CardThemeData(
+        elevation: 0,
+        color: dark ? const Color(0xFF1D2C39) : null,
+        shape: box(8),
       ),
-    ),
-  );
+      appBarTheme: AppBarTheme(
+        centerTitle: true,
+        elevation: 0,
+        scrolledUnderElevation: dark ? 0 : 1,
+        backgroundColor:
+            dark ? const Color(0xFF14212C) : const Color(0xFFF3FAF8),
+      ),
+      floatingActionButtonTheme: FloatingActionButtonThemeData(
+        elevation: 2,
+        shape: box(12),
+      ),
+      snackBarTheme: SnackBarThemeData(
+        behavior: SnackBarBehavior.floating,
+        shape: box(8),
+      ),
+      listTileTheme: const ListTileThemeData(
+        shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.all(Radius.circular(8))),
+        contentPadding: EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      ),
+      chipTheme: ChipThemeData(shape: box(6), side: BorderSide.none),
+      // Buttons: crisp but friendly — a clear curve, not a stadium and
+      // not a brick.
+      filledButtonTheme: FilledButtonThemeData(
+        style: FilledButton.styleFrom(shape: box(10)),
+      ),
+      elevatedButtonTheme: ElevatedButtonThemeData(
+        style: ElevatedButton.styleFrom(shape: box(10)),
+      ),
+      outlinedButtonTheme: OutlinedButtonThemeData(
+        style: OutlinedButton.styleFrom(
+          shape: box(10),
+          side: BorderSide(color: scheme.primary.withValues(alpha: 0.55)),
+        ),
+      ),
+      textButtonTheme: TextButtonThemeData(
+        style: TextButton.styleFrom(shape: box(10)),
+      ),
+      segmentedButtonTheme: SegmentedButtonThemeData(
+        style: ButtonStyle(shape: WidgetStatePropertyAll(box(10))),
+      ),
+      dialogTheme: DialogThemeData(shape: box(14)),
+      bottomSheetTheme: const BottomSheetThemeData(
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+        ),
+      ),
+      // Menus / dropdowns as flat "inventory panels": tonal surface, real
+      // border, minimal shadow — a deliberate pixel-RPG affordance.
+      popupMenuTheme: PopupMenuThemeData(
+        elevation: 2,
+        color: dark ? const Color(0xFF22323F) : scheme.surfaceContainerHigh,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(8),
+          side: BorderSide(color: outline, width: 1.5),
+        ),
+      ),
+      menuTheme: MenuThemeData(
+        style: MenuStyle(
+          elevation: const WidgetStatePropertyAll(2),
+          backgroundColor: WidgetStatePropertyAll(
+              dark ? const Color(0xFF22323F) : scheme.surfaceContainerHigh),
+          shape: WidgetStatePropertyAll(RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(8),
+            side: BorderSide(color: outline, width: 1.5),
+          )),
+        ),
+      ),
+      dropdownMenuTheme: DropdownMenuThemeData(
+        menuStyle: MenuStyle(
+          elevation: const WidgetStatePropertyAll(2),
+          backgroundColor: WidgetStatePropertyAll(
+              dark ? const Color(0xFF22323F) : scheme.surfaceContainerHigh),
+          shape: WidgetStatePropertyAll(RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(8),
+            side: BorderSide(color: outline, width: 1.5),
+          )),
+        ),
+      ),
+      inputDecorationTheme: const InputDecorationTheme(
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.all(Radius.circular(8)),
+        ),
+      ),
+    );
+    return base;
+  }
+
+  static final _lightTheme = _buildTheme(Brightness.light);
+  static final _darkTheme = _buildTheme(Brightness.dark);
 }

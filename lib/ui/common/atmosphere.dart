@@ -18,6 +18,14 @@ import 'package:flutter/material.dart';
 ///
 /// Place it inside a clipped, bounded box (e.g. `Positioned.fill`) behind
 /// content.
+///
+/// Two render styles:
+/// - [AtmosphereStyle.soft]: the original soft blooms + round motes.
+/// - [AtmosphereStyle.pixel]: 8-bit weather — drifting pixel clouds and
+///   square motes snapped to a coarse grid with stepped, game-like motion.
+///   Same restraint rules apply (slow, low alpha, reduced-motion aware).
+enum AtmosphereStyle { soft, pixel }
+
 class Atmosphere extends StatefulWidget {
   /// Overall opacity multiplier (0..1). Lower it on busy/bright surfaces.
   final double intensity;
@@ -31,12 +39,16 @@ class Atmosphere extends StatefulWidget {
   /// Faint secondary tint mixed into some elements for depth.
   final Color accent;
 
+  /// Render style. Pixel is the app's signature look.
+  final AtmosphereStyle style;
+
   const Atmosphere({
     super.key,
     this.intensity = 1,
     this.interactive = true,
     this.color = Colors.white,
     this.accent = const Color(0xFF4DD0E1),
+    this.style = AtmosphereStyle.pixel,
   });
 
   @override
@@ -123,6 +135,7 @@ class _AtmosphereState extends State<Atmosphere> with TickerProviderStateMixin {
             intensity: widget.intensity,
             color: widget.color,
             accent: widget.accent,
+            pixel: widget.style == AtmosphereStyle.pixel,
           ),
         ),
       ),
@@ -184,6 +197,29 @@ const _blooms = <_Bloom>[
   _Bloom(0.26, 0.13, 1, 1, 4.0, 3.2, 0.62, 0.08, 0.0),
 ];
 
+/// Pixel cloud masks — '#' = cell, 'o' = cell at half alpha. Hand-drawn
+/// 8-bit cumulus in three sizes so the sky doesn't repeat.
+const _pixelClouds = <List<String>>[
+  [
+    '....oo####oo....',
+    '..o##########o..',
+    '.o############o.',
+    'o##############o',
+    '.oo##########oo.',
+  ],
+  [
+    '...o####o...',
+    '.o########o.',
+    'o##########o',
+    '.oo######oo.',
+  ],
+  [
+    '..o##o..',
+    'o######o',
+    '.oo##oo.',
+  ],
+];
+
 class _AtmospherePainter extends CustomPainter {
   final double p; // loop position 0..1
   final List<_Mote> motes;
@@ -192,6 +228,7 @@ class _AtmospherePainter extends CustomPainter {
   final double intensity;
   final Color color;
   final Color accent;
+  final bool pixel;
 
   _AtmospherePainter({
     required this.p,
@@ -201,6 +238,7 @@ class _AtmospherePainter extends CustomPainter {
     required this.intensity,
     required this.color,
     required this.accent,
+    this.pixel = false,
   });
 
   static const _tau = math.pi * 2;
@@ -209,6 +247,10 @@ class _AtmospherePainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final w = size.width, h = size.height;
     if (w <= 0 || h <= 0) return;
+    if (pixel) {
+      _paintPixel(canvas, size);
+      return;
+    }
 
     // ── Soft fog blooms (additive so they read as diffusing light) ──────────
     for (final b in _blooms) {
@@ -264,11 +306,86 @@ class _AtmospherePainter extends CustomPainter {
     }
   }
 
+  /// 8-bit weather: drifting pixel clouds + square motes on a coarse grid.
+  /// Motion is quantized (positions snap to the grid, twinkle steps through
+  /// 4 levels) so everything moves in ticks, like a sprite sheet — but the
+  /// underlying clock is the same slow 120s integer-cycle loop.
+  void _paintPixel(Canvas canvas, Size size) {
+    final w = size.width, h = size.height;
+    const grid = 3.0; // logical px per "pixel"
+
+    // ── Clouds: each drifts horizontally on integer laps, fixed row ────────
+    final cellPaintFull = Paint();
+    final cellPaintHalf = Paint();
+    for (var c = 0; c < _pixelClouds.length; c++) {
+      final mask = _pixelClouds[c];
+      // Lap counts 1/2/1 keep the wrap seamless; vertical bands spread out.
+      final laps = c == 1 ? 2.0 : 1.0;
+      final y0 = (0.14 + c * 0.3) * h;
+      var x01 = (0.19 + c * 0.37 + p * laps) % 1.0;
+      // Extend range so the cloud fully exits before wrapping.
+      final cloudW = mask[0].length * grid;
+      final x0 = x01 * (w + cloudW * 2) - cloudW;
+      final alpha = (0.05 + c * 0.012) * intensity;
+      final col = Color.lerp(color, accent, c == 1 ? 0.4 : 0.0)!;
+      cellPaintFull.color = col.withValues(alpha: alpha);
+      cellPaintHalf.color = col.withValues(alpha: alpha * 0.5);
+      final ox = (x0 / grid).floorToDouble() * grid; // snap to grid
+      final oy = (y0 / grid).floorToDouble() * grid;
+      for (var yy = 0; yy < mask.length; yy++) {
+        final row = mask[yy];
+        for (var xx = 0; xx < row.length; xx++) {
+          final ch = row[xx];
+          if (ch == '.') continue;
+          canvas.drawRect(
+            Rect.fromLTWH(ox + xx * grid, oy + yy * grid, grid, grid),
+            ch == 'o' ? cellPaintHalf : cellPaintFull,
+          );
+        }
+      }
+    }
+
+    // ── Square motes: snapped positions, stepped twinkle, pointer repel ────
+    const repelR = 0.26;
+    final motePaint = Paint();
+    for (final m in motes) {
+      var mx = (m.base.dx + p * m.kx) % 1.0;
+      if (mx < 0) mx += 1;
+      var my = (m.base.dy + p * m.ky) % 1.0;
+      if (my < 0) my += 1;
+      var pos = Offset(mx, my);
+
+      if (pointer != null && influence > 0) {
+        final d = pos - pointer!;
+        final dist = d.distance;
+        if (dist < repelR && dist > 1e-4) {
+          final push = (repelR - dist) / repelR * 0.13 * influence * m.depth;
+          pos = pos + d / dist * push;
+        }
+      }
+
+      // Twinkle stepped through 4 alpha levels — blink, not breathe.
+      final twRaw = 0.55 + 0.45 * math.sin(_tau * m.twinkleCycles * p + m.phase);
+      final tw = (twRaw * 4).floorToDouble() / 4 + 0.25;
+      final a = (m.baseAlpha * tw * intensity).clamp(0.0, 1.0);
+      if (a <= 0.01) continue;
+      final col = Color.lerp(color, accent, m.tintMix)!.withValues(alpha: a);
+      // Square size in whole grid cells: depth ≥ .75 → 2×2, else 1×1.
+      final cells = m.depth >= 0.75 ? 2 : 1;
+      final px = (pos.dx * w / grid).floorToDouble() * grid;
+      final py = (pos.dy * h / grid).floorToDouble() * grid;
+      motePaint.color = col;
+      canvas.drawRect(
+          Rect.fromLTWH(px, py, grid * cells, grid * cells), motePaint);
+    }
+  }
+
   @override
   bool shouldRepaint(_AtmospherePainter old) =>
       old.p != p ||
       old.pointer != pointer ||
       old.influence != influence ||
       old.intensity != intensity ||
-      old.color != color;
+      old.color != color ||
+      old.pixel != pixel;
 }

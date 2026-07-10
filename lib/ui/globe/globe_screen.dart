@@ -469,7 +469,7 @@ class _GlobeScreenState extends ConsumerState<GlobeScreen>
                         horizontal: 14, vertical: 8),
                     decoration: BoxDecoration(
                       color: Colors.black.withValues(alpha: 0.62),
-                      borderRadius: BorderRadius.circular(20),
+                      borderRadius: BorderRadius.circular(6),
                     ),
                     child: Text(
                       '🗺️ 再放大 ${3 - _zoomInTries} 次返回 2D 地图',

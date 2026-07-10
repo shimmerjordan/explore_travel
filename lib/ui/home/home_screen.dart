@@ -6,6 +6,7 @@ import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 import '../../app/providers.dart';
 import '../common/atmosphere.dart';
+import '../common/pixel.dart';
 
 class HomeScreen extends ConsumerWidget {
   const HomeScreen({super.key});
@@ -46,12 +47,10 @@ class HomeScreen extends ConsumerWidget {
       body: CustomScrollView(
         slivers: [
           SliverAppBar.large(
+            // 品牌时刻：App 名用像素展示字（display 层允许，正文/标签不用）。
             title: Text(
               'Explore Journal',
-              style: TextStyle(
-                fontWeight: FontWeight.w700,
-                color: cs.onSurface,
-              ),
+              style: PixelText.headline.copyWith(color: cs.onSurface),
             ),
             expandedHeight: 120,
             actions: [
@@ -76,7 +75,9 @@ class HomeScreen extends ConsumerWidget {
 
           // 分组入口。
           for (final section in sections) ...[
-            SliverToBoxAdapter(child: _SectionHeader(section.title)),
+            SliverToBoxAdapter(
+                child: _SectionHeader(
+                    section.title, _chipColors(cs, section.tint).$1)),
             SliverPadding(
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
               sliver: SliverGrid(
@@ -101,7 +102,7 @@ class HomeScreen extends ConsumerWidget {
             sliver: SliverToBoxAdapter(
               child: Material(
                 color: cs.surfaceContainerHigh,
-                borderRadius: BorderRadius.circular(16),
+                borderRadius: BorderRadius.circular(6),
                 clipBehavior: Clip.antiAlias,
                 child: SwitchListTile.adaptive(
                   title: const Text('后台地理预热'),
@@ -124,23 +125,29 @@ class HomeScreen extends ConsumerWidget {
   }
 }
 
-/// 分组小标题：Material `titleSmall`，muted，克制。
+/// 分组小标题：像素方块色标 + Material `titleSmall`。方块是该组图标片的
+/// 色相钥匙——像素签名，也是分组的颜色图例。
 class _SectionHeader extends StatelessWidget {
   final String title;
-  const _SectionHeader(this.title);
+  final Color swatch;
+  const _SectionHeader(this.title, this.swatch);
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 12, 16, 8),
-      child: Text(
-        title,
-        style: Theme.of(context).textTheme.titleSmall?.copyWith(
-              color: cs.onSurfaceVariant,
-              fontWeight: FontWeight.w600,
-              letterSpacing: 0.2,
-            ),
-      ),
+      child: Row(children: [
+        Container(width: 7, height: 7, color: swatch),
+        const SizedBox(width: 8),
+        Text(
+          title,
+          style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                color: cs.onSurfaceVariant,
+                fontWeight: FontWeight.w600,
+                letterSpacing: 0.2,
+              ),
+        ),
+      ]),
     );
   }
 }
@@ -156,12 +163,13 @@ class _FeaturedTile extends StatelessWidget {
     final tt = Theme.of(context).textTheme;
     return _Pressable(
       color: cs.primaryContainer,
-      radius: 20,
+      pixel: true,
+      borderColor: cs.primary.withValues(alpha: 0.55),
       onTap: () => context.push(item.route),
       child: Stack(
         children: [
-          // Faint drifting haze — a quiet echo of the exploration surface it
-          // opens (ambient only; the tap owns interaction here).
+          // Faint drifting pixel weather — a quiet echo of the exploration
+          // surface it opens (ambient only; the tap owns interaction here).
           const Positioned.fill(
             child: Atmosphere(intensity: 0.5, interactive: false),
           ),
@@ -172,11 +180,15 @@ class _FeaturedTile extends StatelessWidget {
                 Container(
                   width: 52,
                   height: 52,
-                  decoration: BoxDecoration(
-                    color: cs.primary,
-                    borderRadius: BorderRadius.circular(15),
+                  color: cs.primary,
+                  child: Center(
+                    child: PixelSprite(
+                      rows: PixelSprites.map,
+                      color: cs.onPrimary,
+                      accent: cs.primaryContainer,
+                      cell: 3.6,
+                    ),
                   ),
-                  child: Icon(item.icon, color: cs.onPrimary, size: 28),
                 ),
                 const SizedBox(width: 14),
                 Expanded(
@@ -185,12 +197,10 @@ class _FeaturedTile extends StatelessWidget {
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       Text(item.label,
-                          style: tt.titleMedium?.copyWith(
-                            color: cs.onPrimaryContainer,
-                            fontWeight: FontWeight.w700,
-                          )),
+                          style: PixelText.headline
+                              .copyWith(color: cs.onPrimaryContainer)),
                       if (item.subtitle != null) ...[
-                        const SizedBox(height: 2),
+                        const SizedBox(height: 3),
                         Text(item.subtitle!,
                             style: tt.bodySmall?.copyWith(
                               color:
@@ -224,7 +234,7 @@ class _CompactTile extends StatelessWidget {
     final (chipBg, chipFg) = _chipColors(cs, tint);
     return _Pressable(
       color: cs.surfaceContainerHigh,
-      radius: 16,
+      radius: 6,
       onTap: () => context.push(item.route),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 10),
@@ -233,10 +243,7 @@ class _CompactTile extends StatelessWidget {
             Container(
               width: 40,
               height: 40,
-              decoration: BoxDecoration(
-                color: chipBg,
-                borderRadius: BorderRadius.circular(11),
-              ),
+              color: chipBg,
               child: Icon(item.icon, color: chipFg, size: 21),
             ),
             const SizedBox(width: 10),
@@ -272,14 +279,19 @@ class _CompactTile extends StatelessWidget {
 
 /// 按压微反馈：97% 缩放 + 110ms ease-out，呼应 M3 容器响应，轻盈。
 /// 尊重系统"移除动画"(reduced motion)：关闭时不缩放。
+/// `pixel: true` 时用阶梯像素角面板（hero 专属，更重的形状语言）。
 class _Pressable extends StatefulWidget {
   final Color color;
   final double radius;
+  final bool pixel;
+  final Color? borderColor;
   final VoidCallback onTap;
   final Widget child;
   const _Pressable({
     required this.color,
-    required this.radius,
+    this.radius = 6,
+    this.pixel = false,
+    this.borderColor,
     required this.onTap,
     required this.child,
   });
@@ -292,11 +304,27 @@ class _PressableState extends State<_Pressable> {
   @override
   Widget build(BuildContext context) {
     final reduceMotion = MediaQuery.of(context).disableAnimations;
-    return AnimatedScale(
-      duration: const Duration(milliseconds: 110),
-      curve: Curves.easeOut,
-      scale: (_pressed && !reduceMotion) ? 0.97 : 1.0,
-      child: Material(
+    final Widget surface;
+    if (widget.pixel) {
+      surface = PixelPanel(
+        color: widget.color,
+        borderColor: widget.borderColor,
+        step: 4,
+        steps: 2,
+        clipChild: true,
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            onTap: widget.onTap,
+            onTapDown: (_) => setState(() => _pressed = true),
+            onTapUp: (_) => setState(() => _pressed = false),
+            onTapCancel: () => setState(() => _pressed = false),
+            child: widget.child,
+          ),
+        ),
+      );
+    } else {
+      surface = Material(
         color: widget.color,
         borderRadius: BorderRadius.circular(widget.radius),
         clipBehavior: Clip.antiAlias,
@@ -307,7 +335,13 @@ class _PressableState extends State<_Pressable> {
           onTapCancel: () => setState(() => _pressed = false),
           child: widget.child,
         ),
-      ),
+      );
+    }
+    return AnimatedScale(
+      duration: const Duration(milliseconds: 110),
+      curve: Curves.easeOut,
+      scale: (_pressed && !reduceMotion) ? 0.97 : 1.0,
+      child: surface,
     );
   }
 }
