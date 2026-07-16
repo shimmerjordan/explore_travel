@@ -1,5 +1,7 @@
 import 'dart:io';
+import 'dart:typed_data';
 
+import 'package:archive/archive.dart';
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -60,6 +62,75 @@ void main() {
     for (final k in sa.keys) {
       expect(sb[k], equals(sa[k]), reason: 'bitmap mismatch at $k');
     }
+  });
+
+  test('export lays out tiles under Sync/ exactly like a real Sync.zip',
+      () async {
+    final a = await newLayer('A');
+    await fog.revealSinglePixel(lat: 39.9042, lng: 116.4074, layerId: a);
+    await fog.revealSinglePixel(lat: 31.2304, lng: 121.4737, layerId: a);
+
+    final zip = await exportFowArchive(engine: fog, layerIds: [a]);
+    final archive = ZipDecoder().decodeBytes(zip);
+    final entries = archive.files.where((f) => f.isFile).toList();
+    expect(entries, isNotEmpty);
+    for (final f in entries) {
+      expect(f.name, startsWith('Sync/'),
+          reason: 'FoW expects every tile inside a top-level Sync/ folder');
+      final base = f.name.split('/').last;
+      expect(looksLikeFowTileName(base), isTrue,
+          reason: '$base must be a valid obfuscated FoW tile name');
+    }
+  });
+
+  test('real Sync.zip: parse → rebuild → reparse keeps every explored bit',
+      () async {
+    // Point FOW_SYNC_ZIP at a real Fog of World Sync.zip to exercise this
+    // (skipped when unset so CI stays green). Verifies buildFowTile is a
+    // true inverse of parseFowTile on real-world data — the property the
+    // FOW 双向同步 depends on.
+    final path = Platform.environment['FOW_SYNC_ZIP'];
+    if (path == null || path.isEmpty || !File(path).existsSync()) {
+      markTestSkipped('FOW_SYNC_ZIP not set — skipping real-data roundtrip');
+      return;
+    }
+    final original = fowBlocksFromArchive(File(path).readAsBytesSync());
+    expect(original.length, greaterThan(10000),
+        reason: 'a real Sync.zip should decode tens of thousands of blocks');
+
+    // Union the parsed blocks per FOW tile (same grouping the exporter uses).
+    final grouped = <(int, int), Map<(int, int), Uint8List>>{};
+    for (final b in original) {
+      final blocks = grouped.putIfAbsent((b.tileX, b.tileY), () => {});
+      final existing = blocks[(b.blockX, b.blockY)];
+      if (existing == null) {
+        blocks[(b.blockX, b.blockY)] = Uint8List.fromList(b.bitmap);
+      } else {
+        for (var i = 0; i < existing.length; i++) {
+          existing[i] |= b.bitmap[i];
+        }
+      }
+    }
+
+    // Rebuild every tile file, then re-parse and compare bit-for-bit.
+    for (final e in grouped.entries) {
+      final (tx, ty) = e.key;
+      final rebuilt = buildFowTile(tx, ty, e.value);
+      final reparsed = parseFowTile(tileIdToFilename(ty * 512 + tx), rebuilt);
+      expect(reparsed.tileX, tx);
+      expect(reparsed.tileY, ty);
+      final byPos = {for (final b in reparsed.blocks) (b.bx, b.by): b.bitmap};
+      for (final blockEntry in e.value.entries) {
+        final back = byPos[blockEntry.key];
+        expect(back, isNotNull,
+            reason: 'tile($tx,$ty) block${blockEntry.key} lost in rebuild');
+        expect(back, equals(blockEntry.value),
+            reason: 'tile($tx,$ty) block${blockEntry.key} bitmap changed');
+      }
+    }
+    // ignore: avoid_print
+    print('REAL Sync.zip roundtrip: ${grouped.length} tiles, '
+        '${original.length} blocks — all bit-identical');
   });
 
   test('importing the same FoW data twice is idempotent (OR-merge)', () async {

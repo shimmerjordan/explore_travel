@@ -2,7 +2,7 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:dio/dio.dart' show CancelToken;
 import 'package:file_picker/file_picker.dart';
-import 'package:flutter/foundation.dart' show compute;
+import 'package:flutter/foundation.dart' show compute, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:latlong2/latlong.dart';
@@ -268,8 +268,9 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
           ),
           ListTile(
             leading: const Icon(Icons.file_upload_rounded),
-            title: const Text('导出为 FOW 格式'),
-            subtitle: const Text('把可见图层的迷雾导出为世界迷雾 zip，可保存或分享到任意位置'),
+            title: const Text('导出 FOW Sync.zip'),
+            subtitle: const Text(
+                '把可见图层的迷雾按世界迷雾原生 Sync.zip 结构导出到本地（默认下载目录），可直接导回 FOW'),
             enabled: !_busy,
             onTap: _busy ? null : _exportFow,
           ),
@@ -934,20 +935,29 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
             _status = '没有可导出的迷雾数据（请确认有可见且已探索的图层）');
         return;
       }
-      // Stage the zip in a temp file and hand it to the system share sheet —
-      // the user picks where to save it or which app to send it to.
-      final dir = await getTemporaryDirectory();
-      final ts = DateTime.now()
-          .toIso8601String()
-          .replaceAll(':', '-')
-          .split('.')
-          .first;
-      final f = File('${dir.path}/fow_export_$ts.zip');
-      await f.writeAsBytes(bytes);
+      // Save as a FoW-native Sync.zip wherever the user picks (Android's SAF
+      // dialog defaults to Download). saveFile writes [bytes] itself on
+      // mobile/web; desktop pickers only return a path, so write explicitly.
+      final path = await FilePicker.platform.saveFile(
+        dialogTitle: '保存 FOW Sync.zip',
+        fileName: 'Sync.zip',
+        type: FileType.custom,
+        allowedExtensions: ['zip'],
+        bytes: bytes,
+      );
+      if (path == null) {
+        if (mounted) setState(() => _status = '已取消 FOW 导出');
+        return;
+      }
+      if (!kIsWeb &&
+          (Platform.isLinux || Platform.isWindows || Platform.isMacOS)) {
+        await File(path).writeAsBytes(bytes);
+      }
       if (!mounted) return;
       setState(() => _status =
-          '已导出 FOW zip（${_fmtBytes(bytes.length)}）—— 选择保存位置或分享');
-      await Share.shareXFiles([XFile(f.path)], subject: 'Fog of World export');
+          '已导出 FOW Sync.zip（${_fmtBytes(bytes.length)}）：\n$path\n'
+          '内部结构与世界迷雾原生 Sync.zip 一致（Sync/ 目录 + 混淆名瓦片），'
+          '可直接用于 FOW 云同步，也可再导回本应用。');
     } catch (e) {
       setState(() => _status = 'FOW 导出失败：$e');
     } finally {

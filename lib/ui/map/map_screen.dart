@@ -22,7 +22,6 @@ import '../../services/fog/fog_engine.dart';
 import '../../services/group/group_service.dart';
 import '../../services/group/group_sync_controller.dart';
 import 'native_file_image_io.dart';
-import '../../services/map/fog_layer.dart';
 import '../../services/map/fog_tile_provider.dart';
 import '../../services/map/tile_providers.dart';
 import '../common/pixel.dart';
@@ -462,20 +461,15 @@ class _MapScreenState extends ConsumerState<MapScreen> {
             .withValues(alpha: math.max(settings.fogOpacity, 0.62))
         : Color(settings.fogColor)
             .withValues(alpha: settings.fogOpacity.clamp(0.0, 1.0));
-    // Per-layer style: an optional translucent COLOURED LINE drawn along the
-    // revealed corridor (selected colour + opacity). pathColor null = no
-    // line (plain reveal). Width applies to the whole layer, live.
-    final fogStyles = [
+    // Per-layer corridor tint. pathColor null = plain transparent reveal;
+    // set = the SAME corridor geometry rendered in that colour (opacity from
+    // pathOpacity). One path style — only the colour differs.
+    final fogTints = <int, Color>{
       for (final l in visibleLayers)
-        FogLayerStyle(
-          layerId: l.id,
-          lineColor: l.pathColor == null
-              ? null
-              : Color(l.pathColor!)
-                  .withValues(alpha: (l.pathOpacity ?? 0.6).clamp(0.0, 1.0)),
-          widthMeters: l.pathWidth ?? settings.trailWidth,
-        ),
-    ];
+        if (l.pathColor != null)
+          l.id: Color(l.pathColor!)
+              .withValues(alpha: (l.pathOpacity ?? 0.6).clamp(0.0, 1.0)),
+    };
 
     final LatLng? displayPos = (_wgsLat != null && _wgsLng != null)
         ? _toDisplay(_wgsLat!, _wgsLng!)
@@ -661,23 +655,29 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                     db: ref.read(dbProvider),
                     layerIds: visibleLayerIds,
                     veil: fogVeil,
+                    tints: fogTints,
                     mapProvider: settings.mapProvider,
                     refreshKey: fogRefresh,
                     // Live reveal/erase rows merge into the snapshot in memory;
                     // fogRefresh (imports, layer ops) still forces a full reload.
                     changes: ref.read(fogEngineProvider).changes,
                   ),
-                // Optional decorative coloured line along recorded trails (drawn
-                // over the fog tiles). No-op for imported data (no TrackPoints).
-                if (settings.loaded && visibleLayerIds.isNotEmpty)
-                  FogLayer(
-                    db: ref.read(dbProvider),
-                    layers: fogStyles,
-                    penRadiusMeters: settings.fogPenRadius,
-                    refreshKey: fogRefresh,
-                    mapProvider: settings.mapProvider,
-                    livePoints:
-                        ref.read(recordingControllerProvider).livePoints,
+                // Cold-start guard: until prefs AND the layer list are loaded
+                // we can't know the real veil/visible layers, and the frames
+                // in between flashed a bright unfogged map ("闪一下白色地图").
+                // Cover the map with an approximate veil for those first
+                // frames; it's replaced by the real fog tiles the moment the
+                // data is in.
+                if (!settings.loaded || layersAsync.isLoading)
+                  IgnorePointer(
+                    child: ColoredBox(
+                      // Default AppSettings veil (fogColor 0xFF101820 @ 0.78)
+                      // for the pre-prefs frames; the real veil once loaded.
+                      color: settings.loaded
+                          ? fogVeil
+                          : const Color(0xC7101820),
+                      child: const SizedBox.expand(),
+                    ),
                   ),
                 if (displayPos != null)
                   MarkerLayer(markers: [

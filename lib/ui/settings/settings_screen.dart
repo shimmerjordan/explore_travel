@@ -6,6 +6,10 @@ import '../../models/models.dart';
 import '../../services/ai/ai_service.dart';
 import '../widgets/responsive_content.dart';
 
+/// 设置页。信息架构（按使用频率）：
+///   外观 → 记录与迷雾 → 地图 → 服务配置 → 更多
+/// 低频且成组的配置（地图 Key、AI 服务）折叠进底部抽屉，
+/// 页面本身只保留"一眼可读的当前状态 + 常用开关"。
 class SettingsScreen extends ConsumerWidget {
   const SettingsScreen({super.key});
 
@@ -13,7 +17,10 @@ class SettingsScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final s = ref.watch(settingsProvider);
     final n = ref.read(settingsProvider.notifier);
-    final cs = Theme.of(context).colorScheme;
+
+    final keyCount = [s.customOsmTileUrl, s.amapApiKey, s.googleMapKey]
+        .where((v) => (v ?? '').isNotEmpty)
+        .length;
 
     return Scaffold(
       body: ResponsiveContent(
@@ -25,241 +32,155 @@ class SettingsScreen extends ConsumerWidget {
           ),
           SliverList(
             delegate: SliverChildListDelegate([
-              _SectionHeader('外观'),
-              _buildTile(
-                context,
+              const _SectionHeader('外观'),
+              _SegmentedTile<String>(
                 icon: Icons.palette_outlined,
                 title: '主题',
-                subtitle: switch (s.themePref) {
-                  'light' => '轻快 · 亮色',
-                  'system' => '跟随系统',
-                  _ => '暗黑 · 夜行',
-                },
-                trailing: SegmentedButton<String>(
-                  style: const ButtonStyle(
-                    visualDensity: VisualDensity.compact,
-                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  ),
-                  segments: const [
-                    ButtonSegment(
-                        value: 'light',
-                        icon: Icon(Icons.wb_sunny_outlined, size: 15),
-                        label: Text('轻快', style: TextStyle(fontSize: 11))),
-                    ButtonSegment(
-                        value: 'dark',
-                        icon: Icon(Icons.nightlight_outlined, size: 15),
-                        label: Text('暗黑', style: TextStyle(fontSize: 11))),
-                    ButtonSegment(
-                        value: 'system',
-                        icon: Icon(Icons.hdr_auto_outlined, size: 15),
-                        label: Text('系统', style: TextStyle(fontSize: 11))),
-                  ],
-                  selected: {s.themePref},
-                  onSelectionChanged: (v) => ref
-                      .read(settingsProvider.notifier)
-                      .update((p) => p.copyWith(themePref: v.first)),
-                ),
+                segments: const [
+                  ButtonSegment(
+                      value: 'light',
+                      icon: Icon(Icons.wb_sunny_outlined, size: 15),
+                      label: Text('轻快', style: TextStyle(fontSize: 11))),
+                  ButtonSegment(
+                      value: 'dark',
+                      icon: Icon(Icons.nightlight_outlined, size: 15),
+                      label: Text('暗黑', style: TextStyle(fontSize: 11))),
+                  ButtonSegment(
+                      value: 'system',
+                      icon: Icon(Icons.hdr_auto_outlined, size: 15),
+                      label: Text('系统', style: TextStyle(fontSize: 11))),
+                ],
+                selected: s.themePref,
+                onChanged: (v) => n.update((p) => p.copyWith(themePref: v)),
               ),
-              _SectionHeader('记录与迷雾'),
-              _buildTile(
-                context,
+              const _SectionHeader('记录与迷雾'),
+              _SegmentedTile<RecordingMode>(
                 icon: Icons.speed_rounded,
                 title: '记录模式',
-                subtitle: s.recordingMode.label,
-                trailing: SegmentedButton<RecordingMode>(
-                  style: ButtonStyle(
-                    visualDensity: VisualDensity.compact,
-                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  ),
-                  segments: RecordingMode.values
-                      .map((m) => ButtonSegment(
-                          value: m,
-                          label: Text(m.label,
-                              style: const TextStyle(fontSize: 11))))
-                      .toList(),
-                  selected: {s.recordingMode},
-                  onSelectionChanged: (v) =>
-                      n.update((p) => p.copyWith(recordingMode: v.first)),
-                ),
+                segments: RecordingMode.values
+                    .map((m) => ButtonSegment(
+                        value: m,
+                        label: Text(m.label,
+                            style: const TextStyle(fontSize: 11))))
+                    .toList(),
+                selected: s.recordingMode,
+                onChanged: (v) =>
+                    n.update((p) => p.copyWith(recordingMode: v)),
               ),
-              _buildTile(
-                context,
-                icon: Icons.palette_rounded,
-                title: '迷雾颜色',
-                trailing: GestureDetector(
-                  onTap: () => _pickColor(context, s.fogColor,
-                      (c) => n.update((p) => p.copyWith(fogColor: c))),
-                  child: Container(
-                    width: 32,
-                    height: 32,
-                    decoration: BoxDecoration(
-                      color: Color(s.fogColor),
-                      shape: BoxShape.circle,
-                      border: Border.all(
-                          color: cs.outline.withValues(alpha: 0.3), width: 1.5),
-                    ),
-                  ),
-                ),
+              ListTile(
+                leading: const Icon(Icons.palette_rounded),
+                title: const Text('迷雾颜色'),
+                trailing: _ColorDot(color: Color(s.fogColor)),
+                onTap: () => _pickColor(context, s.fogColor,
+                    (c) => n.update((p) => p.copyWith(fogColor: c))),
               ),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text('迷雾浓度',
-                        style: TextStyle(
-                            color: cs.onSurface, fontWeight: FontWeight.w500)),
-                    Slider(
-                      value: s.fogOpacity,
-                      min: 0.3,
-                      max: 1.0,
-                      divisions: 20,
-                      label: s.fogOpacity.toStringAsFixed(2),
-                      onChanged: (v) =>
-                          n.update((p) => p.copyWith(fogOpacity: v)),
-                    ),
-                    Text('轨迹粗细',
-                        style: TextStyle(
-                            color: cs.onSurface, fontWeight: FontWeight.w500)),
-                    Slider(
-                      // Visible recorded-path width. Stored per-point at
-                      // record time, so changing this only affects points
-                      // recorded afterwards — existing trails are untouched.
-                      value: s.trailWidth,
-                      min: 2,
-                      max: 60,
-                      divisions: 58,
-                      label: '${s.trailWidth.toStringAsFixed(0)} m',
-                      onChanged: (v) =>
-                          n.update((p) => p.copyWith(trailWidth: v)),
-                    ),
-                    Text('擦除 / 涂抹半径',
-                        style: TextStyle(
-                            color: cs.onSurface, fontWeight: FontWeight.w500)),
-                    Slider(
-                      // Brush radius for the map add/erase tools only —
-                      // independent of the trail thickness above.
-                      value: s.fogPenRadius,
-                      min: 5,
-                      max: 200,
-                      divisions: 39,
-                      label: '${s.fogPenRadius.toStringAsFixed(0)} m',
-                      onChanged: (v) =>
-                          n.update((p) => p.copyWith(fogPenRadius: v)),
-                    ),
-                  ],
-                ),
+              _SliderTile(
+                icon: Icons.blur_on_rounded,
+                title: '迷雾浓度',
+                valueLabel: '${(s.fogOpacity * 100).round()}%',
+                value: s.fogOpacity,
+                min: 0.3,
+                max: 1.0,
+                divisions: 20,
+                onChanged: (v) => n.update((p) => p.copyWith(fogOpacity: v)),
               ),
-              _SectionHeader('地图'),
-              _buildTile(
-                context,
+              _SliderTile(
+                icon: Icons.timeline_rounded,
+                title: '轨迹粗细',
+                subtitle: '只影响之后记录的轨迹',
+                valueLabel: '${s.trailWidth.toStringAsFixed(0)} m',
+                value: s.trailWidth,
+                min: 2,
+                max: 60,
+                divisions: 58,
+                onChanged: (v) => n.update((p) => p.copyWith(trailWidth: v)),
+              ),
+              _SliderTile(
+                icon: Icons.brush_rounded,
+                title: '擦除 / 涂抹半径',
+                subtitle: '地图上手动补涂、擦除迷雾的笔刷',
+                valueLabel: '${s.fogPenRadius.toStringAsFixed(0)} m',
+                value: s.fogPenRadius,
+                min: 5,
+                max: 200,
+                divisions: 39,
+                onChanged: (v) =>
+                    n.update((p) => p.copyWith(fogPenRadius: v)),
+              ),
+              const _SectionHeader('地图'),
+              _SegmentedTile<MapProvider>(
                 icon: Icons.map_rounded,
-                title: '地图提供商',
-                trailing: SegmentedButton<MapProvider>(
-                  style: ButtonStyle(
-                    visualDensity: VisualDensity.compact,
-                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  ),
-                  segments: const [
-                    ButtonSegment(
-                        value: MapProvider.osm,
-                        label: Text('OSM', style: TextStyle(fontSize: 11))),
-                    ButtonSegment(
-                        value: MapProvider.amap,
-                        label: Text('高德', style: TextStyle(fontSize: 11))),
-                    ButtonSegment(
-                        value: MapProvider.google,
-                        label: Text('Google', style: TextStyle(fontSize: 11))),
-                  ],
-                  selected: {s.mapProvider},
-                  onSelectionChanged: (v) =>
-                      n.update((p) => p.copyWith(mapProvider: v.first)),
-                ),
+                // 短标题：与右侧三段选择器同行时"地图提供商"会被挤成两行。
+                title: '提供商',
+                segments: const [
+                  ButtonSegment(
+                      value: MapProvider.osm,
+                      label: Text('OSM', style: TextStyle(fontSize: 11))),
+                  ButtonSegment(
+                      value: MapProvider.amap,
+                      label: Text('高德', style: TextStyle(fontSize: 11))),
+                  ButtonSegment(
+                      value: MapProvider.google,
+                      label: Text('Google', style: TextStyle(fontSize: 11))),
+                ],
+                selected: s.mapProvider,
+                onChanged: (v) =>
+                    n.update((p) => p.copyWith(mapProvider: v)),
               ),
-              _buildTile(
-                context,
-                icon: Icons.screen_rotation_rounded,
-                title: '允许地图旋转',
-                subtitle: '关闭时双指只缩放、不旋转（默认）。开启后可双指旋转，'
-                    '小幅度转动仍会被忽略，右上角指南针可一键回正北。',
-                trailing: Switch.adaptive(
-                  value: s.allowMapRotation,
-                  onChanged: (v) =>
-                      n.update((p) => p.copyWith(allowMapRotation: v)),
-                ),
+              SwitchListTile(
+                secondary: const Icon(Icons.screen_rotation_rounded),
+                title: const Text('允许地图旋转'),
+                subtitle: const Text('开启后可双指旋转，指南针可一键回正北'),
+                value: s.allowMapRotation,
+                onChanged: (v) =>
+                    n.update((p) => p.copyWith(allowMapRotation: v)),
               ),
-              _InfoTile(
-                icon: Icons.info_outline_rounded,
-                title: '关于地图 API Key',
-                subtitle:
-                    '高德/Google 的栅格瓦片当前是公共直连，无需 Key 即可显示。\n'
-                    'Key 用于：① 离线瓦片缓存配额  ② 反向地理编码（地名搜索）  ③ POI 检索。\n'
-                    '不填也能正常用地图。\n\n'
-                    'tile.openstreetmap.org 从国内访问经常超时，建议用高德或'
-                    '在下面填一个国内可达的 OSM 镜像。',
+              ListTile(
+                leading: const Icon(Icons.key_rounded),
+                title: const Text('瓦片源与 API Key'),
+                subtitle: Text(keyCount == 0
+                    ? '可选 · 不填也能正常用地图'
+                    : '已配置 $keyCount 项'),
+                trailing: const Icon(Icons.chevron_right_rounded),
+                onTap: () => _showSheet(context, const _MapKeysSheet()),
               ),
-              _TextSetting(
-                Icons.link_rounded,
-                'OSM 瓦片自定义 URL',
-                s.customOsmTileUrl,
-                (v) => n.update((p) => p.copyWith(customOsmTileUrl: v)),
-                hint: '留空用默认；占位符 {z}/{x}/{y}',
+              const _SectionHeader('AI'),
+              ListTile(
+                leading: const Icon(Icons.smart_toy_rounded),
+                title: const Text('AI 服务'),
+                subtitle: Text((s.aiBaseUrl ?? '').isEmpty
+                    ? '未配置 · 用于旅行规划与歌单'
+                    : (s.aiModel.isEmpty ? s.aiBaseUrl! : s.aiModel)),
+                trailing: const Icon(Icons.chevron_right_rounded),
+                onTap: () => _showSheet(context, const _AiSheet()),
               ),
-              _TextSetting(
-                Icons.key_rounded,
-                '高德 API Key',
-                s.amapApiKey,
-                (v) => n.update((p) => p.copyWith(amapApiKey: v)),
-                hint: '可选，用于地名搜索 / POI',
-                obscure: true,
-              ),
-              _TextSetting(
-                Icons.key_rounded,
-                'Google Maps API Key',
-                s.googleMapKey,
-                (v) => n.update((p) => p.copyWith(googleMapKey: v)),
-                hint: '可选',
-                obscure: true,
-              ),
-              _SectionHeader('AI'),
-              _TextSetting(Icons.link_rounded, 'AI Base URL', s.aiBaseUrl,
-                  (v) => n.update((p) => p.copyWith(aiBaseUrl: v))),
-              _TextSetting(Icons.key_rounded, 'AI API Key', s.aiApiKey,
-                  (v) => n.update((p) => p.copyWith(aiApiKey: v)),
-                  obscure: true),
-              _TextSetting(Icons.smart_toy_rounded, 'AI Model', s.aiModel,
-                  (v) => n.update((p) => p.copyWith(aiModel: v))),
-              const _AiTestTile(),
-              _SectionHeader('导出与导入'),
-              _ActionTile(
-                icon: Icons.cloud_sync_rounded,
-                title: '导出与导入（本地 / WebDAV / FOW 兼容）',
+              const _SectionHeader('更多'),
+              ListTile(
+                leading: const Icon(Icons.cloud_sync_rounded),
+                title: const Text('导出与导入'),
+                subtitle: const Text('本地 / WebDAV / OneDrive / FOW 兼容'),
+                trailing: const Icon(Icons.chevron_right_rounded),
                 onTap: () => context.push('/backup'),
               ),
-              _SectionHeader('权限与后台'),
               ListTile(
                 leading: const Icon(Icons.shield_outlined),
                 title: const Text('后台记录设置'),
-                subtitle: const Text(
-                    '始终允许定位 / 电池豁免 / 厂商自启动 — 排查"后台不记录"'),
-                trailing: const Icon(Icons.chevron_right),
+                subtitle: const Text('定位权限 / 电池豁免 — 排查"后台不记录"'),
+                trailing: const Icon(Icons.chevron_right_rounded),
                 onTap: () => context.push('/permissions'),
               ),
-              _SectionHeader('组队'),
               ListTile(
                 leading: const Icon(Icons.groups_rounded),
                 title: const Text('组队配置'),
                 subtitle: const Text('传输方式 / 群组 ID / 昵称 / 共享口令'),
-                trailing: const Icon(Icons.chevron_right),
+                trailing: const Icon(Icons.chevron_right_rounded),
                 onTap: () => context.push('/group/setup'),
               ),
-              _SectionHeader('关于'),
               ListTile(
                 leading: const Icon(Icons.info_outline_rounded),
                 title: const Text('关于 Explore Journal'),
-                subtitle:
-                    const Text('版本号 / 仓库 / 文档 / 贡献者 / 许可证'),
-                trailing: const Icon(Icons.chevron_right),
+                subtitle: const Text('版本号 / 仓库 / 文档 / 许可证'),
+                trailing: const Icon(Icons.chevron_right_rounded),
                 onTap: () => context.push('/about'),
               ),
               const SizedBox(height: 60),
@@ -270,16 +191,18 @@ class SettingsScreen extends ConsumerWidget {
     );
   }
 
-  Widget _buildTile(BuildContext context,
-      {required IconData icon,
-      required String title,
-      String? subtitle,
-      Widget? trailing}) {
-    return ListTile(
-      leading: Icon(icon),
-      title: Text(title),
-      subtitle: subtitle != null ? Text(subtitle) : null,
-      trailing: trailing,
+  /// 统一的设置抽屉：M3 底部弹层，避开输入法，可滚动。
+  static Future<void> _showSheet(BuildContext context, Widget child) {
+    return showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      useSafeArea: true,
+      builder: (ctx) => Padding(
+        padding:
+            EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
+        child: child,
+      ),
     );
   }
 
@@ -335,119 +258,106 @@ class _SectionHeader extends StatelessWidget {
       );
 }
 
-class _TextSetting extends StatelessWidget {
+/// 分段选择行：控件本身就显示当前值，不再放重复的文字副标题。
+class _SegmentedTile<T> extends StatelessWidget {
   final IconData icon;
-  final String label;
-  final String? value;
-  final Function(String) onSubmit;
-  final bool obscure;
-  final String? hint;
-  const _TextSetting(this.icon, this.label, this.value, this.onSubmit,
-      {this.obscure = false, this.hint});
+  final String title;
+  final List<ButtonSegment<T>> segments;
+  final T selected;
+  final ValueChanged<T> onChanged;
+  const _SegmentedTile({
+    required this.icon,
+    required this.title,
+    required this.segments,
+    required this.selected,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) => ListTile(
+        leading: Icon(icon),
+        title: Text(title),
+        trailing: SegmentedButton<T>(
+          style: const ButtonStyle(
+            visualDensity: VisualDensity.compact,
+            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          ),
+          segments: segments,
+          selected: {selected},
+          onSelectionChanged: (v) => onChanged(v.first),
+        ),
+      );
+}
+
+/// 滑杆行：标题与当前值同一行（值用主色徽标），滑杆紧贴其下 ——
+/// 三个滑杆共用同一套版式，形成节奏。
+class _SliderTile extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final String? subtitle;
+  final String valueLabel;
+  final double value;
+  final double min;
+  final double max;
+  final int divisions;
+  final ValueChanged<double> onChanged;
+  const _SliderTile({
+    required this.icon,
+    required this.title,
+    this.subtitle,
+    required this.valueLabel,
+    required this.value,
+    required this.min,
+    required this.max,
+    required this.divisions,
+    required this.onChanged,
+  });
 
   @override
   Widget build(BuildContext context) {
-    final shown = value == null || value!.isEmpty
-        ? (hint ?? '未设置')
-        : (obscure ? '••••••' : value!);
-    return ListTile(
-      leading: Icon(icon),
-      title: Text(label),
-      subtitle: Text(
-        shown,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-      ),
-      trailing: const Icon(Icons.chevron_right_rounded),
-      onTap: () async {
-        final ctrl = TextEditingController(text: value ?? '');
-        final r = await showDialog<String>(
-          context: context,
-          builder: (_) => AlertDialog(
-            title: Text(label),
-            content: TextField(
-              controller: ctrl,
-              obscureText: obscure,
-              autofocus: true,
-              decoration: InputDecoration(
-                border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(4)),
+    final cs = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(icon, size: 22, color: cs.onSurfaceVariant),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(title, style: const TextStyle(fontSize: 15)),
+                    if (subtitle != null)
+                      Text(subtitle!,
+                          style: TextStyle(
+                              fontSize: 11.5, color: cs.onSurfaceVariant)),
+                  ],
+                ),
               ),
-            ),
-            actions: [
-              TextButton(
-                  onPressed: () => Navigator.pop(context),
-                  child: const Text('取消')),
-              FilledButton(
-                onPressed: () => Navigator.pop(context, ctrl.text),
-                child: const Text('保存'),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+                decoration: BoxDecoration(
+                  color: cs.secondaryContainer,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Text(valueLabel,
+                    style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: cs.onSecondaryContainer)),
               ),
             ],
           ),
-        );
-        if (r != null) onSubmit(r);
-      },
-    );
-  }
-}
-
-class _ActionTile extends StatelessWidget {
-  final IconData icon;
-  final String title;
-  final VoidCallback onTap;
-  const _ActionTile(
-      {required this.icon, required this.title, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    return ListTile(
-      leading: Icon(icon),
-      title: Text(title),
-      trailing: const Icon(Icons.chevron_right_rounded),
-      onTap: onTap,
-    );
-  }
-}
-
-class _InfoTile extends StatelessWidget {
-  final IconData icon;
-  final String title;
-  final String subtitle;
-  const _InfoTile(
-      {required this.icon, required this.title, required this.subtitle});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(4),
-        border: Border.all(
-            color: Theme.of(context).colorScheme.outline.withValues(alpha: 0.2)),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(icon, size: 18, color: Theme.of(context).colorScheme.primary),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(title,
-                    style: const TextStyle(fontWeight: FontWeight.w600)),
-                const SizedBox(height: 4),
-                Text(subtitle,
-                    style: TextStyle(
-                        fontSize: 12,
-                        color: Theme.of(context)
-                            .colorScheme
-                            .onSurface
-                            .withValues(alpha: 0.7))),
-              ],
-            ),
+          Slider(
+            value: value,
+            min: min,
+            max: max,
+            divisions: divisions,
+            onChanged: onChanged,
           ),
         ],
       ),
@@ -455,17 +365,170 @@ class _InfoTile extends StatelessWidget {
   }
 }
 
-/// One-shot AI connectivity probe. Useful because the music / planner pages
-/// silently spin forever when the configured model name is wrong, the API
-/// key is bad, or the base URL is unreachable. This tile gives a specific
-/// failure reason instead.
-class _AiTestTile extends ConsumerStatefulWidget {
-  const _AiTestTile();
+class _ColorDot extends StatelessWidget {
+  final Color color;
+  const _ColorDot({required this.color});
   @override
-  ConsumerState<_AiTestTile> createState() => _AiTestTileState();
+  Widget build(BuildContext context) => Container(
+        width: 32,
+        height: 32,
+        decoration: BoxDecoration(
+          color: color,
+          shape: BoxShape.circle,
+          border: Border.all(
+              color: Theme.of(context)
+                  .colorScheme
+                  .outline
+                  .withValues(alpha: 0.3),
+              width: 1.5),
+        ),
+      );
 }
 
-class _AiTestTileState extends ConsumerState<_AiTestTile> {
+/// 抽屉里的即存文本框：输入即写入设置（与备份页同模式），无需保存按钮。
+class _SheetField extends StatefulWidget {
+  final IconData icon;
+  final String label;
+  final String value;
+  final ValueChanged<String> onChanged;
+  final String? hint;
+  final bool obscure;
+  const _SheetField(this.icon, this.label, this.value, this.onChanged,
+      {this.hint, this.obscure = false});
+  @override
+  State<_SheetField> createState() => _SheetFieldState();
+}
+
+class _SheetFieldState extends State<_SheetField> {
+  late final TextEditingController _ctrl =
+      TextEditingController(text: widget.value);
+  late bool _obscured = widget.obscure;
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 6, 20, 6),
+      child: TextField(
+        controller: _ctrl,
+        obscureText: _obscured,
+        decoration: InputDecoration(
+          prefixIcon: Icon(widget.icon, size: 18),
+          labelText: widget.label,
+          hintText: widget.hint,
+          isDense: true,
+          border: const OutlineInputBorder(),
+          suffixIcon: widget.obscure
+              ? IconButton(
+                  icon: Icon(
+                      _obscured
+                          ? Icons.visibility_off_rounded
+                          : Icons.visibility_rounded,
+                      size: 18),
+                  onPressed: () => setState(() => _obscured = !_obscured),
+                )
+              : null,
+        ),
+        onChanged: widget.onChanged,
+      ),
+    );
+  }
+}
+
+class _SheetTitle extends StatelessWidget {
+  final String title;
+  final String? note;
+  const _SheetTitle(this.title, {this.note});
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 4, 20, 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(title,
+              style: Theme.of(context)
+                  .textTheme
+                  .titleMedium
+                  ?.copyWith(fontWeight: FontWeight.w700)),
+          if (note != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Text(note!,
+                  style: TextStyle(
+                      fontSize: 12,
+                      height: 1.5,
+                      color: cs.onSurfaceVariant)),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 瓦片源 / API Key 抽屉 —— 原设置页的说明卡 + 三个字段合并至此。
+class _MapKeysSheet extends ConsumerWidget {
+  const _MapKeysSheet();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final s = ref.watch(settingsProvider);
+    final n = ref.read(settingsProvider.notifier);
+    return SingleChildScrollView(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const _SheetTitle(
+            '瓦片源与 API Key',
+            note: '高德 / Google 的栅格瓦片是公共直连，不填 Key 也能正常显示地图。'
+                'Key 只用于离线缓存配额、地名搜索与 POI 检索。\n'
+                'tile.openstreetmap.org 国内访问常超时，建议用高德或填一个国内可达的 OSM 镜像。',
+          ),
+          _SheetField(
+            Icons.link_rounded,
+            'OSM 瓦片自定义 URL',
+            s.customOsmTileUrl ?? '',
+            (v) => n.update((p) => p.copyWith(customOsmTileUrl: v)),
+            hint: '留空用默认；占位符 {z}/{x}/{y}',
+          ),
+          _SheetField(
+            Icons.key_rounded,
+            '高德 API Key',
+            s.amapApiKey ?? '',
+            (v) => n.update((p) => p.copyWith(amapApiKey: v)),
+            hint: '可选，用于地名搜索 / POI',
+            obscure: true,
+          ),
+          _SheetField(
+            Icons.key_rounded,
+            'Google Maps API Key',
+            s.googleMapKey ?? '',
+            (v) => n.update((p) => p.copyWith(googleMapKey: v)),
+            hint: '可选',
+            obscure: true,
+          ),
+          const SizedBox(height: 20),
+        ],
+      ),
+    );
+  }
+}
+
+/// AI 服务抽屉 —— 原设置页的三个字段 + 连接测试合并至此。
+class _AiSheet extends ConsumerStatefulWidget {
+  const _AiSheet();
+  @override
+  ConsumerState<_AiSheet> createState() => _AiSheetState();
+}
+
+class _AiSheetState extends ConsumerState<_AiSheet> {
   bool _busy = false;
   AiPingResult? _last;
 
@@ -476,43 +539,69 @@ class _AiTestTileState extends ConsumerState<_AiTestTile> {
     });
     final s = ref.read(settingsProvider);
     final r = await ref.read(aiServiceProvider).ping(s);
-    if (mounted) setState(() {
-      _busy = false;
-      _last = r;
-    });
+    if (mounted) {
+      setState(() {
+        _busy = false;
+        _last = r;
+      });
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    final r = _last;
+    final s = ref.watch(settingsProvider);
+    final n = ref.read(settingsProvider.notifier);
     final cs = Theme.of(context).colorScheme;
-    return ListTile(
-      leading: _busy
-          ? const SizedBox(
-              width: 24,
-              height: 24,
-              child: CircularProgressIndicator(strokeWidth: 2))
-          : Icon(
-              r == null
-                  ? Icons.bolt_rounded
-                  : (r.success ? Icons.check_circle : Icons.error_outline),
-              color: r == null
-                  ? null
-                  : (r.success ? Colors.greenAccent : Colors.redAccent),
+    final r = _last;
+    return SingleChildScrollView(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const _SheetTitle(
+            'AI 服务',
+            note: '用于 AI 旅行规划与旅行歌单。兼容 OpenAI 格式的 Base URL + Key。',
+          ),
+          _SheetField(Icons.link_rounded, 'Base URL', s.aiBaseUrl ?? '',
+              (v) => n.update((p) => p.copyWith(aiBaseUrl: v))),
+          _SheetField(Icons.key_rounded, 'API Key', s.aiApiKey ?? '',
+              (v) => n.update((p) => p.copyWith(aiApiKey: v)),
+              obscure: true),
+          _SheetField(Icons.smart_toy_rounded, 'Model', s.aiModel,
+              (v) => n.update((p) => p.copyWith(aiModel: v))),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 10, 20, 20),
+            child: Row(
+              children: [
+                Expanded(
+                  child: r == null
+                      ? Text('发一条 "ok" 验证当前配置',
+                          style: TextStyle(
+                              fontSize: 12, color: cs.onSurfaceVariant))
+                      : Text(
+                          r.success
+                              ? '✅ ${r.latencyMs}ms — ${r.message}'
+                              : '❌ ${r.message}',
+                          style: TextStyle(
+                              fontSize: 12,
+                              color: r.success ? cs.primary : cs.error),
+                        ),
+                ),
+                const SizedBox(width: 12),
+                FilledButton.icon(
+                  onPressed: _busy ? null : _run,
+                  icon: _busy
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Icon(Icons.bolt_rounded, size: 18),
+                  label: const Text('测试连接'),
+                ),
+              ],
             ),
-      title: const Text('测试 AI 连接'),
-      subtitle: r == null
-          ? const Text('给当前 base / key / model 发一条 "ok" 验证')
-          : Text(
-              r.success
-                  ? '✅ ${r.latencyMs}ms — 模型回复：${r.message}'
-                  : '❌ ${r.message}',
-              style: TextStyle(
-                  color: r.success ? cs.primary : Colors.redAccent),
-            ),
-      trailing: FilledButton(
-        onPressed: _busy ? null : _run,
-        child: const Text('测试'),
+          ),
+        ],
       ),
     );
   }

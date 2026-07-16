@@ -8,7 +8,7 @@ import '../data/db/database.dart';
 import '../services/location/background_task.dart'
     if (dart.library.js_interop) '../services/location/background_task_stub.dart';
 import '../services/location/sample_buffer.dart';
-import '../services/map/fog_layer.dart' show LiveTrackPoint;
+import '../services/map/live_track_point.dart' show LiveTrackPoint;
 import 'providers.dart';
 // providers exports groupServiceProvider
 

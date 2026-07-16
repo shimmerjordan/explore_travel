@@ -224,11 +224,12 @@ Future<Map<String, Uint8List>> _buildFowFiles(
   return out;
 }
 
-/// Export fog data for [layerIds] as a Fog of World-compatible zip archive.
-/// Each visible tile becomes one obfuscated-name file at the archive root —
-/// extract the zip into a Fog of World "Sync" folder to import it there, or
-/// re-import it here via [fowBlocksFromArchive]. Returns an empty list when
-/// there's nothing explored to export.
+/// Export fog data for [layerIds] as a Fog of World-compatible `Sync.zip`.
+/// The layout mirrors a real FoW Sync.zip exactly — every tile is one
+/// obfuscated-name file under a top-level `Sync/` folder — so the archive can
+/// be dropped into Fog of World's cloud sync as-is, extracted into its "Sync"
+/// folder, or re-imported here via [fowBlocksFromArchive]. Returns an empty
+/// list when there's nothing explored to export.
 Future<Uint8List> exportFowArchive({
   required FogEngine engine,
   required List<int> layerIds,
@@ -237,7 +238,8 @@ Future<Uint8List> exportFowArchive({
   if (files.isEmpty) return Uint8List(0);
   final archive = Archive();
   for (final entry in files.entries) {
-    archive.addFile(ArchiveFile(entry.key, entry.value.length, entry.value));
+    archive.addFile(
+        ArchiveFile('Sync/${entry.key}', entry.value.length, entry.value));
   }
   final encoded = ZipEncoder().encode(archive);
   return encoded == null ? Uint8List(0) : Uint8List.fromList(encoded);

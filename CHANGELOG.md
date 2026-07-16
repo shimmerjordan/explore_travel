@@ -5,6 +5,41 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 
 ## [Unreleased] — 2026-07-10
 
+### 重构（路径/迷雾渲染对齐 Fog of World：任意缩放恒定清晰 + 彩色图层同几何）
+
+对照 fogofworld.app（「路径在任何缩放级别保持清晰并无缝改变粗细」）与
+fog.vicc.wang/eraser.html 的渲染逻辑（每个探索点渲染为 ~3px 恒定屏幕尺寸的
+GL 方点；迷雾/线条两种模式共用同一几何）重写了烘焙管线：
+
+- **z≤14（原生及以下）**（[fog_tile_provider.dart](lib/services/map/fog_tile_provider.dart)）：
+  保留逐位精确的整数骨架（数据域完全不动），但渲染改为 掩膜 → GPU
+  `ImageFilter.dilate` + 轻微 blur——走过的路径在低/中缩放保持 **~3px 恒定
+  屏幕宽度**，不再是又细又碎、缩小就看不见的 1px staircase；成本以 dim²
+  为界，密集 FOW 导入区在低缩放不会爆炸（掩膜带 pad 消除瓦片接缝）。
+  z≥15 沿用已验收的平滑盘+羽化管线不变。
+- **彩色图层 = 同一几何**：所有可见图层的走廊先统一在雾上打洞，设了
+  `pathColor` 的图层再用 **同一掩膜/盘几何 + 同一滤镜** 以 srcIn 着色叠加
+  （浓淡=`pathOpacity`）。删除了原来的 TrackPoint 彩色折线层
+  （fog_layer.dart 整体移除，LiveTrackPoint 迁至
+  [live_track_point.dart](lib/services/map/live_track_point.dart)）——
+  彩色路径背后不再有透明打洞的"双重标识"，透明色/自定义颜色只是同一路径
+  样式的颜色差异；FOW 导入数据（无 TrackPoints）从此也能整层着色。
+  图层编辑对话框随之简化（去掉独立"路径粗细"滑条，宽度由记录笔刷决定）。
+- **一致性保证**：渲染只依赖位图字节 → FOW 导入、本地录制、导出→导入
+  往返在像素级完全一致（测试逐字节锁定）。
+- **冷启动白闪修复**：①Android 启动屏从白色改为夜色 `#0F1E28`
+  （launch_background.xml 两个变体）；②Flutter 首帧到 prefs/图层列表就绪
+  之间，地图上覆盖近似雾色层，随真实雾瓦片就绪替换——完整链路
+  夜色启动屏→雾罩首帧→完整渲染，全程无白色裸地图。
+- **像素风应用图标**：程序化生成（[test/tool/gen_app_icon_test.dart](test/tool/gen_app_icon_test.dart)，
+  24×24 像素画：纸质地图+橙色轨迹+红 pin+青绿雾角，夜色底）；legacy 全尺寸
+  mipmap + adaptive icon（foreground 自带满幅夜色底，规避 MIUI 白底合成）。
+- **测试**（[test/fog_tile_bake_test.dart](test/fog_tile_bake_test.dart) 重写，10 用例）：
+  骨架精确性、z10/z12/z14 恒定屏宽、对角线无断珠、彩色几何与透明几何逐像素
+  匹配、双图层混合、位图唯一性（导入=录制=往返）、**真实 Sync.zip 数据**
+  z8-14 烘焙（原件只读拷贝）；PNG 预览输出 build/fog_bake_preview/。
+  全套 233 测试通过；真机（Redmi）多缩放/彩色图层/冷启动/图标截图验证。
+
 ### 新增（自建后端 `backends/`：排行榜服务器 + 组队云中继，Docker/ECS/frpc/CF Tunnel）
 
 排行榜与组队此前完全靠"规避后端"的手段（P2P gossip、GitHub PR、局域网多播、
