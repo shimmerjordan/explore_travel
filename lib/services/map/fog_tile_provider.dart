@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:flutter/foundation.dart'
     show SynchronousFuture, visibleForTesting;
+import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_map/flutter_map.dart';
 import '../../data/db/database.dart';
@@ -21,10 +22,13 @@ import '../geo/coord_converter.dart';
 /// rounded anti-aliased disc edges instead of scaled-up hard pixels; see
 /// [_bakeTileSmooth].)
 ///
-/// Each tile is the FINAL composited fog (inverts the old veil + dstOut erase):
-///   - unexplored pixel = veil colour (alpha baked in)
-///   - explored pixel   = transparent (shows the bright base map underneath)
-/// Drawn over the base-map TileLayer with normal srcOver.
+/// Compositing ([FogTileLayer.build] / [_FogCompositor]): a synchronous
+/// OPAQUE veil rect is erased by white corridor-mask tiles via dstOut, and
+/// the whole group is blended at the fog opacity. Tiles carry only the
+/// eraser mask (plus separate tint tiles for coloured layers) — never the
+/// translucent veil itself, so flutter_map's cross-zoom tile overlap during
+/// a pinch can't double-darken (黑色区块), and a camera jump can't drop the
+/// cover (蒙版消失): the veil rect needs no tiles at all.
 ///
 /// The fog grid ([FogEngine.full] = 2^22) is exactly Web-Mercator zoom-14
 /// pixels, so a tile (z,x,y) maps to fog pixels by pure integer scaling
@@ -126,24 +130,38 @@ class FogSnapshot {
       byMin > _maxBY;
 }
 
+/// What a fog tile carries. The veil itself is NOT in the tiles any more —
+/// tiles are combined with a full-screen opaque veil by [FogTileLayer]:
+///
+///   * [mask]: white-where-explored, transparent elsewhere. Erases the veil
+///     via dstOut. Erasing is IDEMPOTENT, so when flutter_map keeps stale
+///     other-zoom tiles alive through a pinch, overlap changes nothing —
+///     the old translucent-veil-per-tile design stacked to near-black
+///     ("缩放时的黑色区块") or missed entirely (veil 消失).
+///   * [tint]: the coloured-layer corridors (alpha baked in), drawn srcOver
+///     on top of the veil composite.
+enum FogTileMode { mask, tint }
+
 /// A flutter_map [TileProvider] that synthesises fog tiles in memory. Holds a
 /// mutable [snapshot]; swap it and emit on the layer's `reset` stream to
 /// refresh (the snapshot's [generation] busts the image cache).
 class FogTileProvider extends TileProvider {
   FogSnapshot snapshot;
-  FogTileProvider(this.snapshot);
+  final FogTileMode mode;
+  FogTileProvider(this.snapshot, {this.mode = FogTileMode.mask});
 
   @override
   ImageProvider getImage(TileCoordinates coordinates, TileLayer options) =>
       _FogTileImage(snapshot, coordinates.x, coordinates.y, coordinates.z,
-          options.tileSize.round());
+          options.tileSize.round(), mode);
 }
 
 @immutable
 class _FogTileKey {
   final FogSnapshot snapshot;
   final int x, y, z, dim;
-  const _FogTileKey(this.snapshot, this.x, this.y, this.z, this.dim);
+  final FogTileMode mode;
+  const _FogTileKey(this.snapshot, this.x, this.y, this.z, this.dim, this.mode);
 
   @override
   bool operator ==(Object other) =>
@@ -152,16 +170,18 @@ class _FogTileKey {
       other.y == y &&
       other.z == z &&
       other.dim == dim &&
+      other.mode == mode &&
       other.snapshot.generation == snapshot.generation;
 
   @override
-  int get hashCode => Object.hash(x, y, z, dim, snapshot.generation);
+  int get hashCode => Object.hash(x, y, z, dim, mode, snapshot.generation);
 }
 
 class _FogTileImage extends ImageProvider<_FogTileKey> {
   final _FogTileKey _key;
-  _FogTileImage(FogSnapshot snapshot, int x, int y, int z, int dim)
-      : _key = _FogTileKey(snapshot, x, y, z, dim);
+  _FogTileImage(
+      FogSnapshot snapshot, int x, int y, int z, int dim, FogTileMode mode)
+      : _key = _FogTileKey(snapshot, x, y, z, dim, mode);
 
   @override
   Future<_FogTileKey> obtainKey(ImageConfiguration configuration) =>
@@ -172,7 +192,8 @@ class _FogTileImage extends ImageProvider<_FogTileKey> {
       OneFrameImageStreamCompleter(_bake(key));
 
   static Future<ImageInfo> _bake(_FogTileKey key) async {
-    final img = await _bakeTile(key.snapshot, key.x, key.y, key.z, key.dim);
+    final img = await _bakeTile(
+        key.snapshot, key.x, key.y, key.z, key.dim, key.mode);
     return ImageInfo(image: img, scale: 1.0);
   }
 }
@@ -180,39 +201,39 @@ class _FogTileImage extends ImageProvider<_FogTileKey> {
 const int _maxBlockIndex = (FogEngine.full >> 6) - 1; // 2^16 - 1
 
 /// Test seam: bake one tile exactly as the provider would (integer punch at
-/// native-and-below zooms, smooth disk+feather pass above). Lets tests
-/// rasterise and pin the fog look without a running map.
+/// native-and-below zooms, smooth disk pass above). Lets tests rasterise and
+/// pin the fog look without a running map.
 @visibleForTesting
 Future<ui.Image> bakeFogTileForTest(
-        FogSnapshot snap, int tx, int ty, int z, int dim) =>
-    _bakeTile(snap, tx, ty, z, dim);
+        FogSnapshot snap, int tx, int ty, int z, int dim,
+        {FogTileMode mode = FogTileMode.mask}) =>
+    _bakeTile(snap, tx, ty, z, dim, mode);
 
-/// Bake one (z,x,y) fog tile of [dim] px. Never throws — on any failure returns
-/// a solid-veil tile (the safe fallback, since unexplored == veil).
+/// Bake one (z,x,y) fog tile of [dim] px. Never throws — on any failure
+/// returns a fully-transparent tile (the safe fallback: nothing is erased
+/// from the veil, so the area just stays fogged until re-baked).
 Future<ui.Image> _bakeTile(
-    FogSnapshot snap, int tx, int ty, int z, int dim) async {
+    FogSnapshot snap, int tx, int ty, int z, int dim, FogTileMode mode) async {
   // Past the fog's native resolution each fog cell spans ≥2 tile px, so the
   // hard integer punch would show as a pixel staircase. Bake those zooms as
   // a disc reveal instead: every explored cell becomes an anti-aliased disk,
   // so corridor edges stay rounded (and crisp — no blur) at any zoom.
   if (z > _kFogNativeZoom && !snap.isEmpty) {
     try {
-      return await _bakeTileSmooth(snap, tx, ty, z, dim);
+      return await _bakeTileSmooth(snap, tx, ty, z, dim, mode);
     } catch (_) {
       // fall through to the masked bake below
     }
   }
   if (!snap.isEmpty) {
     try {
-      return await _bakeTileMasked(snap, tx, ty, z, dim);
+      return await _bakeTileMasked(snap, tx, ty, z, dim, mode);
     } catch (_) {
-      // fall through to the solid veil
+      // fall through to the transparent tile
     }
   }
   final rec = ui.PictureRecorder();
-  ui.Canvas(rec).drawRect(
-      ui.Rect.fromLTWH(0, 0, dim.toDouble(), dim.toDouble()),
-      ui.Paint()..color = snap.veil);
+  ui.Canvas(rec); // nothing drawn — fully transparent
   return rec.endRecording().toImage(dim, dim);
 }
 
@@ -226,19 +247,16 @@ const double _kMinHalfPx = 0.5;
 /// true footprint, the same spans the old bit-exact punch produced) is filled
 /// into a binary mask; at z14 a small GPU dilate tops the cell up to its
 /// ground-proportional width (matching the overzoom disk radius so z14↔z15
-/// don't jump), below that the raw ≥1px mask is used as-is:
+/// don't jump), below that the raw ≥1px mask is used as-is.
 ///
-///   veil rect
-///   └─ dstOut ⊕ (dilate?) mask-of-all-layers   → punch corridors
-///   └─ srcOver ⊕ (dilate?, tint) per-layer mask → coloured corridors
-///
-/// No blur pass — corridor edges stay crisp ("路径边缘不要光晕"). So a layer
-/// with a custom colour renders the IDENTICAL corridor geometry — the only
-/// difference is transparent vs tinted. Bounded by dim² regardless of how
-/// dense the explored area is (a per-cell disk pass would explode on dense
-/// FOW imports at low zoom).
+/// [FogTileMode.mask] emits WHITE corridors on transparency (the veil eraser);
+/// [FogTileMode.tint] emits the same geometry filled with each coloured
+/// layer's tint, ascending id so overlaps resolve deterministically. No blur
+/// pass — corridor edges stay crisp ("路径边缘不要光晕"). Bounded by dim²
+/// regardless of how dense the explored area is (a per-cell disk pass would
+/// explode on dense FOW imports at low zoom).
 Future<ui.Image> _bakeTileMasked(
-    FogSnapshot snap, int tx, int ty, int z, int dim) async {
+    FogSnapshot snap, int tx, int ty, int z, int dim, FogTileMode mode) async {
   const full = FogEngine.full;
   final ppt = full >> z; // fog px per tile
   if (ppt <= 0) throw StateError('zoom past native');
@@ -255,54 +273,42 @@ Future<ui.Image> _bakeTileMasked(
   final pad = (targetHalf + 1).ceil();
   final mdim = dim + 2 * pad;
 
-  final dimD = dim.toDouble();
   final rec = ui.PictureRecorder();
   final canvas = ui.Canvas(rec);
-  canvas.drawRect(
-      ui.Rect.fromLTWH(0, 0, dimD, dimD), ui.Paint()..color = snap.veil);
+  // Sub-pixel dilate only (no blur — crisp edges). null = draw the raw mask.
+  final filter = dilateR > 0.01
+      ? ui.ImageFilter.dilate(radiusX: dilateR, radiusY: dilateR)
+      : null;
+  final off = ui.Offset(-pad.toDouble(), -pad.toDouble());
 
-  final mask = Uint8List(mdim * mdim);
-  final any = _fillMask(snap, mask, tx, ty, z, dim, pad);
-  if (any) {
-    // Sub-pixel dilate only (no blur — crisp edges). null = draw the raw mask.
-    final filter = dilateR > 0.01
-        ? ui.ImageFilter.dilate(radiusX: dilateR, radiusY: dilateR)
-        : null;
-    final maskImg = await _maskToImage(mask, mdim);
-    try {
-      canvas.saveLayer(
-          null,
-          ui.Paint()
-            ..blendMode = ui.BlendMode.dstOut
-            ..imageFilter = filter);
-      canvas.drawImage(
-          maskImg, ui.Offset(-pad.toDouble(), -pad.toDouble()), ui.Paint());
-      canvas.restore();
-
-      // Same geometry, tinted — one pass per coloured layer, ascending id so
-      // overlaps resolve deterministically.
-      for (final lid in snap.tintedLayerIds) {
-        final lmask = Uint8List(mdim * mdim);
-        if (!_fillMask(snap, lmask, tx, ty, z, dim, pad, layerId: lid)) {
-          continue;
-        }
-        final lImg = await _maskToImage(lmask, mdim);
-        try {
-          canvas.saveLayer(
-              null,
-              ui.Paint()
-                ..imageFilter = filter
-                ..colorFilter =
-                    ui.ColorFilter.mode(snap.tints[lid]!, ui.BlendMode.srcIn));
-          canvas.drawImage(
-              lImg, ui.Offset(-pad.toDouble(), -pad.toDouble()), ui.Paint());
-          canvas.restore();
-        } finally {
-          lImg.dispose();
-        }
+  if (mode == FogTileMode.mask) {
+    final mask = Uint8List(mdim * mdim);
+    if (_fillMask(snap, mask, tx, ty, z, dim, pad)) {
+      final maskImg = await _maskToImage(mask, mdim);
+      try {
+        canvas.drawImage(maskImg, off, ui.Paint()..imageFilter = filter);
+      } finally {
+        maskImg.dispose();
       }
-    } finally {
-      maskImg.dispose();
+    }
+  } else {
+    for (final lid in snap.tintedLayerIds) {
+      final lmask = Uint8List(mdim * mdim);
+      if (!_fillMask(snap, lmask, tx, ty, z, dim, pad, layerId: lid)) {
+        continue;
+      }
+      final lImg = await _maskToImage(lmask, mdim);
+      try {
+        canvas.drawImage(
+            lImg,
+            off,
+            ui.Paint()
+              ..imageFilter = filter
+              ..colorFilter =
+                  ui.ColorFilter.mode(snap.tints[lid]!, ui.BlendMode.srcIn));
+      } finally {
+        lImg.dispose();
+      }
     }
   }
   return rec.endRecording().toImage(dim, dim);
@@ -345,14 +351,14 @@ Future<ui.Image> _maskToImage(Uint8List mask, int mdim) {
   );
 }
 
-/// Smooth overzoom bake (z > native): veil rect, then the explored cells are
-/// drawn as slightly-overlapping anti-aliased disks into an unbounded
-/// saveLayer whose paint erases the veil (dstOut) — rounded corners and
-/// merged unions with crisp AA edges (no gaussian feather: the blur read as
-/// a hazy "光晕" along every path). Disk radius 0.78·cell keeps diagonal
-/// runs connected.
+/// Smooth overzoom bake (z > native): the explored cells are drawn as
+/// slightly-overlapping anti-aliased disks — rounded corners and merged
+/// unions with crisp AA edges (no gaussian feather: the blur read as a hazy
+/// "光晕" along every path). Disk radius 0.78·cell keeps diagonal runs
+/// connected. [FogTileMode.mask] = white disks on transparency (the veil
+/// eraser); [FogTileMode.tint] = the same discs per coloured layer, tinted.
 Future<ui.Image> _bakeTileSmooth(
-    FogSnapshot snap, int tx, int ty, int z, int dim) async {
+    FogSnapshot snap, int tx, int ty, int z, int dim, FogTileMode mode) async {
   const full = FogEngine.full;
   const w = FogEngine.bitmapWidth; // 64
   final ppt = full >> z; // fog px per tile
@@ -363,8 +369,6 @@ Future<ui.Image> _bakeTileSmooth(
   final rec = ui.PictureRecorder();
   final canvas = ui.Canvas(rec);
   final dimD = dim.toDouble();
-  canvas.drawRect(
-      ui.Rect.fromLTWH(0, 0, dimD, dimD), ui.Paint()..color = snap.veil);
 
   // Padded fog-px window: disks just outside the tile must still reach
   // across the edge or adjacent tiles would show seams.
@@ -409,29 +413,73 @@ Future<ui.Image> _bakeTileSmooth(
       }, layerId: layerId);
     }
 
-    // Punch: union of every layer's discs erases the veil in one pass.
-    canvas.saveLayer(
-      null,
-      ui.Paint()..blendMode = ui.BlendMode.dstOut,
-    );
-    drawDiscs();
-    canvas.restore();
-
-    // Tint passes: the SAME disc geometry per coloured layer, tinted via a
-    // srcIn colour filter at restore time (so overlapping discs inside one
-    // layer can't double-blend a translucent colour).
-    for (final lid in snap.tintedLayerIds) {
-      canvas.saveLayer(
-        null,
-        ui.Paint()
-          ..colorFilter =
-              ui.ColorFilter.mode(snap.tints[lid]!, ui.BlendMode.srcIn),
-      );
-      drawDiscs(layerId: lid);
-      canvas.restore();
+    if (mode == FogTileMode.mask) {
+      // The veil eraser: the union of every layer's discs, in plain white.
+      drawDiscs();
+    } else {
+      // Tint passes: the SAME disc geometry per coloured layer, tinted via a
+      // srcIn colour filter at restore time (so overlapping discs inside one
+      // layer can't double-blend a translucent colour).
+      for (final lid in snap.tintedLayerIds) {
+        canvas.saveLayer(
+          null,
+          ui.Paint()
+            ..colorFilter =
+                ui.ColorFilter.mode(snap.tints[lid]!, ui.BlendMode.srcIn),
+        );
+        drawDiscs(layerId: lid);
+        canvas.restore();
+      }
     }
   }
   return rec.endRecording().toImage(dim, dim);
+}
+
+/// Per-row bake accelerators, keyed by row object identity (delta updates
+/// replace the row object, so stale entries drop out with their row).
+///
+/// Low-zoom bakes used to re-scan EVERY row's full 512-byte bitmap for every
+/// tile — a country-wide view over a ~46k-row FOW import re-read ~23 MB per
+/// tile on the UI isolate, which is where the "缩放的时候很卡" jank came
+/// from. Both memos are computed once per row and reused by every tile and
+/// every generation the row survives.
+final Expando<bool> _rowNonEmpty = Expando('fogRowNonEmpty');
+final Expando<Uint8List> _rowSub8 = Expando('fogRowSub8');
+
+bool _nonEmptyOf(FogTile t) {
+  final cached = _rowNonEmpty[t];
+  if (cached != null) return cached;
+  var v = false;
+  for (final b in t.bitmap) {
+    if (b != 0) {
+      v = true;
+      break;
+    }
+  }
+  _rowNonEmpty[t] = v;
+  return v;
+}
+
+/// 8×8-cell sub-block occupancy of a 64×64 block: 64 bits packed into 8
+/// bytes, bit (sy*8+sx) set when ANY cell in that sub-block is explored.
+Uint8List _sub8Of(FogTile t) {
+  var v = _rowSub8[t];
+  if (v == null) {
+    v = Uint8List(8);
+    final bm = t.bitmap;
+    for (var py = 0; py < 64; py++) {
+      final rowBase = py * 8;
+      final sy = py >> 3;
+      for (var byteCol = 0; byteCol < 8; byteCol++) {
+        if (bm[rowBase + byteCol] != 0) {
+          // byteCol == sx: one bitmap byte spans exactly one 8-cell run.
+          v[sy] |= 1 << byteCol;
+        }
+      }
+    }
+    _rowSub8[t] = v;
+  }
+  return v;
 }
 
 /// Fill the exact integer footprint of every explored cell into [mask] (a
@@ -465,21 +513,21 @@ bool _fillMask(FogSnapshot snap, Uint8List mask, int tx, int ty, int z,
   if (byMax > _maxBlockIndex) byMax = _maxBlockIndex;
   if (snap.windowOutsideExtent(bxMin, bxMax, byMin, byMax)) return false;
 
-  final coarse = scale * w < 1.0; // a whole block is sub-pixel (low zoom)
+  // Three resolution tiers, chosen by how many dest px one 64-cell block
+  // spans. Coarser tiers read the per-row memos instead of the raw bitmap,
+  // so a country-wide view never re-scans megabytes per tile, and corridor
+  // width degrades in uniform ≥1px steps instead of jumping ("缩小很多之后
+  // 路径不清晰、粗细不对").
+  final blockPx = scale * w;
+  final coarse = blockPx < 1.0; // a whole block is sub-pixel
+  final subblock = !coarse && blockPx <= 8.0; // an 8×8 sub-block is ≤1px
   var any = false;
 
   snap.forEachBlockInWindow(bxMin, bxMax, byMin, byMax, (t) {
     final bm = t.bitmap;
     final baseGx = t.tileX * w, baseGy = t.tileY * w;
     if (coarse) {
-      var got = false;
-      for (var i = 0; i < bm.length; i++) {
-        if (bm[i] != 0) {
-          got = true;
-          break;
-        }
-      }
-      if (!got) return;
+      if (!_nonEmptyOf(t)) return;
       // Light the whole block's footprint so a thin route stays connected.
       any = _maskSpan(
               mask,
@@ -489,6 +537,29 @@ bool _fillMask(FogSnapshot snap, Uint8List mask, int tx, int ty, int z,
               ((baseGy + w - tyPpt) * scale + shiftY).floor() + pad,
               mdim) ||
           any;
+      return;
+    }
+    if (subblock) {
+      final sub = _sub8Of(t);
+      for (var sy = 0; sy < 8; sy++) {
+        final bits = sub[sy];
+        if (bits == 0) continue;
+        final gy0 = baseGy + sy * 8;
+        final y0 = ((gy0 - tyPpt) * scale + shiftY).floor() + pad;
+        final y1 = ((gy0 + 8 - tyPpt) * scale + shiftY).floor() + pad;
+        for (var sx = 0; sx < 8; sx++) {
+          if ((bits >> sx) & 1 == 0) continue;
+          final gx0 = baseGx + sx * 8;
+          any = _maskSpan(
+                  mask,
+                  ((gx0 - txPpt) * scale + shiftX).floor() + pad,
+                  ((gx0 + 8 - txPpt) * scale + shiftX).floor() + pad,
+                  y0,
+                  y1,
+                  mdim) ||
+              any;
+        }
+      }
       return;
     }
     for (int py = 0; py < w; py++) {
@@ -605,12 +676,16 @@ class _FogTileLayerState extends State<FogTileLayer> {
   /// collide with cached tiles baked from a DIFFERENT snapshot.
   static int _generationSeed = 0;
 
-  late final FogTileProvider _provider = FogTileProvider(FogSnapshot(
-    rows: const [],
-    veil: widget.veil,
-    mapProvider: widget.mapProvider,
-    generation: _generation,
-  ));
+  late final FogTileProvider _maskProvider = FogTileProvider(_emptySnapshot());
+  late final FogTileProvider _tintProvider =
+      FogTileProvider(_emptySnapshot(), mode: FogTileMode.tint);
+
+  FogSnapshot _emptySnapshot() => FogSnapshot(
+        rows: const [],
+        veil: widget.veil,
+        mapProvider: widget.mapProvider,
+        generation: _generation,
+      );
   String _dataKey = '';
   late int _generation = (_generationSeed += 1 << 20);
 
@@ -618,6 +693,15 @@ class _FogTileLayerState extends State<FogTileLayer> {
   /// (tileX,tileY,layerId). Full reloads replace it; delta events patch it.
   final Map<int, FogTile> _rows = {};
   StreamSubscription<List<FogTile>>? _changesSub;
+
+  /// Throttles live-recording publishes. Every publish bumps [_generation]
+  /// and re-bakes EVERY visible fog tile — at 1 Hz recording the tile
+  /// pyramid never reaches flutter_map's "all current-zoom tiles loaded"
+  /// state, so stale other-zoom tiles are kept alive through a pinch and the
+  /// two TRANSLUCENT veils stack up (veil² ≈ 近黑的"未加载黑色区块"). A
+  /// recording reveal can lag a couple of seconds; a black flash cannot.
+  Timer? _deltaThrottle;
+  bool _deltaDirty = false;
 
   // tileX/tileY are block-global (< 2^16), layerId is small — pack the three
   // into one int key so the hot merge path doesn't allocate strings.
@@ -641,6 +725,7 @@ class _FogTileLayerState extends State<FogTileLayer> {
   @override
   void dispose() {
     _changesSub?.cancel();
+    _deltaThrottle?.cancel();
     super.dispose();
   }
 
@@ -658,7 +743,28 @@ class _FogTileLayerState extends State<FogTileLayer> {
       _rows[_key(t)] = t;
       relevant = true;
     }
-    if (relevant) _publish();
+    if (!relevant) return;
+    // First delta publishes immediately; the rest of a recording burst is
+    // batched every few seconds (see [_deltaThrottle]).
+    if (_deltaThrottle?.isActive ?? false) {
+      _deltaDirty = true;
+      return;
+    }
+    _publish();
+    _armDeltaThrottle();
+  }
+
+  /// While the throttle window is armed, deltas only mark [_deltaDirty];
+  /// each expiry flushes at most one publish and re-arms until quiet.
+  void _armDeltaThrottle() {
+    _deltaThrottle = Timer(const Duration(seconds: 3), () {
+      if (!mounted) return;
+      if (_deltaDirty) {
+        _deltaDirty = false;
+        _publish();
+        _armDeltaThrottle();
+      }
+    });
   }
 
   void _maybeReload() {
@@ -698,18 +804,19 @@ class _FogTileLayerState extends State<FogTileLayer> {
   void _publish() {
     setState(() {
       _generation++;
-      _provider.snapshot = FogSnapshot(
+      final snap = FogSnapshot(
         rows: _rows.values.toList(growable: false),
         veil: widget.veil,
         mapProvider: widget.mapProvider,
         generation: _generation,
         tints: widget.tints,
       );
+      _maskProvider.snapshot = snap;
+      _tintProvider.snapshot = snap;
     });
   }
 
-  @override
-  Widget build(BuildContext context) => TileLayer(
+  TileLayer _tiles(FogTileProvider provider, String kind) => TileLayer(
         // Remount when the snapshot flips empty↔non-empty. The in-place
         // reload below only re-bakes TileImages that ALREADY exist — on a
         // cold start the fog rows arrive from the DB after the layer
@@ -717,8 +824,8 @@ class _FogTileLayerState extends State<FogTileLayer> {
         // map event since) nothing would ever load until the user pans or
         // zooms ("地图没有迷雾，点一下定位才出现"). A remount is guaranteed
         // to run a fresh load-and-prune pass against the current camera.
-        key: ValueKey('fog-tiles-${_rows.isEmpty ? 'empty' : 'data'}'),
-        tileProvider: _provider,
+        key: ValueKey('fog-$kind-${_rows.isEmpty ? 'empty' : 'data'}'),
+        tileProvider: provider,
         // Changing this on a data change is what triggers an in-place reload.
         additionalOptions: {'gen': '$_generation'},
         tileSize: 256,
@@ -728,4 +835,81 @@ class _FogTileLayerState extends State<FogTileLayer> {
         tileDisplay: const TileDisplay.instantaneous(),
         evictErrorTileStrategy: EvictErrorTileStrategy.dispose,
       );
+
+  @override
+  Widget build(BuildContext context) {
+    final hasTints = widget.tints.values.any((c) => c.a > 0);
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        // Veil + eraser, composited as ONE translucent group:
+        //   saveLayer(alpha = veil opacity)
+        //     ├─ opaque veil rect (synchronous — the cover can never vanish,
+        //     │  however far a locate-jump moves the camera)
+        //     └─ dstOut ⊕ white corridor-mask tiles (erasing is idempotent,
+        //        so flutter_map's stale other-zoom tiles overlapping during
+        //        a pinch can't double-darken — the old translucent-veil
+        //        tiles stacked to near-black "缩放黑色区块")
+        _FogCompositor(
+          veil: widget.veil,
+          child: _tiles(_maskProvider, 'mask'),
+        ),
+        // Coloured corridors on top (alpha baked into the tint tiles).
+        if (hasTints) _tiles(_tintProvider, 'tint'),
+      ],
+    );
+  }
+}
+
+/// Paints an opaque veil rect, then erases its child's alpha out of it
+/// (dstOut), inside one translucent saveLayer group — see [FogTileLayer.build].
+class _FogCompositor extends SingleChildRenderObjectWidget {
+  final Color veil;
+  const _FogCompositor({required this.veil, super.child});
+
+  @override
+  RenderObject createRenderObject(BuildContext context) =>
+      _RenderFogCompositor(veil);
+
+  @override
+  void updateRenderObject(
+      BuildContext context, _RenderFogCompositor renderObject) {
+    renderObject.veil = veil;
+  }
+}
+
+class _RenderFogCompositor extends RenderProxyBox {
+  _RenderFogCompositor(this._veil);
+
+  Color _veil;
+  set veil(Color v) {
+    if (v == _veil) return;
+    _veil = v;
+    markNeedsPaint();
+  }
+
+  Color get veil => _veil;
+
+  // The dstOut trick needs the child rasterised into THIS canvas's layer —
+  // never let the child subtree get its own compositing layer.
+  @override
+  bool get alwaysNeedsCompositing => false;
+
+  @override
+  void paint(PaintingContext context, Offset offset) {
+    final rect = offset & size;
+    final canvas = context.canvas;
+    // Outer group carries the fog opacity, so the veil rect + mask tiles
+    // inside can stay fully opaque (idempotent under overlap).
+    canvas.saveLayer(
+        rect,
+        ui.Paint()
+          ..color = ui.Color.fromARGB(
+              (_veil.a * 255.0).round().clamp(0, 255), 0, 0, 0));
+    canvas.drawRect(rect, ui.Paint()..color = _veil.withValues(alpha: 1.0));
+    canvas.saveLayer(rect, ui.Paint()..blendMode = ui.BlendMode.dstOut);
+    super.paint(context, offset);
+    canvas.restore();
+    canvas.restore();
+  }
 }

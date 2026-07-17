@@ -13,7 +13,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../app/providers.dart';
-import '../../core/prefs.dart' show PeerOverrideX;
+import '../../core/prefs.dart' show AppSettings, PeerOverrideX;
 import '../../app/recording_controller.dart';
 import '../../data/db/database.dart' as db_t show JournalEntry, TrackLayer;
 import '../../models/models.dart';
@@ -553,10 +553,12 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                     const LatLng(85.05, 180),
                   ),
                 ),
-                // A neutral loading-grey for not-yet-fetched tiles — reads as
-                // "map loading", never a black hole, even when a fast zoom
-                // momentarily clears every tile.
-                backgroundColor: const Color(0xFFE6E8EB),
+                // Backdrop for not-yet-fetched tiles. Amap's day-style land
+                // beige, NOT a cool grey: the dark fog veil multiplies over
+                // whatever shows through, and veil-over-beige lands within a
+                // couple of grey levels of veil-over-real-tiles — a cold area
+                // reads as "map still sharpening", not a black hole.
+                backgroundColor: const Color(0xFFEAE6DE),
                 interactionOptions: InteractionOptions(
                   // Rotation is opt-in (default off): most two-finger gestures
                   // are just pinch-zoom, so by default we strip the rotate flag
@@ -716,10 +718,15 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                       return _ZoomBucketed(
                         buckets: 10, // 0.1-zoom steps
                         builder: (ctx, zoomBucket) {
+                          // Proportional with the map (like the fog paths),
+                          // but floored so a pin never shrinks past a
+                          // recognisable ~12px sprite. The old 0.5 floor
+                          // kicked in at z15 already — pins loomed huge over
+                          // a zoomed-out city view.
                           final double scale = math
                               .pow(2.0, zoomBucket - 16.0)
                               .toDouble()
-                              .clamp(0.5, 3.0);
+                              .clamp(0.28, 3.0);
                           return _buildPinLayer(list, scale);
                         },
                       );
@@ -1290,7 +1297,14 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     );
   }
 
-  Future<void> _showStatsSheet(BuildContext context) async {
+  /// Last computed profile stats — the sheet opens INSTANTLY with these and
+  /// refreshes in place. Static so it survives map-screen rebuilds; the
+  /// aggregate itself is additionally cached inside FogEngine.
+  static ({double pct, double km2, int blocks, int journals, int layerCount})?
+      _profileStatsCache;
+
+  Future<({double pct, double km2, int blocks, int journals, int layerCount})>
+      _loadProfileStats() async {
     final db = ref.read(dbProvider);
     final fog = ref.read(fogEngineProvider);
     final layers = await db.allLayers();
@@ -1301,8 +1315,6 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     // after a big FOW import.
     const earthSurfaceKm2 = 510072000.0;
     final agg = await fog.computeAggregates(layerIds);
-    final pct = (agg.globalKm2 / earthSurfaceKm2).clamp(0.0, 1.0);
-    final exploredKm2 = agg.globalKm2;
     // Block count for the stat tile via COUNT(*) — not a 45k-row fetch.
     final tileCountRow = layerIds.isEmpty
         ? null
@@ -1311,9 +1323,23 @@ class _MapScreenState extends ConsumerState<MapScreen> {
             'WHERE zoom = ${FogEngine.tileZoom} '
             'AND layer_id IN (${layerIds.join(",")})',
           ).getSingle();
-    final fogBlockCount = tileCountRow?.read<int>('c') ?? 0;
-    final journalCount = (await db.recentJournal(limit: 1000)).length;
-    final lvl = _levelForArea(exploredKm2);
+    final stats = (
+      pct: (agg.globalKm2 / earthSurfaceKm2).clamp(0.0, 1.0),
+      km2: agg.globalKm2,
+      blocks: tileCountRow?.read<int>('c') ?? 0,
+      journals: (await db.recentJournal(limit: 1000)).length,
+      layerCount: layers.length,
+    );
+    _profileStatsCache = stats;
+    return stats;
+  }
+
+  Future<void> _showStatsSheet(BuildContext context) async {
+    // Kick the (possibly slow, first-run) aggregation off and open the sheet
+    // IMMEDIATELY — the numbers stream in via the FutureBuilder below. The
+    // old code awaited everything up front: first tap after a cold start sat
+    // ~2-3 s on a frozen map ("首次点击旅人很卡").
+    final statsFuture = _loadProfileStats();
     if (!context.mounted) return;
     showModalBottomSheet<void>(
       useRootNavigator: true,
@@ -1328,7 +1354,33 @@ class _MapScreenState extends ConsumerState<MapScreen> {
         // it would only flip after the user closes & reopens.
         child: Consumer(builder: (sheetCtx, sheetRef, _) {
           final settings = sheetRef.watch(settingsProvider);
-          return Padding(
+          return FutureBuilder<
+              ({
+                double pct,
+                double km2,
+                int blocks,
+                int journals,
+                int layerCount
+              })>(
+              future: statsFuture,
+              initialData: _profileStatsCache,
+              builder: (statsCtx, statsSnap) {
+                final st = statsSnap.data;
+                final lvl = _levelForArea(st?.km2 ?? 0);
+                return _statsSheetBody(sheetCtx, sheetRef, settings, st, lvl);
+              });
+        }),
+      ),
+    );
+  }
+
+  Widget _statsSheetBody(
+      BuildContext sheetCtx,
+      WidgetRef sheetRef,
+      AppSettings settings,
+      ({double pct, double km2, int blocks, int journals, int layerCount})? st,
+      dynamic lvl) {
+    return Padding(
             padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -1399,7 +1451,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                             ),
                           ),
                           Text(
-                            '探索者 Lv ${lvl.level}',
+                            st == null ? '探索者 Lv …' : '探索者 Lv ${lvl.level}',
                             style: const TextStyle(
                                 color: Color(0xFFFFD54F),
                                 fontSize: 12,
@@ -1443,15 +1495,17 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                               color: Colors.white.withValues(alpha: 0.22),
                               borderRadius: BorderRadius.circular(3),
                             ),
-                            child: Text('Lv ${lvl.level}',
+                            child: Text(st == null ? 'Lv …' : 'Lv ${lvl.level}',
                                 style: PixelText.label.copyWith(
                                     fontSize: 14, color: Colors.white)),
                           ),
                           const Spacer(),
                           Text(
-                            lvl.remaining > 0
-                                ? '再探索 ${_fmtArea(lvl.remaining)} 升到 Lv ${lvl.level + 1}'
-                                : '已满级',
+                            st == null
+                                ? '计算中…'
+                                : (lvl.remaining > 0
+                                    ? '再探索 ${_fmtArea(lvl.remaining)} 升到 Lv ${lvl.level + 1}'
+                                    : '已满级'),
                             style: const TextStyle(
                                 color: Colors.white70, fontSize: 11),
                           ),
@@ -1459,7 +1513,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                       ),
                       const SizedBox(height: 10),
                       PixelBlockBar(
-                        value: lvl.progress,
+                        value: st == null ? 0.0 : lvl.progress,
                         cells: 20,
                         cellHeight: 8,
                         color: const Color(0xFFFFD54F),
@@ -1467,7 +1521,9 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                       ),
                       const SizedBox(height: 6),
                       Text(
-                        'Lv ${lvl.level}  ·  ${(lvl.progress * 100).toStringAsFixed(0)}%  ·  已探索 ${_fmtArea(exploredKm2)}',
+                        st == null
+                            ? '正在统计探索面积…'
+                            : 'Lv ${lvl.level}  ·  ${(lvl.progress * 100).toStringAsFixed(0)}%  ·  已探索 ${_fmtArea(st.km2)}',
                         style: const TextStyle(
                             color: Colors.white70, fontSize: 11),
                       ),
@@ -1478,7 +1534,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                 const Text('已探索',
                     style: TextStyle(color: Colors.white60, fontSize: 12)),
                 Text(
-                  '${(pct * 100).toStringAsFixed(10)} %',
+                  st == null ? '…' : '${(st.pct * 100).toStringAsFixed(10)} %',
                   style: const TextStyle(
                       color: Colors.white,
                       fontSize: 28,
@@ -1487,9 +1543,15 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                 const SizedBox(height: 16),
                 Row(
                   children: [
-                    Expanded(child: _StatTile('$fogBlockCount', '迷雾区块')),
-                    Expanded(child: _StatTile('$journalCount', '手账数')),
-                    Expanded(child: _StatTile('${layers.length}', '图层数')),
+                    Expanded(
+                        child: _StatTile(
+                            st == null ? '…' : '${st.blocks}', '迷雾区块')),
+                    Expanded(
+                        child: _StatTile(
+                            st == null ? '…' : '${st.journals}', '手账数')),
+                    Expanded(
+                        child: _StatTile(
+                            st == null ? '…' : '${st.layerCount}', '图层数')),
                   ],
                 ),
                 const SizedBox(height: 20),
@@ -1497,8 +1559,8 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                   icon: const Icon(Icons.public),
                   label: const Text('查看国家/行政区详情'),
                   onPressed: () {
-                    Navigator.pop(context);
-                    context.push('/explore');
+                    Navigator.of(sheetCtx).pop();
+                    if (mounted) context.push('/explore');
                   },
                   style: FilledButton.styleFrom(
                     minimumSize: const Size.fromHeight(44),
@@ -1508,9 +1570,6 @@ class _MapScreenState extends ConsumerState<MapScreen> {
               ],
             ),
           );
-        }),
-      ),
-    );
   }
 
   /// Pick an avatar from gallery, downscaled to 256×256 JPEG. Stored as

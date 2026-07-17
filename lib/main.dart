@@ -37,6 +37,10 @@ import 'main_native.dart' if (dart.library.js_interop) 'main_web.dart'
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  // Two tile pyramids (base map + baked fog) live in the image cache at
+  // once; the 100 MB default thrashes during pinch-zoom and every eviction
+  // is a re-decode flash. Modern phones can afford a bigger working set.
+  PaintingBinding.instance.imageCache.maximumSizeBytes = 256 << 20;
   // Capture every debugPrint into an in-memory ring so the debug log
   // viewer can show them.
   LogBuffer.install();
@@ -239,13 +243,45 @@ class _ExploreJournalAppState extends ConsumerState<ExploreJournalApp> {
   //  · Light scheme is the "轻快" mode: vibrant seed, airy tinted surfaces.
   static ThemeData _buildTheme(Brightness brightness) {
     final dark = brightness == Brightness.dark;
-    final scheme = ColorScheme.fromSeed(
+    // Pixel-game palette pairing: teal carries identity (primary), warm
+    // AMBER is the companion accent, coral the highlight. A single-seed
+    // tonalSpot scheme rendered everything into one navy-grey family
+    // ("全是暗色系没有搭配"); overriding the secondary/tertiary role families
+    // recolours every tonal button, selected segment, checked chip and
+    // badge app-wide — M3 semantics intact, retro warm-vs-cool contrast on.
+    final seeded = ColorScheme.fromSeed(
       seedColor: const Color(0xFF26A69A),
       brightness: brightness,
       // Light mode carries the "轻快" personality: punchier chroma.
       dynamicSchemeVariant:
           dark ? DynamicSchemeVariant.tonalSpot : DynamicSchemeVariant.vibrant,
     );
+    final scheme = dark
+        ? seeded.copyWith(
+            // Amber "coin/torch" accent family.
+            secondary: const Color(0xFFF2B457),
+            onSecondary: const Color(0xFF3F2B00),
+            secondaryContainer: const Color(0xFF5C4014),
+            onSecondaryContainer: const Color(0xFFFFDFAC),
+            // Coral "heart/flag" highlight family.
+            tertiary: const Color(0xFFFF8A70),
+            onTertiary: const Color(0xFF4A1505),
+            tertiaryContainer: const Color(0xFF6E3021),
+            onTertiaryContainer: const Color(0xFFFFDBCF),
+            // Surfaces get a subtle teal cast instead of flat navy-grey.
+            surfaceContainerHighest: const Color(0xFF2A3B46),
+            surfaceContainerHigh: const Color(0xFF24343F),
+          )
+        : seeded.copyWith(
+            secondary: const Color(0xFF875200),
+            onSecondary: Colors.white,
+            secondaryContainer: const Color(0xFFFFE0B0),
+            onSecondaryContainer: const Color(0xFF4A2D00),
+            tertiary: const Color(0xFFB13B22),
+            onTertiary: Colors.white,
+            tertiaryContainer: const Color(0xFFFFDBCF),
+            onTertiaryContainer: const Color(0xFF551F0E),
+          );
     RoundedRectangleBorder box(double r) =>
         RoundedRectangleBorder(borderRadius: BorderRadius.circular(r));
     final outline = scheme.outlineVariant.withValues(alpha: dark ? 0.5 : 0.9);
@@ -262,7 +298,7 @@ class _ExploreJournalAppState extends ConsumerState<ExploreJournalApp> {
           dark ? const Color(0xFF14212C) : const Color(0xFFF3FAF8),
       cardTheme: CardThemeData(
         elevation: 0,
-        color: dark ? const Color(0xFF1D2C39) : null,
+        color: dark ? const Color(0xFF1B2D38) : null,
         shape: box(8),
       ),
       appBarTheme: AppBarTheme(
@@ -316,7 +352,7 @@ class _ExploreJournalAppState extends ConsumerState<ExploreJournalApp> {
       // border, minimal shadow — a deliberate pixel-RPG affordance.
       popupMenuTheme: PopupMenuThemeData(
         elevation: 2,
-        color: dark ? const Color(0xFF22323F) : scheme.surfaceContainerHigh,
+        color: scheme.surfaceContainerHigh,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(8),
           side: BorderSide(color: outline, width: 1.5),
@@ -326,7 +362,7 @@ class _ExploreJournalAppState extends ConsumerState<ExploreJournalApp> {
         style: MenuStyle(
           elevation: const WidgetStatePropertyAll(2),
           backgroundColor: WidgetStatePropertyAll(
-              dark ? const Color(0xFF22323F) : scheme.surfaceContainerHigh),
+              scheme.surfaceContainerHigh),
           shape: WidgetStatePropertyAll(RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(8),
             side: BorderSide(color: outline, width: 1.5),
@@ -337,7 +373,7 @@ class _ExploreJournalAppState extends ConsumerState<ExploreJournalApp> {
         menuStyle: MenuStyle(
           elevation: const WidgetStatePropertyAll(2),
           backgroundColor: WidgetStatePropertyAll(
-              dark ? const Color(0xFF22323F) : scheme.surfaceContainerHigh),
+              scheme.surfaceContainerHigh),
           shape: WidgetStatePropertyAll(RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(8),
             side: BorderSide(color: outline, width: 1.5),

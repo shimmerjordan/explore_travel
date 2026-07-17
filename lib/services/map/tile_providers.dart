@@ -34,6 +34,11 @@ TileLayer buildTileLayer({
         // so keep the working set small — much smoother zoom/pan in a browser.
         keepBuffer: kIsWeb ? 1 : 5,
         panBuffer: kIsWeb ? 0 : 3,
+        // A tile that failed (subdomain hiccup, brief offline) must be
+        // re-requested when it scrolls back in — the default keeps the error
+        // placeholder alive for the whole session, a permanent "hole" that
+        // reads as an unloaded block under the fog veil.
+        evictErrorTileStrategy: EvictErrorTileStrategy.notVisibleRespectMargin,
       );
 
   const amapSubs = ['1', '2', '3', '4'];

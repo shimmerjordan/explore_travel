@@ -241,41 +241,42 @@ class _GlobeScreenState extends ConsumerState<GlobeScreen>
     final layers = await db.allLayers();
     final ids = layers.where((l) => l.visible).map((l) => l.id).toList();
 
-    // Bin every footprint into ~13 km cells and count density. This preserves
+    // Bin every footprint into ~2 km cells and count density. This preserves
     // "more visits → brighter" (a plain downsample would erase it).
     const mul = 20000; // > max lng index at _cellDeg, keeps keys unique
     final counts = <int, int>{};
     var total = 0;
     for (final id in ids) {
-      final pts = await db.pointsForLayer(id);
-      if (pts.isNotEmpty) {
-        for (final p in pts) {
-          final li = ((p.lat + 90) / _cellDeg).floor();
-          final gi = ((p.lng + 180) / _cellDeg).floor();
-          counts[li * mul + gi] = (counts[li * mul + gi] ?? 0) + 1;
-          total++;
+      // Fog is the authoritative "explored" record for a layer — it covers
+      // both imported Fog-of-World data AND natively recorded trails (every
+      // recorded fix reveals fog). Bin it for EVERY layer. The old code was
+      // either/or: a single recorded TrackPoint made it skip the layer's
+      // entire fog, so a layer holding a big FOW import plus one walk showed
+      // almost nothing ("路径在3D地球里不显示"). Each fog block (~0.6 km)
+      // bins at its centre, weighted by how many of its 64×64 cells are
+      // explored, so denser exploration reads brighter.
+      const bw = FogEngine.bitmapWidth;
+      for (final t in await db.fogTilesForLayers([id], FogEngine.tileZoom)) {
+        var c = 0;
+        for (final b in t.bitmap) {
+          if (b != 0) c += _popcount8(b);
         }
-      } else {
-        // No GPS track for this layer — e.g. a Fog-of-World fog-tile import,
-        // which writes only explored cells (no TrackPoints, no path/time). The
-        // globe is a "where you've explored" heat map and the explored area
-        // *is* the fog, so bin the fog instead. Each fog block (~0.6 km) bins
-        // at its centre, weighted by how many of its 64×64 cells are explored,
-        // so denser exploration still reads brighter.
-        const bw = FogEngine.bitmapWidth;
-        for (final t in await db.fogTilesForLayers([id], FogEngine.tileZoom)) {
-          var c = 0;
-          for (final b in t.bitmap) {
-            if (b != 0) c += _popcount8(b);
-          }
-          if (c == 0) continue;
-          final lat = FogEngine.globalYToLat(t.tileY * bw + bw ~/ 2);
-          final lng = FogEngine.globalXToLng(t.tileX * bw + bw ~/ 2);
-          final li = ((lat + 90) / _cellDeg).floor();
-          final gi = ((lng + 180) / _cellDeg).floor();
-          counts[li * mul + gi] = (counts[li * mul + gi] ?? 0) + c;
-          total += c;
-        }
+        if (c == 0) continue;
+        final lat = FogEngine.globalYToLat(t.tileY * bw + bw ~/ 2);
+        final lng = FogEngine.globalXToLng(t.tileX * bw + bw ~/ 2);
+        final li = ((lat + 90) / _cellDeg).floor();
+        final gi = ((lng + 180) / _cellDeg).floor();
+        counts[li * mul + gi] = (counts[li * mul + gi] ?? 0) + c;
+        total += c;
+      }
+      // GPS track points stack on top as revisit density — fog is binary per
+      // cell, so without this a daily commute and a one-off walk would burn
+      // equally bright.
+      for (final p in await db.pointsForLayer(id)) {
+        final li = ((p.lat + 90) / _cellDeg).floor();
+        final gi = ((p.lng + 180) / _cellDeg).floor();
+        counts[li * mul + gi] = (counts[li * mul + gi] ?? 0) + 1;
+        total++;
       }
     }
     _rawCount = total;

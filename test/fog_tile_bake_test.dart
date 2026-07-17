@@ -12,24 +12,26 @@ import 'package:explore_journal/services/fog/fog_engine.dart';
 import 'package:explore_journal/services/fog/fow_compat.dart';
 import 'package:explore_journal/services/map/fog_tile_provider.dart';
 
-/// Rasterises the fog tile baker and pins the corridor look:
+/// Rasterises the fog tile baker and pins the corridor look. Since the
+/// idempotent-veil rework, tiles carry only the ERASER MASK (white corridors
+/// on transparency; the opaque veil + group opacity live in the compositor,
+/// so cross-zoom tile overlap can't double-darken)::
 ///   * 缩小时路径按比例变细：at-and-below native zoom corridor width scales
 ///     WITH the map (ground-proportional), bottoming out at ~1 px — no
 ///     constant-screen-width inflation ("缩小后线条特别粗").
 ///   * 无光晕：edges are crisp anti-aliased transitions, not a gaussian
 ///     feather ("路径边缘发糊").
 ///   * the bit-exact integer skeleton is preserved — every explored cell is
-///     inside the corridor, far fog keeps the exact veil alpha.
+///     inside the corridor; far fog stays fully un-erased (alpha 0).
 ///   * a coloured layer renders the IDENTICAL corridor geometry, only tinted
-///     (透明色 vs 自定义颜色 — 同一路径样式).
+///     (透明色 vs 自定义颜色 — 同一路径样式), in the separate tint mode.
 ///   * rendering depends ONLY on bitmap bytes → FOW imports, local recording
 ///     and export→import roundtrips all look the same by construction.
 /// Dumps PNGs under build/fog_bake_preview/ for eyeball verification.
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  const veil = Color(0xC7101820); // alpha 199 — mid-strength fog
-  final veilA = (veil.a * 255.0).round(); // 199
+  const veil = Color(0xC7101820); // alpha 199 — mid-strength fog (compositor)
   const dim = 256;
 
   // One 64×64 block: a 3-px-wide diagonal corridor plus an isolated dot.
@@ -55,7 +57,7 @@ void main() {
   }
 
   // A 1-cell-wide vertical line through the whole block at x=32 — the
-  // worst-case thin trail used for the constant-screen-width checks.
+  // worst-case thin trail used for the proportional-width checks.
   FogTile makeThinLine({int layerId = 1}) {
     final bmp = Uint8List(FogEngine.bitmapBytes);
     for (var y = 0; y < 64; y++) {
@@ -94,26 +96,27 @@ void main() {
     await f.writeAsBytes(png!.buffer.asUint8List());
   }
 
-  /// Count of "revealed" px (alpha < veil/2) across a horizontal scan row.
-  int clearWidth(ByteData d, int y, int x0, int x1, int width) {
+  /// Count of corridor px (mask alpha > 128) across a horizontal scan row.
+  int corridorWidth(ByteData d, int y, int x0, int x1, int width) {
     var n = 0;
     for (var x = x0; x < x1; x++) {
-      if (alphaAt(d, x, y, width) < veilA ~/ 2) n++;
+      if (alphaAt(d, x, y, width) > 128) n++;
     }
     return n;
   }
 
   group('overzoom (z>14) disc bake — crisp AA edges, no glow', () {
-    test('z16: revealed core, exact veil outside, crisp edge', () async {
+    test('z16: corridor is solid mask, far fog fully un-erased, crisp edge',
+        () async {
       final img = await bakeFogTileForTest(
           snapshotWith([makeBlock()]), 100, 100, 16, dim);
       expect(img.width, dim);
       final d = await rgbaOf(img);
 
-      expect(alphaAt(d, 122, 122, dim), lessThan(30),
-          reason: 'corridor interior must be punched (nearly) clear');
-      expect(alphaAt(d, 250, 6, dim), inInclusiveRange(veilA - 2, veilA + 2),
-          reason: 'unexplored fog must keep the configured veil opacity');
+      expect(alphaAt(d, 122, 122, dim), greaterThan(225),
+          reason: 'corridor interior must be a solid eraser mask');
+      expect(alphaAt(d, 250, 6, dim), 0,
+          reason: 'unexplored area must stay fully transparent (un-erased)');
 
       // 无光晕: the corridor edge must be a narrow AA transition. The old
       // gaussian feather spread intermediate alphas over many px ("发糊");
@@ -121,7 +124,7 @@ void main() {
       var feathered = 0;
       for (var x = 100; x < 160; x++) {
         final a = alphaAt(d, x, 120, dim);
-        if (a > 40 && a < veilA - 40) feathered++;
+        if (a > 40 && a < 215) feathered++;
       }
       expect(feathered, lessThanOrEqualTo(6),
           reason: 'edge must be crisp AA, not a multi-px gaussian glow');
@@ -132,10 +135,10 @@ void main() {
       final img = await bakeFogTileForTest(
           snapshotWith([makeBlock()]), 100, 100, 16, dim);
       final d = await rgbaOf(img);
-      expect(alphaAt(d, 50, 202, dim), lessThan(veilA ~/ 2));
+      expect(alphaAt(d, 50, 202, dim), greaterThan(128));
       final corner = alphaAt(d, 50 + 5, 202 + 5, dim);
-      expect(corner, greaterThan(20),
-          reason: 'disk corners must be soft (square corners were clear)');
+      expect(corner, lessThan(128),
+          reason: 'disk corners must stay outside the mask (round, not square)');
     });
   });
 
@@ -148,17 +151,17 @@ void main() {
           snapshotWith([makeThinLine()]), 25, 25, 14, dim);
       final d = await rgbaOf(img);
 
-      // Skeleton: the data cell itself is fully revealed.
-      expect(alphaAt(d, 32, 30, dim), lessThan(30),
+      // Skeleton: the data cell itself is fully inside the corridor mask.
+      expect(alphaAt(d, 32, 30, dim), greaterThan(225),
           reason: 'explored cell must be inside the corridor');
       // Proportional width: a 1-cell trail renders ~1-2px at z14 — no
       // constant-screen-width inflation.
-      final w = clearWidth(d, 30, 20, 45, dim);
+      final w = corridorWidth(d, 30, 20, 45, dim);
       expect(w, inInclusiveRange(1, 3),
           reason: '1-cell trail must stay near 1-2px at z14, not inflate');
       // Far fog untouched.
-      expect(alphaAt(d, 200, 200, dim), inInclusiveRange(veilA - 2, veilA + 2),
-          reason: 'dilation must not lift the veil away from the trail');
+      expect(alphaAt(d, 200, 200, dim), 0,
+          reason: 'dilation must not erase away from the trail');
       await dumpPng(img, 'z14_thin_line.png');
     });
 
@@ -168,7 +171,7 @@ void main() {
       final img12 = await bakeFogTileForTest(
           snapshotWith([makeThinLine()]), 6, 6, 12, dim);
       final d12 = await rgbaOf(img12);
-      final w12 = clearWidth(d12, 70, 60, 90, dim);
+      final w12 = corridorWidth(d12, 70, 60, 90, dim);
       expect(w12, inInclusiveRange(1, 2),
           reason: 'z12: a 1-cell trail must render at the ~1px floor');
 
@@ -176,7 +179,7 @@ void main() {
       final img10 = await bakeFogTileForTest(
           snapshotWith([makeThinLine()]), 1, 1, 10, dim);
       final d10 = await rgbaOf(img10);
-      final w10 = clearWidth(d10, 146, 135, 160, dim);
+      final w10 = corridorWidth(d10, 146, 135, 160, dim);
       expect(w10, inInclusiveRange(1, 2),
           reason: 'z10: a 1-cell trail must render at the ~1px floor');
 
@@ -204,14 +207,14 @@ void main() {
       // z12: block spans dest x 64..80 (16px) on row 70.
       final img12 = await bakeFogTileForTest(
           snapshotWith([fullBlock]), 6, 6, 12, dim);
-      final w12 = clearWidth(await rgbaOf(img12), 70, 50, 95, dim);
+      final w12 = corridorWidth(await rgbaOf(img12), 70, 50, 95, dim);
       expect(w12, inInclusiveRange(14, 18),
           reason: 'z12: a 64-cell-wide area must render ~16px wide');
 
       // z10: block spans dest x 144..148 (4px) on row 146.
       final img10 = await bakeFogTileForTest(
           snapshotWith([fullBlock]), 1, 1, 10, dim);
-      final w10 = clearWidth(await rgbaOf(img10), 146, 130, 165, dim);
+      final w10 = corridorWidth(await rgbaOf(img10), 146, 130, 165, dim);
       expect(w10, inInclusiveRange(3, 6),
           reason: 'z10: the same area must shrink to ~4px, not stay wide');
 
@@ -223,10 +226,10 @@ void main() {
       final img = await bakeFogTileForTest(
           snapshotWith([makeBlock()]), 25, 25, 14, dim);
       final d = await rgbaOf(img);
-      // Walk the diagonal y=x from 8..55: every step must be revealed —
-      // the constant-width dilation must never leave gaps between cells.
+      // Walk the diagonal y=x from 8..55: every step must be inside the
+      // corridor — the dilation must never leave gaps between cells.
       for (var i = 8; i < 55; i++) {
-        expect(alphaAt(d, i, i, dim), lessThan(veilA ~/ 2),
+        expect(alphaAt(d, i, i, dim), greaterThan(128),
             reason: 'diagonal corridor must be gap-free at ($i,$i)');
       }
       await dumpPng(img, 'z14_diagonal.png');
@@ -236,64 +239,60 @@ void main() {
   group('coloured layers — same geometry, only the colour differs', () {
     const tint = Color(0xB3FF7043); // deep orange @ 0.7
 
-    test('z14: tinted corridor matches the transparent corridor shape',
-        () async {
-      final plain = await bakeFogTileForTest(
-          snapshotWith([makeThinLine()]), 25, 25, 14, dim);
+    test('z14: tint tile matches the mask tile shape', () async {
+      final mask = await bakeFogTileForTest(
+          snapshotWith([makeThinLine()], tints: const {1: tint}),
+          25, 25, 14, dim);
       final tinted = await bakeFogTileForTest(
           snapshotWith([makeThinLine()], tints: const {1: tint}),
-          25,
-          25,
-          14,
-          dim);
-      final dp = await rgbaOf(plain);
+          25, 25, 14, dim,
+          mode: FogTileMode.tint);
+      final dm = await rgbaOf(mask);
       final dt = await rgbaOf(tinted);
 
-      // Where the plain bake reveals, the tinted bake must paint colour —
-      // and the veil region must be identical in both.
-      var corridorPx = 0, tintedPx = 0, veilMismatch = 0;
+      // Wherever the mask erases, the tint tile must paint colour — and
+      // outside the corridor both must be fully transparent.
+      var corridorPx = 0, tintedPx = 0, outsideMismatch = 0;
       for (var y = 4; y < 60; y++) {
         for (var x = 4; x < 252; x++) {
-          final ap = alphaAt(dp, x, y, dim);
-          if (ap < 40) {
+          final am = alphaAt(dm, x, y, dim);
+          if (am > 200) {
             corridorPx++;
             final o = (y * dim + x) * 4;
             final r = dt.getUint8(o), g = dt.getUint8(o + 1);
-            // Tinted corridor: orange-ish (r >> g), not veil-dark.
-            if (r > 60 && r > g) tintedPx++;
-          } else if (ap > veilA - 10) {
-            if ((alphaAt(dt, x, y, dim) - ap).abs() > 6) veilMismatch++;
+            // Tinted corridor: orange-ish (r >> g), with real alpha.
+            if (alphaAt(dt, x, y, dim) > 60 && r > 60 && r >= g) tintedPx++;
+          } else if (am == 0) {
+            if (alphaAt(dt, x, y, dim) > 6) outsideMismatch++;
           }
         }
       }
       expect(corridorPx, greaterThan(50));
       expect(tintedPx / corridorPx, greaterThan(0.85),
-          reason: 'the tinted bake must colour the SAME corridor pixels');
-      expect(veilMismatch, 0,
-          reason: 'fog away from the corridor must be unaffected by tinting');
+          reason: 'the tint tile must colour the SAME corridor pixels');
+      expect(outsideMismatch, 0,
+          reason: 'tint must not paint outside the corridor');
       await dumpPng(tinted, 'z14_tinted.png');
     });
 
     test('z16: tint pass exists at overzoom too', () async {
       final tinted = await bakeFogTileForTest(
           snapshotWith([makeBlock()], tints: const {1: tint}),
-          100,
-          100,
-          16,
-          dim);
+          100, 100, 16, dim,
+          mode: FogTileMode.tint);
       final d = await rgbaOf(tinted);
-      // Corridor centre must be orange-ish, not fully transparent.
+      // Corridor centre must be orange-ish with the tint's alpha.
       final o = (122 * dim + 122) * 4;
-      expect(d.getUint8(o), greaterThan(80), reason: 'corridor must be tinted');
-      expect(d.getUint8(o) > d.getUint8(o + 2), isTrue,
-          reason: 'tint hue must be the layer colour (r > b for orange)');
+      expect(alphaAt(d, 122, 122, dim), greaterThan(100),
+          reason: 'corridor must be tinted');
+      expect(d.getUint8(o) >= d.getUint8(o + 2), isTrue,
+          reason: 'tint hue must be the layer colour (r ≥ b for orange)');
       await dumpPng(tinted, 'z16_tinted.png');
     });
 
-    test('two layers: transparent + coloured both punch, colour only on its own',
-        () async {
-      // Layer 1: thin line at x=32 (transparent). Layer 2: shifted line at
-      // x=48 (tinted). Both in block (100,100).
+    test('two layers: mask erases both, tint colours only its own', () async {
+      // Layer 1: thin line at x=32 (transparent style). Layer 2: shifted
+      // line at x=48 (tinted). Both in block (100,100).
       final l2 = Uint8List(FogEngine.bitmapBytes);
       for (var y = 0; y < 64; y++) {
         FogEngine.setBit(l2, 48, y);
@@ -309,19 +308,24 @@ void main() {
           updatedAt: DateTime(2026, 1, 1),
         ),
       ];
-      final img = await bakeFogTileForTest(
+      final mask = await bakeFogTileForTest(
           snapshotWith(rows, tints: const {2: tint}), 25, 25, 14, dim);
-      final d = await rgbaOf(img);
-      // x=32 (layer1): revealed, NOT tinted.
-      expect(alphaAt(d, 32, 30, dim), lessThan(40));
-      final o1 = (30 * dim + 32) * 4;
-      expect(d.getUint8(o1), lessThan(60),
-          reason: 'transparent layer must not pick up another layer\'s tint');
-      // x=48 (layer2): revealed AND tinted.
-      final o2 = (30 * dim + 48) * 4;
-      expect(d.getUint8(o2), greaterThan(80),
+      final dm = await rgbaOf(mask);
+      // The mask erases BOTH corridors.
+      expect(alphaAt(dm, 32, 30, dim), greaterThan(128));
+      expect(alphaAt(dm, 48, 30, dim), greaterThan(128));
+
+      final tinted = await bakeFogTileForTest(
+          snapshotWith(rows, tints: const {2: tint}), 25, 25, 14, dim,
+          mode: FogTileMode.tint);
+      final dt = await rgbaOf(tinted);
+      // x=32 (layer1, no tint): nothing painted in the tint tile.
+      expect(alphaAt(dt, 32, 30, dim), lessThan(20),
+          reason: 'untinted layer must not appear in the tint tile');
+      // x=48 (layer2): tinted.
+      expect(alphaAt(dt, 48, 30, dim), greaterThan(100),
           reason: 'coloured layer corridor must be tinted');
-      await dumpPng(img, 'z14_two_layers.png');
+      await dumpPng(tinted, 'z14_two_layers.png');
     });
   });
 
@@ -408,20 +412,21 @@ void main() {
         final tx = cgx ~/ ppt, ty = cgy ~/ ppt;
         final img = await bakeFogTileForTest(snap, tx, ty, z, dim);
         final d = await rgbaOf(img);
-        // The region must show SOME revealed px and SOME fog px — i.e. real
-        // corridors render, and dilation didn't wash the whole tile clear.
-        var clear = 0, fog = 0;
+        // The region must show SOME corridor px and SOME un-erased px —
+        // i.e. real corridors render, and dilation didn't wash the whole
+        // tile clear.
+        var corridor = 0, fog = 0;
         for (var y = 0; y < dim; y += 2) {
           for (var x = 0; x < dim; x += 2) {
             final a = alphaAt(d, x, y, dim);
-            if (a < veilA ~/ 2) {
-              clear++;
-            } else {
+            if (a > 128) {
+              corridor++;
+            } else if (a < 10) {
               fog++;
             }
           }
         }
-        expect(clear, greaterThan(20),
+        expect(corridor, greaterThan(20),
             reason: 'z$z: real corridors must be visible');
         expect(fog, greaterThan(500),
             reason: 'z$z: fog must survive around the corridors');

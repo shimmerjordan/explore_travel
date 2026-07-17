@@ -1,12 +1,19 @@
 import 'dart:convert';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:latlong2/latlong.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../../app/providers.dart';
 import '../../data/iso_countries.dart';
 import '../../data/iso_country_areas.dart';
+import '../../models/models.dart';
 import '../../services/fog/fog_engine.dart';
+import '../../services/geo/admin_regions.dart';
 import '../../services/geo/learned_regions.dart';
+import '../../services/map/tile_providers.dart';
 import '../common/atmosphere.dart';
 import '../common/pixel.dart';
 
@@ -44,16 +51,66 @@ class _ExploreScreenState extends ConsumerState<ExploreScreen> {
   /// progress estimate.
   List<LearnedRegion> _learned = const [];
   Map<String, double> _learnedRevealedKm2 = const {};
-  bool _loading = false;
+  bool _loading = true;
+
+  /// Persisted result of the last full aggregation. Loading + aggregating
+  /// ~46k fog rows takes the better part of a second — on every open, that
+  /// was a full-screen spinner ("首次点击旅人很卡"). Now the last snapshot
+  /// renders instantly and the fresh numbers replace it silently.
+  static const _snapshotKey = 'explore_snapshot_v2';
 
   @override
   void initState() {
     super.initState();
-    _loadAndCompute();
+    _restoreSnapshot().then((hit) => _loadAndCompute(silent: hit));
   }
 
-  Future<void> _loadAndCompute() async {
-    setState(() => _loading = true);
+  Future<bool> _restoreSnapshot() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      final raw = p.getString(_snapshotKey);
+      if (raw == null) return false;
+      final j = jsonDecode(raw) as Map<String, dynamic>;
+      _pct
+        ..clear()
+        ..addAll((j['pct'] as Map).map(
+            (k, v) => MapEntry(k.toString(), (v as num).toDouble())));
+      _regionPct
+        ..clear()
+        ..addAll((j['regionPct'] as Map).map((k, v) => MapEntry(
+            k.toString(),
+            (v as Map).map(
+                (k2, v2) => MapEntry(k2.toString(), (v2 as num).toDouble())))));
+      _globalPercent = (j['global'] as num?)?.toDouble() ?? 0;
+      _landPercent = (j['land'] as num?)?.toDouble() ?? 0;
+      _learned = [
+        for (final e in (j['learned'] as List? ?? const []))
+          LearnedRegion.fromJson(e as Map<String, dynamic>)
+      ];
+      if (mounted) setState(() => _loading = false);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> _saveSnapshot() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      await p.setString(
+          _snapshotKey,
+          jsonEncode({
+            'pct': _pct,
+            'regionPct': _regionPct,
+            'global': _globalPercent,
+            'land': _landPercent,
+            'learned': [for (final r in _learned) r.toJson()],
+          }));
+    } catch (_) {}
+  }
+
+  Future<void> _loadAndCompute({bool silent = false}) async {
+    if (!silent) setState(() => _loading = true);
     Map<String, dynamic>? data;
     try {
       final raw =
@@ -209,7 +266,8 @@ class _ExploreScreenState extends ConsumerState<ExploreScreen> {
     }
     _landPercent = knownArea > 0 ? revealedSum / knownArea : 0;
 
-    setState(() => _loading = false);
+    if (mounted) setState(() => _loading = false);
+    await _saveSnapshot();
   }
 
   double _lookupPct(CountryEntry e) {
@@ -243,49 +301,419 @@ class _ExploreScreenState extends ConsumerState<ExploreScreen> {
         .where((e) => _lookupPct(e) > 0)
         .length;
 
-    return Scaffold(
-      body: CustomScrollView(
-        slivers: [
-          SliverAppBar.large(
-            title: Text('探索进度',
-                style: PixelText.headline
-                    .copyWith(color: Theme.of(context).colorScheme.onSurface)),
-            actions: [
-              IconButton(
-                icon: const Icon(Icons.refresh_rounded),
-                onPressed: _loadAndCompute,
-              ),
-            ],
-          ),
-          if (_loading)
-            const SliverFillRemaining(
-                child: Center(child: CircularProgressIndicator()))
-          else ...[
-            SliverToBoxAdapter(
-              child: _GlobalCard(
-                globalPercent: _globalPercent,
-                landPercent: _landPercent,
-                visited: visitedCountries,
-                total: totalCountries,
-              ),
+    return DefaultTabController(
+      length: 2,
+      child: Scaffold(
+        appBar: AppBar(
+          title: Text('探索进度',
+              style: PixelText.headline
+                  .copyWith(color: Theme.of(context).colorScheme.onSurface)),
+          actions: [
+            IconButton(
+              icon: const Icon(Icons.refresh_rounded),
+              // Silent: the page already shows the previous numbers —
+              // refresh in place instead of blanking to a spinner.
+              onPressed: () => _loadAndCompute(silent: true),
             ),
-            if (_learned.isNotEmpty)
-              SliverToBoxAdapter(child: _LearnedRegionsCard(learned: _learned)),
-            for (final entry in kContinents.entries)
-              SliverToBoxAdapter(
-                child: _ContinentSection(
-                  name: entry.key,
-                  countries: entry.value,
-                  pctOf: _lookupPct,
-                  regionsOf: _lookupRegions,
-                ),
-              ),
-            const SliverToBoxAdapter(child: SizedBox(height: 40)),
           ],
-        ],
+          bottom: const TabBar(tabs: [
+            Tab(text: '总览'),
+            Tab(text: '点亮地图'),
+          ]),
+        ),
+        body: TabBarView(
+          children: [
+            _buildOverview(visitedCountries, totalCountries),
+            _LitMapTab(learned: _learned),
+          ],
+        ),
       ),
     );
   }
+
+  Widget _buildOverview(int visitedCountries, int totalCountries) {
+    if (_loading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    return CustomScrollView(
+      slivers: [
+        const SliverToBoxAdapter(child: SizedBox(height: 12)),
+        SliverToBoxAdapter(
+          child: _GlobalCard(
+            globalPercent: _globalPercent,
+            landPercent: _landPercent,
+            visited: visitedCountries,
+            total: totalCountries,
+          ),
+        ),
+        if (_learned.isNotEmpty)
+          SliverToBoxAdapter(child: _LearnedRegionsCard(learned: _learned)),
+        for (final entry in kContinents.entries)
+          SliverToBoxAdapter(
+            child: _ContinentSection(
+              name: entry.key,
+              countries: entry.value,
+              pctOf: _lookupPct,
+              regionsOf: _lookupRegions,
+            ),
+          ),
+        const SliverToBoxAdapter(child: SizedBox(height: 40)),
+      ],
+    );
+  }
+}
+
+/// "点亮地图" — a map preview where every geocoder-confirmed city renders as
+/// a lit administrative polygon (à la Fog of World's 点亮记录). Boundaries
+/// are downloaded on demand for VISITED regions only and cached on disk;
+/// the 更新 button re-syncs both the index and any missing boundaries.
+class _LitMapTab extends ConsumerStatefulWidget {
+  final List<LearnedRegion> learned;
+  const _LitMapTab({required this.learned});
+  @override
+  ConsumerState<_LitMapTab> createState() => _LitMapTabState();
+}
+
+class _LitMapTabState extends ConsumerState<_LitMapTab>
+    with AutomaticKeepAliveClientMixin {
+  final _store = AdminRegionStore();
+  AdminMapData? _data;
+  bool _busy = false;
+  String? _phase;
+
+  /// Base-map override for THIS tab only. Amap has no useful rendering
+  /// outside China, so foreign lit countries need Google / OSM.
+  MapProvider? _providerOverride;
+
+  // Keep the map alive across tab flips — reloading tiles on every switch
+  // reads as jank.
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  @override
+  void didUpdateWidget(covariant _LitMapTab old) {
+    super.didUpdateWidget(old);
+    if (!identical(old.learned, widget.learned)) _load();
+  }
+
+  Future<List<LearnedRegion>> _learnedNow() async =>
+      widget.learned.isNotEmpty
+          ? widget.learned
+          : await ref.read(learnedRegionsProvider).all();
+
+  Future<void> _load() async {
+    final learned = await _learnedNow();
+    final d = await _store.load(learned);
+    if (mounted) setState(() => _data = d);
+  }
+
+  /// Explored fog block centres (lat,lng pairs) — the "足迹经过" ground
+  /// truth that lights regions up, whether or not the geocoder ever ran.
+  Future<Float64List> _fogPoints() async {
+    final db = ref.read(dbProvider);
+    final layers = await db.allLayers();
+    final ids = layers.where((l) => l.visible).map((l) => l.id).toList();
+    if (ids.isEmpty) return Float64List(0);
+    final rows = await db.customSelect(
+      'SELECT DISTINCT tile_x, tile_y FROM fog_tiles '
+      'WHERE zoom = ${FogEngine.tileZoom} AND layer_id IN (${ids.join(",")})',
+    ).get();
+    const bw = FogEngine.bitmapWidth;
+    final pts = Float64List(rows.length * 2);
+    for (var i = 0; i < rows.length; i++) {
+      final x = rows[i].read<int>('tile_x');
+      final y = rows[i].read<int>('tile_y');
+      pts[i * 2] = FogEngine.globalYToLat(y * bw + bw ~/ 2);
+      pts[i * 2 + 1] = FogEngine.globalXToLng(x * bw + bw ~/ 2);
+    }
+    return pts;
+  }
+
+  Future<void> _update() async {
+    setState(() {
+      _busy = true;
+      _phase = '统计足迹…';
+    });
+    String msg;
+    try {
+      msg = await _store.update(
+          learned: await _learnedNow(),
+          fogPoints: await _fogPoints(),
+          onPhase: (p) {
+        if (mounted) setState(() => _phase = p);
+      });
+    } catch (e) {
+      msg = '更新失败：$e';
+    }
+    if (!mounted) return;
+    setState(() {
+      _busy = false;
+      _phase = null;
+    });
+    await _load();
+    if (mounted) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(msg)));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+    final cs = Theme.of(context).colorScheme;
+    final s = ref.watch(settingsProvider);
+    final d = _data;
+    if (d == null) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    if (!d.hasIndex) {
+      // First run: nothing downloaded yet.
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.map_outlined, size: 48, color: cs.onSurfaceVariant),
+              const SizedBox(height: 12),
+              Text(
+                '还没有行政区数据。\n下载后，真实走过的城市会在地图上点亮\n'
+                '（只下载去过的地区，之后可随时更新）。',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant),
+              ),
+              const SizedBox(height: 16),
+              FilledButton.icon(
+                onPressed: _busy ? null : _update,
+                icon: _busy
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Icon(Icons.download_rounded),
+                label: Text(_busy ? (_phase ?? '下载中…') : '下载行政区数据'),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    const lit = Color(0xFF4DD0E1); // FOW-style lit cyan
+    final provider = _providerOverride ?? s.mapProvider;
+    final center = d.lit.isEmpty
+        ? const LatLng(34.5, 108.0)
+        : d.lit.first.center;
+    // Major regions label first; the rest appear as you zoom in.
+    final byArea = [...d.lit]
+      ..sort((a, b) => b.areaScore.compareTo(a.areaScore));
+    final major = byArea.take((byArea.length / 3).ceil()).toSet();
+    return Stack(
+      children: [
+        FlutterMap(
+          options: MapOptions(
+            initialCenter: center,
+            initialZoom: d.lit.isEmpty ? 3.6 : 5.2,
+            minZoom: 2.5,
+            maxZoom: 12,
+            backgroundColor: const Color(0xFF0B1620),
+            interactionOptions: const InteractionOptions(
+              // A stats-preview map: pinch/pan only, no rotation.
+              flags: InteractiveFlag.all & ~InteractiveFlag.rotate,
+            ),
+          ),
+          children: [
+            // Dark blue-grey base: dim enough that lit polygons glow, but
+            // bright enough that coastlines/roads/labels stay readable
+            // (the previous pass was near-black, "看不清底色").
+            ColorFiltered(
+              colorFilter: const ColorFilter.matrix([
+                0.066, 0.222, 0.022, 0, 16, //
+                0.066, 0.222, 0.022, 0, 22, //
+                0.066, 0.222, 0.022, 0, 34, //
+                0, 0, 0, 1, 0,
+              ]),
+              child: buildTileLayer(
+                provider: provider,
+                style: s.mapStyle,
+                amapKey: s.amapApiKey,
+                googleKey: s.googleMapKey,
+                customOsmUrl: s.customOsmTileUrl,
+              ),
+            ),
+            PolygonLayer(
+              // NO runtime simplification: it runs per polygon, so two
+              // neighbours' shared border simplifies differently and shows
+              // gaps/overlap slivers. Rings are already grid-quantised in
+              // the store (which preserves shared edges exactly), and the
+              // zoom-jank fix is _ZoomGated below.
+              simplificationTolerance: 0,
+              polygons: [
+                for (final r in d.lit)
+                  for (final ring in r.rings)
+                    Polygon(
+                      points: ring,
+                      color: lit.withValues(alpha: 0.34),
+                      borderColor: lit,
+                      borderStrokeWidth: 1.4,
+                    ),
+              ],
+            ),
+            // Labels rebuild ONLY when the 0.5-zoom bucket flips — the old
+            // per-move setState rebuilt every polygon each frame (缩放特别卡).
+            _ZoomGated(
+              builder: (zoom) => zoom < 6.0
+                  ? const SizedBox.shrink()
+                  : MarkerLayer(
+                      markers: [
+                        for (final r in d.lit)
+                          if (zoom >= 7.5 || major.contains(r))
+                            Marker(
+                              point: r.center,
+                              width: 96,
+                              height: 16,
+                              child: IgnorePointer(
+                                child: Text(
+                                  r.name,
+                                  textAlign: TextAlign.center,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w600,
+                                    color: Colors.white70,
+                                    shadows: [
+                                      Shadow(
+                                          blurRadius: 3, color: Colors.black),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                      ],
+                    ),
+            ),
+          ],
+        ),
+        // Base-map switcher + update button — top row, above the map.
+        Positioned(
+          top: 10,
+          right: 10,
+          child: Row(
+            children: [
+              FilledButton.tonal(
+                onPressed: () => setState(() {
+                  _providerOverride = switch (provider) {
+                    MapProvider.amap => MapProvider.google,
+                    MapProvider.google => MapProvider.osm,
+                    MapProvider.osm => MapProvider.amap,
+                  };
+                }),
+                style: FilledButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 12)),
+                child: Text(
+                    switch (provider) {
+                      MapProvider.amap => '高德',
+                      MapProvider.google => 'Google',
+                      MapProvider.osm => 'OSM',
+                    },
+                    style: const TextStyle(fontSize: 12)),
+              ),
+              const SizedBox(width: 8),
+              FilledButton.tonalIcon(
+                onPressed: _busy ? null : _update,
+                icon: _busy
+                    ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Icon(Icons.sync_rounded, size: 16),
+                label: Text(_busy ? (_phase ?? '更新中…') : '更新行政区',
+                    style: const TextStyle(fontSize: 12)),
+              ),
+            ],
+          ),
+        ),
+        // Stats bar — FOW-style counts along the bottom.
+        Positioned(
+          left: 12,
+          right: 12,
+          bottom: 12,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            decoration: BoxDecoration(
+              color: const Color(0xE0121E28),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: lit.withValues(alpha: 0.35)),
+            ),
+            child: Row(
+              children: [
+                _Stat(label: '国家/地区', value: d.countryCount),
+                _Stat(label: '省份', value: d.provinceCount),
+                _Stat(label: '城市', value: d.cityCount),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Rebuild-limiter for zoom-dependent layers inside a FlutterMap: its own
+/// build runs per camera frame (MapCamera.of subscribes it), but [builder]
+/// only re-runs when the zoom crosses a 0.5 step — pan and sub-step zoom
+/// return the cached subtree untouched. Same pattern as the map screen's
+/// pin scaler; a plain setState-per-move here rebuilt every marker each
+/// frame and made pinch-zoom stutter.
+class _ZoomGated extends StatefulWidget {
+  final Widget Function(double zoomBucket) builder;
+  const _ZoomGated({required this.builder});
+
+  @override
+  State<_ZoomGated> createState() => _ZoomGatedState();
+}
+
+class _ZoomGatedState extends State<_ZoomGated> {
+  double? _bucket;
+  Widget? _cached;
+
+  @override
+  Widget build(BuildContext context) {
+    final z = MapCamera.of(context).zoom;
+    final b = (z * 2).round() / 2;
+    if (b != _bucket || _cached == null) {
+      _bucket = b;
+      _cached = widget.builder(b);
+    }
+    return _cached!;
+  }
+}
+
+class _Stat extends StatelessWidget {
+  final String label;
+  final int value;
+  const _Stat({required this.label, required this.value});
+  @override
+  Widget build(BuildContext context) => Expanded(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text('$value',
+                style: PixelText.headline.copyWith(
+                    fontSize: 22, color: const Color(0xFF4DD0E1))),
+            const SizedBox(height: 2),
+            Text(label,
+                style: const TextStyle(fontSize: 10, color: Colors.white70)),
+          ],
+        ),
+      );
 }
 
 class _GlobalCard extends StatelessWidget {
