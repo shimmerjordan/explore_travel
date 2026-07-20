@@ -3,7 +3,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../app/providers.dart';
 import '../../models/models.dart';
-import '../../services/ai/ai_service.dart';
 import '../widgets/responsive_content.dart';
 
 /// 设置页。信息架构（按使用频率）：
@@ -148,11 +147,15 @@ class SettingsScreen extends ConsumerWidget {
               ListTile(
                 leading: const Icon(Icons.smart_toy_rounded),
                 title: const Text('AI 服务'),
-                subtitle: Text((s.aiBaseUrl ?? '').isEmpty
-                    ? '未配置 · 用于旅行规划与歌单'
-                    : (s.aiModel.isEmpty ? s.aiBaseUrl! : s.aiModel)),
+                subtitle: Text((s.aiApiKey ?? '').isEmpty
+                    ? '未配置 · 旅伴对话 / 语音通话 / 规划 / 歌单'
+                    : '${s.aiModel} · 语音 ${switch (s.ttsEngine) {
+                        'volcano' => '火山引擎',
+                        'openai' => 'OpenAI 兼容',
+                        _ => '系统引擎',
+                      }}'),
                 trailing: const Icon(Icons.chevron_right_rounded),
-                onTap: () => _showSheet(context, const _AiSheet()),
+                onTap: () => context.push('/settings/ai'),
               ),
               const _SectionHeader('更多'),
               ListTile(
@@ -521,88 +524,5 @@ class _MapKeysSheet extends ConsumerWidget {
   }
 }
 
-/// AI 服务抽屉 —— 原设置页的三个字段 + 连接测试合并至此。
-class _AiSheet extends ConsumerStatefulWidget {
-  const _AiSheet();
-  @override
-  ConsumerState<_AiSheet> createState() => _AiSheetState();
-}
-
-class _AiSheetState extends ConsumerState<_AiSheet> {
-  bool _busy = false;
-  AiPingResult? _last;
-
-  Future<void> _run() async {
-    setState(() {
-      _busy = true;
-      _last = null;
-    });
-    final s = ref.read(settingsProvider);
-    final r = await ref.read(aiServiceProvider).ping(s);
-    if (mounted) {
-      setState(() {
-        _busy = false;
-        _last = r;
-      });
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final s = ref.watch(settingsProvider);
-    final n = ref.read(settingsProvider.notifier);
-    final cs = Theme.of(context).colorScheme;
-    final r = _last;
-    return SingleChildScrollView(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const _SheetTitle(
-            'AI 服务',
-            note: '用于 AI 旅行规划与旅行歌单。兼容 OpenAI 格式的 Base URL + Key。',
-          ),
-          _SheetField(Icons.link_rounded, 'Base URL', s.aiBaseUrl ?? '',
-              (v) => n.update((p) => p.copyWith(aiBaseUrl: v))),
-          _SheetField(Icons.key_rounded, 'API Key', s.aiApiKey ?? '',
-              (v) => n.update((p) => p.copyWith(aiApiKey: v)),
-              obscure: true),
-          _SheetField(Icons.smart_toy_rounded, 'Model', s.aiModel,
-              (v) => n.update((p) => p.copyWith(aiModel: v))),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(20, 10, 20, 20),
-            child: Row(
-              children: [
-                Expanded(
-                  child: r == null
-                      ? Text('发一条 "ok" 验证当前配置',
-                          style: TextStyle(
-                              fontSize: 12, color: cs.onSurfaceVariant))
-                      : Text(
-                          r.success
-                              ? '✅ ${r.latencyMs}ms — ${r.message}'
-                              : '❌ ${r.message}',
-                          style: TextStyle(
-                              fontSize: 12,
-                              color: r.success ? cs.primary : cs.error),
-                        ),
-                ),
-                const SizedBox(width: 12),
-                FilledButton.icon(
-                  onPressed: _busy ? null : _run,
-                  icon: _busy
-                      ? const SizedBox(
-                          width: 14,
-                          height: 14,
-                          child: CircularProgressIndicator(strokeWidth: 2))
-                      : const Icon(Icons.bolt_rounded, size: 18),
-                  label: const Text('测试连接'),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
+// （原 AI 服务抽屉已升级为独立页面 → lib/ui/settings/ai_settings_screen.dart，
+//  路由 /settings/ai。地图页旅伴卡片的 ⚙ 也直达那里。）

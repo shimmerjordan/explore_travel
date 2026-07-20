@@ -10,6 +10,7 @@ import 'ui/map/map_screen.dart';
 import 'ui/globe/globe_screen.dart';
 import 'ui/layers/layers_screen.dart';
 import 'ui/settings/settings_screen.dart';
+import 'ui/settings/ai_settings_screen.dart';
 import 'ui/journal/journal_screen.dart';
 import 'ui/playback/playback_screen.dart';
 import 'ui/explore/explore_screen.dart';
@@ -146,6 +147,9 @@ class _ExploreJournalAppState extends ConsumerState<ExploreJournalApp> {
       GoRoute(path: '/menu', builder: (_, __) => const HomeScreen()),
       GoRoute(path: '/layers', builder: (_, __) => const LayersScreen()),
       GoRoute(path: '/settings', builder: (_, __) => const SettingsScreen()),
+      GoRoute(
+          path: '/settings/ai',
+          builder: (_, __) => const AiSettingsScreen()),
       GoRoute(path: '/journal', builder: (_, __) => const JournalScreen()),
       GoRoute(path: '/playback', builder: (_, __) => const PlaybackScreen()),
       GoRoute(path: '/explore', builder: (_, __) => const ExploreScreen()),

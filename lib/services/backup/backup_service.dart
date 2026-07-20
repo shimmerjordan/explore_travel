@@ -1738,6 +1738,10 @@ const kVaultSecretKeys = <String>{
   'oneDriveRefreshToken',
   // Music cookies / OAuth tokens — also bearer-equivalents.
   'musicCredentials',
+  // AI 旅伴语音链路的独立凭据（留空时复用 aiApiKey，本身已在上面）。
+  'sttApiKey',
+  'ttsApiKey',
+  'volcTtsToken',
 };
 
 /// Returns a copy of the settings JSON with all credentials replaced

@@ -216,6 +216,34 @@ class AppSettings {
   /// Auto-sync to/from the configured server every N minutes (0 = manual).
   final int leaderboardServerSyncMin;
 
+  // ── AI 旅伴（地图页悬浮聊天 + 语音通话）────────────────────────────────
+  /// 人设 system prompt；空 = 用内置默认旅行搭子人设。
+  final String aiPersona;
+  /// 发图片时用的多模态模型；空 = 直接用 [aiModel]。
+  final String aiVisionModel;
+  /// 语音识别 —— 任何 OpenAI 兼容 /audio/transcriptions 端点
+  /// （硅基流动 SenseVoice 免费 / Groq Whisper / OpenAI / 自建 whisper）。
+  final String sttBaseUrl;
+  /// 空 = 复用 [aiApiKey]。
+  final String? sttApiKey;
+  final String sttModel;
+  /// 语音合成引擎：'system'（手机自带引擎，免费离线）
+  /// | 'volcano'（火山引擎豆包，付费音色）
+  /// | 'openai'（OpenAI 兼容 /audio/speech，硅基流动 CosyVoice 等）。
+  final String ttsEngine;
+  /// 语速倍率，三个引擎通用（系统引擎映射 speechRate，火山是 speed_ratio）。
+  final double ttsSpeed;
+  final String ttsBaseUrl;
+  /// 空 = 复用 [aiApiKey]。
+  final String? ttsApiKey;
+  final String ttsModel;
+  final String ttsVoice;
+  final String? volcTtsAppId;
+  final String? volcTtsToken;
+  final String volcTtsCluster;
+  /// 火山 voice_type，默认湾湾小何（需在火山控制台开通对应音色）。
+  final String volcTtsVoice;
+
   const AppSettings({
     this.loaded = false,
     this.mapProvider = MapProvider.amap,
@@ -305,6 +333,21 @@ class AppSettings {
     this.leaderboardServerUrl,
     this.leaderboardServerToken,
     this.leaderboardServerSyncMin = 0,
+    this.aiPersona = '',
+    this.aiVisionModel = '',
+    this.sttBaseUrl = 'https://api.siliconflow.cn/v1',
+    this.sttApiKey,
+    this.sttModel = 'FunAudioLLM/SenseVoiceSmall',
+    this.ttsEngine = 'system',
+    this.ttsSpeed = 1.0,
+    this.ttsBaseUrl = 'https://api.siliconflow.cn/v1',
+    this.ttsApiKey,
+    this.ttsModel = 'FunAudioLLM/CosyVoice2-0.5B',
+    this.ttsVoice = 'FunAudioLLM/CosyVoice2-0.5B:anna',
+    this.volcTtsAppId,
+    this.volcTtsToken,
+    this.volcTtsCluster = 'volcano_tts',
+    this.volcTtsVoice = 'zh_female_wanwanxiaohe_moon_bigtts',
   });
 
   AppSettings copyWith({
@@ -395,6 +438,21 @@ class AppSettings {
     String? leaderboardServerUrl,
     String? leaderboardServerToken,
     int? leaderboardServerSyncMin,
+    String? aiPersona,
+    String? aiVisionModel,
+    String? sttBaseUrl,
+    String? sttApiKey,
+    String? sttModel,
+    String? ttsEngine,
+    double? ttsSpeed,
+    String? ttsBaseUrl,
+    String? ttsApiKey,
+    String? ttsModel,
+    String? ttsVoice,
+    String? volcTtsAppId,
+    String? volcTtsToken,
+    String? volcTtsCluster,
+    String? volcTtsVoice,
   }) =>
       AppSettings(
         loaded: loaded ?? this.loaded,
@@ -499,6 +557,21 @@ class AppSettings {
             leaderboardServerToken ?? this.leaderboardServerToken,
         leaderboardServerSyncMin:
             leaderboardServerSyncMin ?? this.leaderboardServerSyncMin,
+        aiPersona: aiPersona ?? this.aiPersona,
+        aiVisionModel: aiVisionModel ?? this.aiVisionModel,
+        sttBaseUrl: sttBaseUrl ?? this.sttBaseUrl,
+        sttApiKey: sttApiKey ?? this.sttApiKey,
+        sttModel: sttModel ?? this.sttModel,
+        ttsEngine: ttsEngine ?? this.ttsEngine,
+        ttsSpeed: ttsSpeed ?? this.ttsSpeed,
+        ttsBaseUrl: ttsBaseUrl ?? this.ttsBaseUrl,
+        ttsApiKey: ttsApiKey ?? this.ttsApiKey,
+        ttsModel: ttsModel ?? this.ttsModel,
+        ttsVoice: ttsVoice ?? this.ttsVoice,
+        volcTtsAppId: volcTtsAppId ?? this.volcTtsAppId,
+        volcTtsToken: volcTtsToken ?? this.volcTtsToken,
+        volcTtsCluster: volcTtsCluster ?? this.volcTtsCluster,
+        volcTtsVoice: volcTtsVoice ?? this.volcTtsVoice,
       );
 
   Map<String, dynamic> toJson() => {
@@ -588,6 +661,21 @@ class AppSettings {
         'leaderboardServerUrl': leaderboardServerUrl,
         'leaderboardServerToken': leaderboardServerToken,
         'leaderboardServerSyncMin': leaderboardServerSyncMin,
+        'aiPersona': aiPersona,
+        'aiVisionModel': aiVisionModel,
+        'sttBaseUrl': sttBaseUrl,
+        'sttApiKey': sttApiKey,
+        'sttModel': sttModel,
+        'ttsEngine': ttsEngine,
+        'ttsSpeed': ttsSpeed,
+        'ttsBaseUrl': ttsBaseUrl,
+        'ttsApiKey': ttsApiKey,
+        'ttsModel': ttsModel,
+        'ttsVoice': ttsVoice,
+        'volcTtsAppId': volcTtsAppId,
+        'volcTtsToken': volcTtsToken,
+        'volcTtsCluster': volcTtsCluster,
+        'volcTtsVoice': volcTtsVoice,
       };
 
   factory AppSettings.fromJson(Map<String, dynamic> j) => AppSettings(
@@ -694,6 +782,32 @@ class AppSettings {
         leaderboardServerToken: j['leaderboardServerToken']?.toString(),
         leaderboardServerSyncMin:
             (j['leaderboardServerSyncMin'] as num?)?.toInt() ?? 0,
+        aiPersona: j['aiPersona']?.toString() ?? '',
+        aiVisionModel: j['aiVisionModel']?.toString() ?? '',
+        sttBaseUrl:
+            j['sttBaseUrl']?.toString() ?? 'https://api.siliconflow.cn/v1',
+        sttApiKey: j['sttApiKey']?.toString(),
+        sttModel: j['sttModel']?.toString() ?? 'FunAudioLLM/SenseVoiceSmall',
+        // 'edge' 是本轮开发期的短命值（EdgeTTS 被微软按客户端指纹封了），
+        // 落过盘的旧值静默迁移到系统引擎。
+        ttsEngine: switch (j['ttsEngine']?.toString()) {
+          'volcano' => 'volcano',
+          'openai' => 'openai',
+          _ => 'system',
+        },
+        ttsSpeed: (j['ttsSpeed'] as num?)?.toDouble() ?? 1.0,
+        ttsBaseUrl:
+            j['ttsBaseUrl']?.toString() ?? 'https://api.siliconflow.cn/v1',
+        ttsApiKey: j['ttsApiKey']?.toString(),
+        ttsModel:
+            j['ttsModel']?.toString() ?? 'FunAudioLLM/CosyVoice2-0.5B',
+        ttsVoice: j['ttsVoice']?.toString() ??
+            'FunAudioLLM/CosyVoice2-0.5B:anna',
+        volcTtsAppId: j['volcTtsAppId']?.toString(),
+        volcTtsToken: j['volcTtsToken']?.toString(),
+        volcTtsCluster: j['volcTtsCluster']?.toString() ?? 'volcano_tts',
+        volcTtsVoice: j['volcTtsVoice']?.toString() ??
+            'zh_female_wanwanxiaohe_moon_bigtts',
       );
 }
 

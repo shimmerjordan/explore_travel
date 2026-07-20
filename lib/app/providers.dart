@@ -10,6 +10,9 @@ import '../core/prefs.dart';
 import '../models/models.dart' show GroupTransportX;
 import '../data/db/database.dart';
 import '../services/ai/ai_service.dart';
+import '../services/ai/companion_controller.dart';
+import '../services/ai/stt_service.dart';
+import '../services/ai/tts_service.dart';
 import '../services/fog/fog_engine.dart';
 import '../services/group/group_service.dart';
 import '../services/group/group_sync_controller.dart';
@@ -128,6 +131,23 @@ final fogEngineProvider =
 final locationServiceProvider = Provider((ref) => LocationService());
 
 final aiServiceProvider = Provider((ref) => AiService());
+
+final sttServiceProvider = Provider((ref) => SttService());
+final ttsServiceProvider = Provider((ref) => TtsService());
+
+/// 地图页 AI 旅伴。挂全局：卡片最小化 / 切页面时通话与流式回复继续跑。
+final companionProvider =
+    ChangeNotifierProvider<CompanionController>((ref) {
+  final c = CompanionController(
+    ai: ref.read(aiServiceProvider),
+    stt: ref.read(sttServiceProvider),
+    tts: ref.read(ttsServiceProvider),
+    settingsOf: () => ref.read(settingsProvider),
+    geocodingOf: () => ref.read(geocodingServiceProvider),
+  );
+  ref.onDispose(c.dispose);
+  return c;
+});
 
 final musicServiceProvider = Provider((ref) {
   final s = ref.watch(settingsProvider);

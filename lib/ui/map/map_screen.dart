@@ -25,6 +25,7 @@ import 'native_file_image_io.dart';
 import '../../services/map/fog_tile_provider.dart';
 import '../../services/map/tile_providers.dart';
 import '../common/pixel.dart';
+import '../companion/companion_card.dart';
 import '../journal/journal_screen.dart' as journal_ui;
 import '../import/track_import_flow.dart';
 import '../widgets/top_toast.dart';
@@ -71,6 +72,10 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   bool _followCamera = true;
 
   // Raw WGS-84 position — always stored in WGS-84
+  // ── AI 旅伴卡片 ──
+  bool _companionOpen = false;
+  final _companionKey = GlobalKey<CompanionCardState>();
+
   double? _wgsLat;
   double? _wgsLng;
 
@@ -478,6 +483,8 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     final viewOnly = ref.watch(viewOnlyProvider);
 
     return Scaffold(
+      // 键盘弹出时不挤压地图（旅伴卡片自己跟随 viewInsets 上移）。
+      resizeToAvoidBottomInset: false,
       extendBody: true,
       floatingActionButtonLocation: FloatingActionButtonLocation.centerDocked,
       floatingActionButton: _CenterRecFab(
@@ -1046,6 +1053,24 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                 }),
               ),
             ),
+          // ── AI 旅伴：像素头像入口（debug 按钮上方）。通话中呼吸发光，
+          //    收起卡片有新回复时亮一颗琥珀像素点。──
+          Positioned(
+            left: 12,
+            bottom: 136,
+            child: CompanionAvatarButton(
+              onTap: () {
+                if (_companionOpen) {
+                  _companionKey.currentState?.close();
+                } else {
+                  setState(() => _companionOpen = true);
+                  final c = ref.read(companionProvider);
+                  c.setCardOpen(true);
+                  c.updatePosition(_wgsLat, _wgsLng);
+                }
+              },
+            ),
+          ),
           // Read-only badge (web / 展示模式). Enable debug mode to unlock
           // recording — see viewOnlyProvider (the backdoor).
           if (ref.watch(viewOnlyProvider))
@@ -1092,6 +1117,32 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                     ),
                   ),
                 ),
+              ),
+            ),
+          // ── AI 旅伴侧吸卡片：左缘滑入，悬浮在地图上；键盘弹出时跟随
+          //    viewInsets 上移（Scaffold 不再 resize）。──
+          if (_companionOpen)
+            Positioned(
+              // -6 让贴边侧的像素阶梯角滑出屏外，卡片看起来是“吸”在左缘的。
+              left: -6,
+              bottom: MediaQuery.of(context).viewInsets.bottom > 0
+                  ? MediaQuery.of(context).viewInsets.bottom + 8
+                  : 136,
+              width: math.min(342.0, MediaQuery.of(context).size.width * 0.92),
+              height: math.min(
+                  470.0,
+                  MediaQuery.of(context).size.height -
+                      MediaQuery.of(context).padding.top -
+                      56 -
+                      (MediaQuery.of(context).viewInsets.bottom > 0
+                          ? MediaQuery.of(context).viewInsets.bottom + 8
+                          : 136)),
+              child: CompanionCard(
+                key: _companionKey,
+                onClosed: () {
+                  if (mounted) setState(() => _companionOpen = false);
+                  ref.read(companionProvider).setCardOpen(false);
+                },
               ),
             ),
         ],

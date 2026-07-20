@@ -54,10 +54,11 @@ android {
         applicationId = "com.explorejournal.explore_journal"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
-        // record_android needs ≥ 23 (Android 6.0). Use maxOf so any IDE
-        // / Flutter migrator that resets `flutter.minSdkVersion` to 21 will
-        // still produce 23 here. DO NOT change to a plain assignment.
-        minSdk = maxOf(23, flutter.minSdkVersion)
+        // record_android needs ≥ 23，flutter_tts needs ≥ 24 (Android 7.0)。
+        // Use maxOf so any IDE / Flutter migrator that resets
+        // `flutter.minSdkVersion` to 21 will still produce 24 here.
+        // DO NOT change to a plain assignment.
+        minSdk = maxOf(24, flutter.minSdkVersion)
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName

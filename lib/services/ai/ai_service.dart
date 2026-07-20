@@ -157,12 +157,16 @@ class AiService {
   ///
   /// Errors are surfaced by adding an [AiException] to the stream and then
   /// closing it.
+  /// [messages] 的 content 允许是纯文本，也允许是 OpenAI vision 内容数组
+  /// （[{'type':'image_url',...},{'type':'text',...}]）。[modelOverride]
+  /// 用于图片消息切到 [AppSettings.aiVisionModel]。
   Stream<String> chatStream({
     required AppSettings settings,
-    required List<Map<String, String>> messages,
+    required List<Map<String, dynamic>> messages,
     double temperature = 0.7,
     int maxTokens = 1024,
     Duration timeout = const Duration(minutes: 30),
+    String? modelOverride,
     CancelToken? cancelToken,
   }) async* {
     final base = settings.aiBaseUrl ?? 'https://api.siliconflow.cn/v1';
@@ -182,7 +186,7 @@ class AiService {
           receiveTimeout: timeout,
         ),
         data: {
-          'model': settings.aiModel,
+          'model': modelOverride ?? settings.aiModel,
           'messages': messages,
           'temperature': temperature,
           'max_tokens': maxTokens,
