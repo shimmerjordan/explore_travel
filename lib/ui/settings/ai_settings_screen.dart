@@ -346,7 +346,8 @@ class _AiSettingsScreenState extends ConsumerState<AiSettingsScreen> {
           ListTile(
             leading: Icon(Icons.delete_sweep_outlined, color: cs.error),
             title: const Text('清空旅伴聊天记录'),
-            subtitle: const Text('只清地图页 AI 旅伴的历史，AI 规划的会话不受影响'),
+            subtitle: const Text('删除旅伴的全部历史会话（卡片的「历史」Tab 里也能按段管理），'
+                'AI 规划的会话不受影响'),
             onTap: () async {
               final ok = await showDialog<bool>(
                 context: context,

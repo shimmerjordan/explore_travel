@@ -114,18 +114,35 @@ class LocationService {
       distanceFilter: mode.distanceFilter.toInt(),
     );
     try {
-      _sub = Geolocator.getPositionStream(locationSettings: settings).listen(
-        _controller.add,
-        onError: (e) {
-          lastError = '位置流错误：$e';
-        },
-      );
+      _subscribe(settings);
       _running = true;
       return true;
     } catch (e) {
       lastError = '无法启动位置流：$e';
       return false;
     }
+  }
+
+  void _subscribe(LocationSettings settings) {
+    _sub?.cancel();
+    _sub = Geolocator.getPositionStream(locationSettings: settings).listen(
+      _controller.add,
+      // 断流自愈：provider 抖一下不该杀掉整个流（3s 后重订，仍在运行时）。
+      onError: (e) {
+        lastError = '位置流错误：$e';
+        _sub = null;
+        Future.delayed(const Duration(seconds: 3), () {
+          if (_running && _sub == null) _subscribe(settings);
+        });
+      },
+      onDone: () {
+        _sub = null;
+        Future.delayed(const Duration(seconds: 3), () {
+          if (_running && _sub == null) _subscribe(settings);
+        });
+      },
+      cancelOnError: true,
+    );
   }
 
   Future<void> stop() async {

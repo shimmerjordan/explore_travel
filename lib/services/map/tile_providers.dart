@@ -39,6 +39,10 @@ TileLayer buildTileLayer({
         // placeholder alive for the whole session, a permanent "hole" that
         // reads as an unloaded block under the fog veil.
         evictErrorTileStrategy: EvictErrorTileStrategy.notVisibleRespectMargin,
+        // 瓦片加载失败一律打日志——不然"整页灰"只能靠猜（问题排查用，
+        // 每瓦片一行，正常时零输出，保留无成本）。
+        errorTileCallback: (tile, error, _) =>
+            debugPrint('[TILE] ${tile.coordinates} failed: $error'),
       );
 
   const amapSubs = ['1', '2', '3', '4'];

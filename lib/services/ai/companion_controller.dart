@@ -54,6 +54,42 @@ class CompanionMessage {
       );
 }
 
+/// 一段对话（会话）。历史 Tab 按会话管理：切换 / 删除 / 清空；
+/// 新会话同时意味着给 LLM 一个干净的上下文窗口。
+class CompanionSession {
+  final String id;
+  String title; // 首条用户消息的截断，空 = 还没聊
+  final DateTime createdAt;
+  final List<CompanionMessage> messages;
+
+  CompanionSession({
+    String? id,
+    this.title = '',
+    DateTime? createdAt,
+    List<CompanionMessage>? messages,
+  })  : id = id ?? DateTime.now().microsecondsSinceEpoch.toRadixString(36),
+        createdAt = createdAt ?? DateTime.now(),
+        messages = messages ?? [];
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'title': title,
+        'at': createdAt.toIso8601String(),
+        'messages': [for (final m in messages) m.toJson()],
+      };
+
+  factory CompanionSession.fromJson(Map<String, dynamic> j) =>
+      CompanionSession(
+        id: j['id']?.toString(),
+        title: j['title']?.toString() ?? '',
+        createdAt: DateTime.tryParse(j['at']?.toString() ?? ''),
+        messages: [
+          for (final m in (j['messages'] as List? ?? const []))
+            if (m is Map<String, dynamic>) CompanionMessage.fromJson(m),
+        ],
+      );
+}
+
 /// 地图页 AI 旅伴的大脑：文字聊天（可带图）、历史持久化、语音通话状态机。
 /// 生命周期挂在全局 provider 上——卡片最小化、甚至离开地图页，通话照常进行。
 class CompanionController extends ChangeNotifier {
@@ -73,9 +109,25 @@ class CompanionController extends ChangeNotifier {
     _restore();
   }
 
-  // ─── 对话状态 ───────────────────────────────────────────────────────────
+  // ─── 对话状态（会话制）──────────────────────────────────────────────────
 
-  final List<CompanionMessage> messages = [];
+  final List<CompanionSession> sessions = [];
+  String? _activeId;
+
+  CompanionSession get _active {
+    if (sessions.isEmpty) {
+      sessions.add(CompanionSession());
+      _activeId = sessions.last.id;
+    }
+    return sessions.firstWhere((s) => s.id == _activeId,
+        orElse: () => sessions.last);
+  }
+
+  String get activeSessionId => _active.id;
+
+  /// 当前会话的消息流。旧代码全部通过这个 getter 继续工作。
+  List<CompanionMessage> get messages => _active.messages;
+
   bool busy = false; // 文字回复流式生成中
   bool cardOpen = false;
   int unread = 0;
@@ -137,34 +189,105 @@ class CompanionController extends ChangeNotifier {
     return _historyFile = File('${dir.path}/ai_companion_history.json');
   }
 
+  static const _sessionCap = 30;
+
   Future<void> _restore() async {
     try {
       final f = await _history();
       if (!await f.exists()) return;
-      final list = jsonDecode(await f.readAsString()) as List;
-      messages
-        ..clear()
-        ..addAll(list
+      final raw = jsonDecode(await f.readAsString());
+      sessions.clear();
+      if (raw is List) {
+        // v1 旧格式（单一消息流）→ 迁移成一个会话。
+        final msgs = raw
             .whereType<Map<String, dynamic>>()
-            .map(CompanionMessage.fromJson));
+            .map(CompanionMessage.fromJson)
+            .toList();
+        if (msgs.isNotEmpty) {
+          sessions.add(CompanionSession(
+            title: _titleFrom(msgs),
+            createdAt: msgs.first.at,
+            messages: msgs,
+          ));
+        }
+      } else if (raw is Map<String, dynamic>) {
+        sessions.addAll([
+          for (final s in (raw['sessions'] as List? ?? const []))
+            if (s is Map<String, dynamic>) CompanionSession.fromJson(s),
+        ]);
+        _activeId = raw['activeId']?.toString();
+      }
+      if (sessions.isNotEmpty &&
+          !sessions.any((s) => s.id == _activeId)) {
+        _activeId = sessions.last.id;
+      }
       notifyListeners();
     } catch (_) {}
+  }
+
+  static String _titleFrom(List<CompanionMessage> msgs) {
+    final first = msgs.where((m) => m.role == 'user' && m.text.isNotEmpty);
+    if (first.isEmpty) return '';
+    final t = first.first.text.replaceAll('\n', ' ').trim();
+    return t.length > 18 ? '${t.substring(0, 18)}…' : t;
   }
 
   Future<void> _persist() async {
     try {
       final f = await _history();
-      final keep = messages.length > _historyCap
-          ? messages.sublist(messages.length - _historyCap)
-          : messages;
-      await f.writeAsString(
-          jsonEncode([for (final m in keep) m.toJson()]));
+      // 每会话裁到 200 条、总量最多 30 个会话（丢最旧的空转历史）。
+      for (final s in sessions) {
+        if (s.messages.length > _historyCap) {
+          s.messages.removeRange(0, s.messages.length - _historyCap);
+        }
+      }
+      while (sessions.length > _sessionCap) {
+        final drop =
+            sessions.indexWhere((s) => s.id != _activeId); // 永不丢活跃会话
+        if (drop < 0) break;
+        sessions.removeAt(drop);
+      }
+      await f.writeAsString(jsonEncode({
+        'v': 2,
+        'activeId': _activeId,
+        'sessions': [for (final s in sessions) s.toJson()],
+      }));
     } catch (_) {}
   }
 
+  /// 开一段新对话（= 给 LLM 干净的上下文）。当前会话还是空的就复用它。
+  Future<void> newSession() async {
+    if (busy || inCall) return;
+    if (_active.messages.isEmpty) return;
+    sessions.add(CompanionSession());
+    _activeId = sessions.last.id;
+    notifyListeners();
+    await _persist();
+  }
+
+  Future<void> switchSession(String id) async {
+    if (busy || inCall) return;
+    if (!sessions.any((s) => s.id == id)) return;
+    _activeId = id;
+    notifyListeners();
+    await _persist();
+  }
+
+  Future<void> deleteSession(String id) async {
+    if (busy || inCall) return;
+    sessions.removeWhere((s) => s.id == id);
+    if (_activeId == id) {
+      _activeId = sessions.isEmpty ? null : sessions.last.id;
+    }
+    notifyListeners();
+    await _persist();
+  }
+
+  /// 清空全部会话（设置页与历史 Tab 共用）。
   Future<void> clearHistory() async {
     if (busy || inCall) return;
-    messages.clear();
+    sessions.clear();
+    _activeId = null;
     notifyListeners();
     await _persist();
   }
@@ -254,6 +377,7 @@ class CompanionController extends ChangeNotifier {
     if (busy || inCall) return;
     messages.add(
         CompanionMessage(role: 'user', text: t, imagePath: imagePath));
+    if (_active.title.isEmpty) _active.title = _titleFrom(messages);
     final reply = CompanionMessage(role: 'assistant', text: '', streaming: true);
     messages.add(reply);
     busy = true;
@@ -366,6 +490,7 @@ class CompanionController extends ChangeNotifier {
       if (heard.trim().isEmpty) continue;
 
       messages.add(CompanionMessage(role: 'user', text: heard.trim()));
+      if (_active.title.isEmpty) _active.title = _titleFrom(messages);
       notifyListeners();
       await _speakReply();
       await _persist();

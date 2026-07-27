@@ -34,6 +34,21 @@ class _LocationTaskHandler extends TaskHandler {
   /// repeat tick) and against resubscribing while one is already pending.
   bool _polling = false;
 
+  /// Consecutive active-poll failures (both fused fix AND last-known came
+  /// back empty). At 3+ we assume the fused provider itself is wedged on
+  /// this ROM (classic MIUI deep-doze symptom: 高德 has fixes, we don't —
+  /// their SDK talks to its own network locator, we sit on a dead fused
+  /// stream) and flip the stream over to the raw LocationManager.
+  int _stallPolls = 0;
+  bool _forceLm = false;
+
+  /// Rate-limits stall-triggered resubscribes so a long GPS outage doesn't
+  /// churn cancel/subscribe every 9 s heartbeat.
+  DateTime _lastResub = DateTime.fromMillisecondsSinceEpoch(0);
+
+  /// Last time we refreshed the notification line (最后定位 HH:mm).
+  DateTime _lastNotifUpdate = DateTime.fromMillisecondsSinceEpoch(0);
+
   @override
   Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
     // If the OS auto-restarted us (boot / app-update / low-memory) but the
@@ -72,6 +87,11 @@ class _LocationTaskHandler extends TaskHandler {
         accuracy: accuracy,
         distanceFilter: distanceFilter,
         intervalDuration: _mode.interval,
+        // Escalation: after repeated total stalls we bypass the fused
+        // provider and read GPS via the platform LocationManager directly.
+        // Slightly more battery, but immune to the fused-provider freezes
+        // that some ROMs develop in deep doze. Sticky until service restart.
+        forceLocationManager: _forceLm,
       );
     }
     return LocationSettings(accuracy: accuracy, distanceFilter: distanceFilter);
@@ -86,6 +106,7 @@ class _LocationTaskHandler extends TaskHandler {
   /// false line.
   void _emit(Position pos) {
     _lastFixAt = DateTime.now();
+    _stallPolls = 0;
     final sample = <String, dynamic>{
       'lat': pos.latitude,
       'lng': pos.longitude,
@@ -134,11 +155,31 @@ class _LocationTaskHandler extends TaskHandler {
     // don't hammer GPS in high-performance mode. If the stream is healthy
     // and the user is moving, this never fires (the stream keeps _lastFixAt
     // fresh); it only kicks in when updates have actually stopped.
+    final now = DateTime.now();
     final stallFor = Duration(
         milliseconds:
             math.max(_mode.interval.inMilliseconds * 2, 10000));
-    if (DateTime.now().difference(_lastFixAt) >= stallFor) {
+    if (now.difference(_lastFixAt) >= stallFor) {
       _activePoll();
+      // 流"假活"（订阅在、回调停）也要治：stall 期间每 30s 重订一次。
+      if (now.difference(_lastResub) >= const Duration(seconds: 30)) {
+        _lastResub = now;
+        _startStream();
+      }
+    }
+    // 通知行显示最后定位时间 —— 锁屏丢定位从"玄学"变成一眼可诊断：
+    // 下拉通知就知道后台最后一次定位是什么时候。每分钟刷一次。
+    if (now.difference(_lastNotifUpdate) >= const Duration(minutes: 1)) {
+      _lastNotifUpdate = now;
+      final fix = _lastFixAt.millisecondsSinceEpoch == 0
+          ? '等待定位…'
+          : '最后定位 ${_lastFixAt.hour.toString().padLeft(2, '0')}:'
+              '${_lastFixAt.minute.toString().padLeft(2, '0')}';
+      FlutterForegroundTask.updateService(
+        notificationTitle: 'Explore Journal 正在记录',
+        notificationText:
+            '${_mode.label} 模式 · $fix${_forceLm ? ' · GPS 直连' : ''}',
+      );
     }
   }
 
@@ -162,10 +203,25 @@ class _LocationTaskHandler extends TaskHandler {
       // keeps a heartbeat. It carries its own (older) timestamp, so the
       // session-split logic won't draw a false line, and an unchanged fix
       // dedups away in RecordingController.
+      var gotAny = false;
       try {
         final last = await Geolocator.getLastKnownPosition();
-        if (last != null) _emit(last);
+        if (last != null) {
+          _emit(last);
+          gotAny = true;
+        }
       } catch (_) {}
+      if (!gotAny) {
+        _stallPolls++;
+        // Fused provider 连 last-known 都掏不出来，连续三次 → 切
+        // LocationManager 直连重订（见 _settings 注释）。
+        if (_stallPolls >= 3 &&
+            !_forceLm &&
+            defaultTargetPlatform == TargetPlatform.android) {
+          _forceLm = true;
+          await _startStream();
+        }
+      }
     } finally {
       _polling = false;
     }

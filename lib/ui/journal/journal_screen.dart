@@ -17,6 +17,7 @@ import '../../services/map/tile_providers.dart';
 import '../../services/media/exif_service.dart';
 import '../common/pixel.dart';
 import '../map/native_file_image_io.dart';
+import 'location_picker.dart';
 import 'quill_editor_screen.dart';
 
 class JournalScreen extends ConsumerStatefulWidget {
@@ -382,48 +383,78 @@ Future<bool> showJournalEditor(
   String? ownerPeerId = entry?.ownerPeerId;
   final picker = ImagePicker();
   final activeLayer = ref.read(effectiveActiveLayerIdProvider);
-  // For a new entry we anchor on the map's *displayed* pin (simulator-aware)
-  // instead of forcing a fresh GPS read. Falls back to a one-shot GPS read
-  // only if no pin has been displayed yet (e.g. user opened the journal
-  // page before the map screen was ever drawn).
+  // For a new entry we anchor on the map's *displayed* pin (simulator-aware).
+  // ⚠️ 弹窗必须**立即**出现：定位兜底与 peers 查询都在弹窗打开后异步补——
+  // 老版本在这里同步 await currentOnce()，室内两级超时最长 ~13s，就是
+  // 「点加号卡特别久」的根因。
   double? exifLat;
   double? exifLng;
   DateTime? exifTime;
   ({double lat, double lng})? pinPos;
+  ({double lat, double lng})? pickedPos; // 用户在地图上手选的点，优先级最高
+  var locating = false;
   if (entry == null) {
     pinPos = ref.read(currentDisplayPositionProvider);
-    if (pinPos == null) {
-      final pos = await ref.read(locationServiceProvider).currentOnce();
-      if (pos != null) pinPos = (lat: pos.latitude, lng: pos.longitude);
-    }
+    locating = pinPos == null; // 弹窗后异步补一次 GPS
   }
   DateTime resolvedTime() => entry?.time ?? exifTime ?? DateTime.now();
-  double resolvedLat() => entry?.lat ?? exifLat ?? pinPos?.lat ?? 0;
-  double resolvedLng() => entry?.lng ?? exifLng ?? pinPos?.lng ?? 0;
+  double? resolvedLat() =>
+      pickedPos?.lat ?? entry?.lat ?? exifLat ?? pinPos?.lat;
+  double? resolvedLng() =>
+      pickedPos?.lng ?? entry?.lng ?? exifLng ?? pinPos?.lng;
   // Peers ever seen — pulled from chat_messages so we include offline ones
-  // too. "self" is always first.
+  // too. Loaded async after the dialog opens.
   final db0 = ref.read(dbProvider);
-  final peerRows = await db0
-      .customSelect(
-        'SELECT DISTINCT peer_id, author FROM chat_messages ORDER BY peer_id',
-      )
-      .get();
-  final knownPeers = <({String id, String name})>[
-    for (final r in peerRows)
-      (
-        id: r.read<String>('peer_id'),
-        name: r.read<String>('author'),
-      ),
-  ];
+  var knownPeers = <({String id, String name})>[];
 
   if (!context.mounted) return false;
   bool changed = false;
+  // 弹窗关闭后异步回调不许再 setState（StatefulBuilder 的 element 已销毁）。
+  var alive = true;
+  var asyncStarted = false;
   // Inline validation message under the title field. The save used to just
   // `return` on an empty title, so the button looked broken ("保存不了没提示").
   String? titleError;
+  String? posError;
   await showDialog<void>(
     context: context,
     builder: (_) => StatefulBuilder(builder: (dialogCtx, setState) {
+      if (!asyncStarted) {
+        asyncStarted = true;
+        // Peers（毫秒级，但没理由挡弹窗）。
+        () async {
+          try {
+            final rows = await db0
+                .customSelect(
+                  'SELECT DISTINCT peer_id, author FROM chat_messages ORDER BY peer_id',
+                )
+                .get();
+            if (!alive) return;
+            setState(() => knownPeers = [
+                  for (final r in rows)
+                    (
+                      id: r.read<String>('peer_id'),
+                      name: r.read<String>('author'),
+                    ),
+                ]);
+          } catch (_) {}
+        }();
+        // 定位兜底：地图从没画过 pin 时才需要，一次性，慢也不挡 UI。
+        if (locating) {
+          () async {
+            final pos =
+                await ref.read(locationServiceProvider).currentOnce();
+            if (!alive) return;
+            setState(() {
+              locating = false;
+              if (pos != null) {
+                pinPos = (lat: pos.latitude, lng: pos.longitude);
+                posError = null;
+              }
+            });
+          }();
+        }
+      }
       return AlertDialog(
         title: Text(entry == null ? '新增手账' : '编辑手账'),
         // Explicit width prevents AlertDialog from asking for intrinsic
@@ -444,11 +475,53 @@ Future<bool> showJournalEditor(
                   text: DateFormat('yyyy-MM-dd HH:mm').format(resolvedTime()),
                 ),
                 const SizedBox(height: 4),
-                _MetaLine(
-                  icon: Icons.location_on_outlined,
-                  text:
-                      '${resolvedLat().toStringAsFixed(5)}, ${resolvedLng().toStringAsFixed(5)}',
-                ),
+                Row(children: [
+                  Icon(Icons.location_on_outlined,
+                      size: 14, color: Theme.of(dialogCtx).hintColor),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      resolvedLat() == null
+                          ? (locating ? '正在获取位置…' : '未获取到位置')
+                          : '${resolvedLat()!.toStringAsFixed(5)}, ${resolvedLng()!.toStringAsFixed(5)}'
+                              '${pickedPos != null ? '（手选）' : ''}',
+                      style: TextStyle(
+                          fontSize: 12,
+                          color: posError != null
+                              ? Theme.of(dialogCtx).colorScheme.error
+                              : Theme.of(dialogCtx).hintColor),
+                    ),
+                  ),
+                  TextButton.icon(
+                    style: TextButton.styleFrom(
+                        visualDensity: VisualDensity.compact,
+                        padding:
+                            const EdgeInsets.symmetric(horizontal: 8)),
+                    icon: const Icon(Icons.map_outlined, size: 16),
+                    label: const Text('地图选点', style: TextStyle(fontSize: 12)),
+                    onPressed: () async {
+                      final picked = await showLocationPicker(
+                        dialogCtx,
+                        initialLat: resolvedLat(),
+                        initialLng: resolvedLng(),
+                      );
+                      if (picked != null && alive) {
+                        setState(() {
+                          pickedPos = picked;
+                          posError = null;
+                        });
+                      }
+                    },
+                  ),
+                ]),
+                if (posError != null)
+                  Padding(
+                    padding: const EdgeInsets.only(left: 20, bottom: 2),
+                    child: Text(posError!,
+                        style: TextStyle(
+                            fontSize: 11,
+                            color: Theme.of(dialogCtx).colorScheme.error)),
+                  ),
                 const SizedBox(height: 6),
                 Row(children: [
                   const Icon(Icons.person_outline, size: 14),
@@ -613,14 +686,22 @@ Future<bool> showJournalEditor(
                 setState(() => titleError = '标题不能为空');
                 return;
               }
+              final lat = resolvedLat();
+              final lng = resolvedLng();
+              if (entry == null && (lat == null || lng == null)) {
+                // 不静默存 (0,0)（那会把手账钉到几内亚湾）。
+                setState(() =>
+                    posError = '还没有位置：等定位完成，或点「地图选点」手动指定');
+                return;
+              }
               final db = ref.read(dbProvider);
               int journalId;
               if (entry == null) {
                 journalId =
                     await db.insertJournal(JournalEntriesCompanion.insert(
                   time: resolvedTime(),
-                  lat: resolvedLat(),
-                  lng: resolvedLng(),
+                  lat: lat!,
+                  lng: lng!,
                   title: titleCtrl.text,
                   richContent: Value(richContent),
                   mediaPaths: Value(mediaPaths.join('\n')),
@@ -638,6 +719,13 @@ Future<bool> showJournalEditor(
                   mediaPaths: Value(mediaPaths.join('\n')),
                   level: Value(level),
                   ownerPeerId: Value(ownerPeerId),
+                  // 编辑时用户手选了新位置 → 一并写入（没选保持原坐标）。
+                  lat: pickedPos != null
+                      ? Value(pickedPos!.lat)
+                      : const Value.absent(),
+                  lng: pickedPos != null
+                      ? Value(pickedPos!.lng)
+                      : const Value.absent(),
                   // Stamp the edit so it beats older copies in sync merges.
                   updatedAt: Value(DateTime.now()),
                 ));
@@ -664,6 +752,7 @@ Future<bool> showJournalEditor(
       );
     }),
   );
+  alive = false;
   return changed;
 }
 

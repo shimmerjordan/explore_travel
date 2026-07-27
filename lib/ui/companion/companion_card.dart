@@ -7,6 +7,7 @@ import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:intl/intl.dart';
 
 import '../../app/providers.dart';
 import '../../services/ai/companion_controller.dart';
@@ -189,6 +190,7 @@ class CompanionCardState extends ConsumerState<CompanionCard>
   XFile? _pendingImage;
 
   bool _entered = false;
+  int _tab = 0; // 0 对话 · 1 历史
 
   @override
   void didChangeDependencies() {
@@ -302,11 +304,20 @@ class CompanionCardState extends ConsumerState<CompanionCard>
                 child: Column(
                   children: [
                     _header(c, cs),
+                    _tabRow(c, cs),
                     Divider(
                         height: 1,
                         color: cs.outlineVariant.withValues(alpha: .4)),
-                    Expanded(child: _chatList(c, cs)),
-                    if (c.inCall) _callStrip(c, cs) else _inputBar(c, cs),
+                    Expanded(
+                        child: _tab == 0
+                            ? _chatList(c, cs)
+                            : _historyList(c, cs)),
+                    // 通话条跨 Tab 常显（通话状态不能因为翻历史而不可见）；
+                    // 输入行只属于对话 Tab。
+                    if (c.inCall)
+                      _callStrip(c, cs)
+                    else if (_tab == 0)
+                      _inputBar(c, cs),
                   ],
                 ),
               ),
@@ -370,6 +381,176 @@ class CompanionCardState extends ConsumerState<CompanionCard>
         ),
       ]),
     );
+  }
+
+  Widget _tabRow(CompanionController c, ColorScheme cs) {
+    Widget tab(int i, String label) {
+      final sel = _tab == i;
+      return InkWell(
+        onTap: () => setState(() => _tab = i),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+          decoration: BoxDecoration(
+            // 像素语言：选中态 = 2px 硬边下划线，不用圆角胶囊。
+            border: Border(
+              bottom: BorderSide(
+                width: 2,
+                color: sel ? cs.primary : Colors.transparent,
+              ),
+            ),
+          ),
+          child: Text(
+            label,
+            style: TextStyle(
+              fontSize: 12.5,
+              fontWeight: sel ? FontWeight.w700 : FontWeight.w500,
+              color: sel ? cs.primary : cs.onSurfaceVariant,
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Row(children: [
+      const SizedBox(width: 6),
+      tab(0, '对话'),
+      tab(1, '历史${c.sessions.isEmpty ? '' : ' ${c.sessions.length}'}'),
+    ]);
+  }
+
+  // ─── 历史 Tab：会话列表 + 新对话 / 删除 / 清空 ───
+
+  Widget _historyList(CompanionController c, ColorScheme cs) {
+    final blocked = c.busy || c.inCall;
+    void guard(VoidCallback action) {
+      if (blocked) {
+        _toast(c.inCall ? '通话中不能整理历史，先挂断' : '回复生成中，稍等一下');
+        return;
+      }
+      action();
+    }
+
+    return Column(children: [
+      Padding(
+        padding: const EdgeInsets.fromLTRB(8, 4, 8, 0),
+        child: Row(children: [
+          TextButton.icon(
+            style: TextButton.styleFrom(
+                visualDensity: VisualDensity.compact),
+            icon: const Icon(Icons.add_comment_outlined, size: 16),
+            label: const Text('新对话', style: TextStyle(fontSize: 12)),
+            onPressed: () => guard(() async {
+              await c.newSession();
+              if (mounted) setState(() => _tab = 0);
+            }),
+          ),
+          const Spacer(),
+          if (c.sessions.isNotEmpty)
+            TextButton.icon(
+              style: TextButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  foregroundColor: cs.error),
+              icon: const Icon(Icons.delete_sweep_outlined, size: 16),
+              label: const Text('清空', style: TextStyle(fontSize: 12)),
+              onPressed: () => guard(() => _confirmClearAll(c)),
+            ),
+        ]),
+      ),
+      Expanded(
+        child: c.sessions.isEmpty
+            ? Center(
+                child: Text('还没有历史对话',
+                    style: TextStyle(
+                        fontSize: 12, color: cs.onSurfaceVariant)),
+              )
+            : ListView.builder(
+                padding: const EdgeInsets.only(bottom: 8),
+                itemCount: c.sessions.length,
+                itemBuilder: (context, i) {
+                  final s = c.sessions[c.sessions.length - 1 - i];
+                  final active = s.id == c.activeSessionId;
+                  return ListTile(
+                    dense: true,
+                    visualDensity: VisualDensity.compact,
+                    selected: active,
+                    selectedTileColor:
+                        cs.primaryContainer.withValues(alpha: .25),
+                    leading: Icon(
+                      active
+                          ? Icons.chat_bubble_rounded
+                          : Icons.chat_bubble_outline_rounded,
+                      size: 18,
+                      color: active ? cs.primary : cs.onSurfaceVariant,
+                    ),
+                    title: Text(
+                      s.title.isEmpty ? '（还没聊出内容）' : s.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 13),
+                    ),
+                    subtitle: Text(
+                      '${DateFormat('MM-dd HH:mm').format(s.createdAt)}'
+                      ' · ${s.messages.length} 条'
+                      '${active ? ' · 当前' : ''}',
+                      style: const TextStyle(fontSize: 10.5),
+                    ),
+                    trailing: IconButton(
+                      tooltip: '删除这段对话',
+                      visualDensity: VisualDensity.compact,
+                      icon: Icon(Icons.close_rounded,
+                          size: 16, color: cs.onSurfaceVariant),
+                      onPressed: () =>
+                          guard(() => _confirmDeleteSession(c, s)),
+                    ),
+                    onTap: () => guard(() async {
+                      await c.switchSession(s.id);
+                      if (mounted) setState(() => _tab = 0);
+                    }),
+                  );
+                },
+              ),
+      ),
+    ]);
+  }
+
+  Future<void> _confirmDeleteSession(
+      CompanionController c, CompanionSession s) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dctx) => AlertDialog(
+        title: const Text('删除这段对话？'),
+        content: Text(
+            '「${s.title.isEmpty ? '（还没聊出内容）' : s.title}」的 ${s.messages.length} 条消息将被删除，无法恢复。'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(dctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(dctx, true),
+              child: const Text('删除')),
+        ],
+      ),
+    );
+    if (ok == true) await c.deleteSession(s.id);
+  }
+
+  Future<void> _confirmClearAll(CompanionController c) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dctx) => AlertDialog(
+        title: const Text('清空全部历史？'),
+        content: Text('共 ${c.sessions.length} 段对话将被删除，无法恢复。'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(dctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(dctx, true),
+              child: const Text('清空')),
+        ],
+      ),
+    );
+    if (ok == true) await c.clearHistory();
   }
 
   Widget _chatList(CompanionController c, ColorScheme cs) {

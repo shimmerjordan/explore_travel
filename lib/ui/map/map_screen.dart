@@ -84,6 +84,10 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   /// collapses back to a plain dot.
   double? _heading;
   StreamSubscription<Position>? _posSub;
+  // 前台定位流自愈（断流退避重启 + 假活看门狗）。
+  Timer? _locWatchdog;
+  Timer? _locRestart;
+  int _locBackoffMs = 2000;
 
   /// Last reported fix accuracy in metres. Drives the signal-strength
   /// chip top-center on the map. `null` = we've never received a fix
@@ -305,6 +309,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   }
 
   void _startLocationStream() {
+    _posSub?.cancel();
     try {
       _posSub = Geolocator.getPositionStream(
         locationSettings: const LocationSettings(
@@ -313,6 +318,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
         ),
       ).listen(
         (pos) {
+          _locBackoffMs = 2000; // 有数据 = 健康，重置退避
           if (!mounted || _simActive) return;
           setState(() {
             _wgsLat = pos.latitude;
@@ -329,17 +335,58 @@ class _MapScreenState extends ConsumerState<MapScreen> {
           _publishDisplayPos();
           _maybeFollowCamera();
         },
-        onError: (_) => _warnGeoOnceWeb(null),
+        // 「高德有定位、这个 App 没有」的根因之一：流一断（provider 重启、
+        // OEM 熄屏杀流、权限瞬断）就永久死，回前台也不自愈。现在断了就
+        // 指数退避重订（后台录制那份 watchdog 早修过，前台这份补齐）。
+        onError: (_) {
+          _warnGeoOnceWeb(null);
+          _scheduleLocRestart();
+        },
+        onDone: _scheduleLocRestart,
+        cancelOnError: true,
       );
     } catch (_) {
       // Geolocator stream not available on this platform
       _warnGeoOnceWeb(null);
+      _scheduleLocRestart();
     }
+    // 常驻看门狗：流“假活”（订阅还在但再无回调）时兜底。90s 无 fix →
+    // 重订流 + 主动补一发 currentOnce，让 pin 立刻回来。
+    _locWatchdog ??= Timer.periodic(const Duration(seconds: 30), (_) async {
+      if (!mounted || _simActive || kIsWeb) return;
+      final stale = _accuracyAt == null ||
+          DateTime.now().difference(_accuracyAt!) >
+              const Duration(seconds: 90);
+      if (!stale) return;
+      _startLocationStream();
+      final pos = await ref.read(locationServiceProvider).currentOnce();
+      if (pos == null || !mounted || _simActive) return;
+      setState(() {
+        _wgsLat = pos.latitude;
+        _wgsLng = pos.longitude;
+        _accuracyMeters = pos.accuracy;
+        _accuracyAt = DateTime.now();
+      });
+      _publishDisplayPos();
+    });
+  }
+
+  void _scheduleLocRestart() {
+    if (!mounted) return;
+    _posSub?.cancel();
+    _posSub = null;
+    _locRestart?.cancel();
+    _locRestart = Timer(Duration(milliseconds: _locBackoffMs), () {
+      if (mounted) _startLocationStream();
+    });
+    _locBackoffMs = math.min(_locBackoffMs * 2, 30000);
   }
 
   @override
   void dispose() {
     _posSub?.cancel();
+    _locWatchdog?.cancel();
+    _locRestart?.cancel();
     _simTimer?.cancel();
     _groupMsgSub?.cancel();
     _groupPeerSub?.cancel();
@@ -1318,7 +1365,23 @@ class _MapScreenState extends ConsumerState<MapScreen> {
               const Divider(height: 1),
               Expanded(
                 child: near.isEmpty
-                    ? const Center(child: Text('附近还没有手账，点右上角"新建"立即创建'))
+                    ? Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Text('附近 5km 还没有手账'),
+                            const SizedBox(height: 12),
+                            FilledButton.tonalIcon(
+                              icon: const Icon(Icons.add_rounded),
+                              label: const Text('在这里写下第一条'),
+                              onPressed: () {
+                                Navigator.pop(sheetCtx);
+                                _quickNewJournal();
+                              },
+                            ),
+                          ],
+                        ),
+                      )
                     : ListView.builder(
                         padding: const EdgeInsets.symmetric(
                             horizontal: 12, vertical: 8),
