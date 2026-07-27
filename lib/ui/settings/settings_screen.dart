@@ -166,6 +166,13 @@ class SettingsScreen extends ConsumerWidget {
                 onTap: () => context.push('/backup'),
               ),
               ListTile(
+                leading: const Icon(Icons.storage_rounded),
+                title: const Text('存储空间'),
+                subtitle: const Text('数据库 / 照片 / 缓存占用 · 清理不需要的数据'),
+                trailing: const Icon(Icons.chevron_right_rounded),
+                onTap: () => context.push('/settings/storage'),
+              ),
+              ListTile(
                 leading: const Icon(Icons.shield_outlined),
                 title: const Text('后台记录设置'),
                 subtitle: const Text('定位权限 / 电池豁免 — 排查"后台不记录"'),
