@@ -9,6 +9,7 @@ import 'package:latlong2/latlong.dart';
 import '../../app/providers.dart';
 import '../../services/geo/coord_converter.dart';
 import '../../services/map/tile_providers.dart';
+import '../../services/security/http_guard.dart';
 
 /// 全屏地图选点：拖动地图把中心针对准位置，或搜索地名跳过去。
 /// 返回 **WGS-84** 坐标（内部按底图 provider 做 GCJ-02 换算），取消返回 null。
@@ -53,7 +54,7 @@ class _SearchHit {
 class _LocationPickerScreenState extends ConsumerState<_LocationPickerScreen> {
   final _mapCtrl = MapController();
   final _searchCtrl = TextEditingController();
-  final _dio = Dio();
+  final _dio = guardedDio();
 
   // 地图中心（display 坐标系）。用 ValueNotifier 而不是 setState —— 拖动
   // 时每帧 setState 会重建 FlutterMap 子树、重置 TileLayer 的加载状态，

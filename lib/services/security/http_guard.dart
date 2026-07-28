@@ -22,11 +22,21 @@ import 'package:dio/dio.dart';
 /// Add this interceptor to every `Dio` instance the app uses for
 /// outbound traffic. It's idempotent and side-effect-free.
 class HttpGuardInterceptor extends Interceptor {
+  /// Hosts explicitly allowed to speak cleartext despite being public.
+  /// Reserved for third-party APIs that simply have no HTTPS endpoint
+  /// (currently only the JOOX music API) — the caller opts in per client,
+  /// visibly, instead of the policy silently not applying at all.
+  final Set<String> allowCleartextHosts;
+
+  const HttpGuardInterceptor({this.allowCleartextHosts = const {}});
+
   @override
   void onRequest(
       RequestOptions options, RequestInterceptorHandler handler) {
     final uri = options.uri;
-    if (uri.scheme == 'http' && !_isPrivate(uri.host)) {
+    if (uri.scheme == 'http' &&
+        !_isPrivate(uri.host) &&
+        !allowCleartextHosts.contains(uri.host)) {
       handler.reject(
         DioException(
           requestOptions: options,
@@ -62,3 +72,12 @@ class HttpGuardInterceptor extends Interceptor {
     return false;
   }
 }
+
+/// The one way this app constructs a [Dio]. Every outbound client goes
+/// through here so [HttpGuardInterceptor] is actually installed — the guard
+/// existed for months while all 16 call sites built bare `Dio()` instances,
+/// which left the cleartext policy entirely unenforced.
+Dio guardedDio([BaseOptions? options, Set<String>? allowCleartextHosts]) =>
+    Dio(options)
+      ..interceptors.add(HttpGuardInterceptor(
+          allowCleartextHosts: allowCleartextHosts ?? const {}));

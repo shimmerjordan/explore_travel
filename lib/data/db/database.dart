@@ -703,11 +703,21 @@ class AppDb extends _$AppDb {
       (select(fogErases)..where((e) => e.layerId.equals(layerId))).get();
 
   /// Drop erase markers older than [keep] — same lifetime as [gcTombstones].
-  Future<int> gcFogErases({Duration keep = const Duration(days: 180)}) =>
-      (delete(fogErases)
-            ..where((e) =>
-                e.erasedAt.isSmallerThanValue(DateTime.now().subtract(keep))))
-          .go();
+  Future<int> gcFogErases({Duration keep = const Duration(days: 180)}) async {
+    final cutoff = DateTime.now().subtract(keep);
+    // Probe first: drift fires a table-update notification for every executed
+    // DELETE even when 0 rows match, which would invalidate the sync engine's
+    // fog export cache on every single export. Only touch the table when
+    // there's actually something to collect.
+    final probe = await (select(fogErases)
+          ..where((e) => e.erasedAt.isSmallerThanValue(cutoff))
+          ..limit(1))
+        .get();
+    if (probe.isEmpty) return 0;
+    return (delete(fogErases)
+          ..where((e) => e.erasedAt.isSmallerThanValue(cutoff)))
+        .go();
+  }
 
   // ─── Sync merge helpers（行级 LWW 更新）─────────────────────────────────
 

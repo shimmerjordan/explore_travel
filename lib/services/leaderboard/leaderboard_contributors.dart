@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:dio/dio.dart';
 import 'leaderboard_model.dart';
 import 'leaderboard_service.dart';
+import '../security/http_guard.dart';
 
 /// Outbound paths for sharing the local leaderboard:
 ///   1. [GithubLeaderboardPR] — push `entries/<peerId>.json` to a fork +
@@ -26,7 +27,7 @@ class GithubLeaderboardPR {
     required this.branch,
     required this.pat,
     Dio? dio,
-  }) : _dio = dio ?? Dio() {
+  }) : _dio = dio ?? guardedDio() {
     _dio.options.headers['Authorization'] = 'Bearer $pat';
     _dio.options.headers['Accept'] = 'application/vnd.github+json';
     _dio.options.headers['X-GitHub-Api-Version'] = '2022-11-28';
@@ -137,7 +138,7 @@ class HttpLeaderboardClient {
   final Dio _dio;
 
   HttpLeaderboardClient({required this.baseUrl, this.token, Dio? dio})
-      : _dio = dio ?? Dio() {
+      : _dio = dio ?? guardedDio() {
     if (token != null && token!.isNotEmpty) {
       _dio.options.headers['Authorization'] = 'Bearer $token';
     }

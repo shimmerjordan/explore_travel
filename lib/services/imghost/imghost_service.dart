@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:uuid/uuid.dart';
 import '../../core/prefs.dart';
+import '../security/http_guard.dart';
 
 class UploadResult {
   /// Public URL — what gets stored in the journal entry.
@@ -84,7 +85,7 @@ class GithubBackend implements ImgHostBackend {
   final String branch;
   final String pathPrefix;
   final String cdnTemplate;
-  final Dio _dio = Dio();
+  final Dio _dio = guardedDio();
 
   GithubBackend({
     required this.pat,
@@ -219,7 +220,7 @@ class CustomBackend implements ImgHostBackend {
   final String displayUrlTemplate; // e.g. "{url}"
   final String deleteUrlTemplate; // empty = unsupported
   final String authHeader; // raw "Bearer xxx" or "Basic yyy" — empty for none
-  final Dio _dio = Dio();
+  final Dio _dio = guardedDio();
 
   CustomBackend({
     required this.uploadUrl,

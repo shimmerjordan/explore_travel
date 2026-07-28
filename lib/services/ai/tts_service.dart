@@ -7,6 +7,7 @@ import 'package:uuid/uuid.dart';
 
 import '../../core/prefs.dart';
 import 'ai_service.dart';
+import '../security/http_guard.dart';
 
 /// 文字转语音 —— 三个可切换引擎（跟小智 AI 一样的插拔思路）：
 ///
@@ -24,7 +25,7 @@ import 'ai_service.dart';
 /// Dart 网络栈同参数直接 403（本机与真机都验证过）。与其猫鼠游戏，不如把
 /// 「免费」交给系统引擎。
 class TtsService {
-  final Dio _dio = Dio();
+  final Dio _dio = guardedDio();
 
   FlutterTts? _sys;
   bool _sysReady = false;

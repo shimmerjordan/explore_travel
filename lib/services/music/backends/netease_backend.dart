@@ -3,6 +3,7 @@ import 'package:dio/dio.dart';
 import 'package:encrypt/encrypt.dart' as enc;
 import '../music_service.dart';
 import 'music_backend.dart';
+import '../../security/http_guard.dart';
 
 /// Direct netease cloud music backend using the "linuxapi" flavor.
 ///
@@ -32,7 +33,7 @@ class NeteaseBackend implements MusicBackend {
   late final enc.Encrypter _encrypter;
 
   NeteaseBackend({String? cookie})
-      : _dio = Dio(BaseOptions(
+      : _dio = guardedDio(BaseOptions(
           headers: {
             'User-Agent': _ua,
             'Referer': 'https://music.163.com',

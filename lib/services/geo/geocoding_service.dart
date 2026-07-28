@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../core/prefs.dart';
 import 'country_lookup.dart';
 import 'learned_regions.dart';
+import '../security/http_guard.dart';
 
 /// Layered reverse-geocoding with a persistent cell cache + a learned
 /// regions table. Resolution order:
@@ -53,7 +54,7 @@ class GeocodingService {
   static const _grid = 0.01; // ~1.1 km on a side at the equator
 
   final LearnedRegionsStore learned;
-  final Dio _dio = Dio();
+  final Dio _dio = guardedDio();
   AppSettings _settings;
 
   GeocodingService(AppSettings settings, this.learned) : _settings = settings;

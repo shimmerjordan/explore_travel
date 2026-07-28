@@ -15,6 +15,7 @@ import '../../services/imghost/upload_queue.dart' show UploadRecord;
 import '../../services/imghost/private_image_loader.dart';
 import '../../services/map/tile_providers.dart';
 import '../../services/media/exif_service.dart';
+import '../../services/media/journal_media_store.dart';
 import '../common/pixel.dart';
 import '../map/native_file_image_io.dart';
 import 'location_picker.dart';
@@ -121,6 +122,9 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
           time = await File(f.path).lastModified();
         } catch (_) {}
       }
+      // Copy out of image_picker's CACHE dir before storing the path — cache
+      // files get purged by the OS and the photo would silently vanish.
+      final stored = await JournalMediaStore.persist(f.path);
       double? lat = gps?.lat;
       double? lng = gps?.lng;
       if (lat == null || lng == null) {
@@ -137,12 +141,12 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
         lat: lat,
         lng: lng,
         title: fmt.format(time),
-        mediaPaths: Value(f.path),
+        mediaPaths: Value(stored),
         layerId: layerId,
       ));
       await uploadQueue.enqueueForJournal(
         journalId: id,
-        localPaths: [f.path],
+        localPaths: [stored],
         richContent: '',
       );
       created++;
@@ -598,7 +602,10 @@ Future<bool> showJournalEditor(
                       onPressed: () async {
                         final f =
                             await picker.pickImage(source: ImageSource.camera);
-                        if (f != null) setState(() => mediaPaths.add(f.path));
+                        if (f == null) return;
+                        final stored =
+                            await JournalMediaStore.persist(f.path);
+                        setState(() => mediaPaths.add(stored));
                       },
                       icon: const Icon(Icons.camera_alt),
                       label: const Text('拍照'),
@@ -609,8 +616,10 @@ Future<bool> showJournalEditor(
                             await picker.pickImage(source: ImageSource.gallery);
                         if (f != null) {
                           final gps = await ExifService.readGps(f.path);
+                          final stored =
+                              await JournalMediaStore.persist(f.path);
                           setState(() {
-                            mediaPaths.add(f.path);
+                            mediaPaths.add(stored);
                             if (gps != null && exifLat == null) {
                               exifLat = gps.lat;
                               exifLng = gps.lng;
@@ -862,7 +871,13 @@ class JournalMediaThumb extends ConsumerWidget {
       // Local file path. NativeFileImage is conditionally compiled: real
       // Image.file on native, a broken-image placeholder on web (no dart:io at
       // runtime) — so a view-only web build doesn't throw on local-only photos.
-      child = NativeFileImage(path: path);
+      // resolve(): legacy entries stored image_picker CACHE paths; if the
+      // cache was purged, fall back to the same basename in journal_media/.
+      child = FutureBuilder<String>(
+        future: JournalMediaStore.resolve(path),
+        initialData: path,
+        builder: (_, snap) => NativeFileImage(path: snap.data ?? path),
+      );
     }
     return ClipRRect(
       borderRadius: BorderRadius.circular(4),
@@ -1591,7 +1606,9 @@ class _JournalDetailScreenState extends ConsumerState<JournalDetailScreen> {
   Future<void> _addImage(ImageSource source) async {
     final f = await _picker.pickImage(source: source);
     if (f == null || !mounted) return;
-    setState(() => _media.add(f.path));
+    final stored = await JournalMediaStore.persist(f.path);
+    if (!mounted) return;
+    setState(() => _media.add(stored));
   }
 
   @override

@@ -11,6 +11,7 @@ import '../../app/providers.dart';
 import '../../core/prefs.dart';
 import 'onedrive_config.dart';
 import 'sync_storage.dart';
+import '../security/http_guard.dart';
 
 /// OneDrive sync via Microsoft Graph + OAuth2 (authorization-code + PKCE).
 ///
@@ -91,7 +92,7 @@ class OneDriveService implements SyncStorage {
   static String get defaultClientId =>
       _envClientId.isNotEmpty ? _envClientId : OneDriveConfig.clientId;
 
-  final Dio _dio = Dio(BaseOptions(
+  final Dio _dio = guardedDio(BaseOptions(
     connectTimeout: const Duration(seconds: 20),
     receiveTimeout: const Duration(seconds: 60),
     sendTimeout: const Duration(minutes: 2),

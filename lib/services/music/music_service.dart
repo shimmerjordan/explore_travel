@@ -4,6 +4,7 @@ import 'backends/joox_backend.dart';
 import 'backends/kuwo_backend.dart';
 import 'backends/music_backend.dart';
 import 'backends/netease_backend.dart';
+import '../security/http_guard.dart';
 
 /// Aggregator. Direct backends (netease, kuwo) are tried first; everything
 /// else falls back to the GD音乐台 proxy.
@@ -37,7 +38,7 @@ class MusicTrack {
 
 class MusicService {
   final String apiBase;
-  final Dio _dio = Dio();
+  final Dio _dio = guardedDio();
   final AudioPlayer player = AudioPlayer();
 
   /// Per-source cookies / tokens looked up from settings. Forwarded to

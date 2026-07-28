@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:dio/dio.dart';
 import '../../core/prefs.dart';
+import '../security/http_guard.dart';
 
 class AiPingResult {
   final bool success;
@@ -21,7 +22,7 @@ class AiPingResult {
 /// arrive — DeepSeek-R1 can spend 30-60s thinking before any output, which
 /// looks like a hang without streaming.
 class AiService {
-  final Dio _dio = Dio();
+  final Dio _dio = guardedDio();
 
   Future<String> chat({
     required AppSettings settings,

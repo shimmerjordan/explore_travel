@@ -3,6 +3,55 @@
 All notable changes to Explore Journal are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow SemVer once releases start.
 
+## [Unreleased] — 2026-07-28
+
+### 性能（同步/备份大提速）
+
+- **分组导出缓存**（[onedrive_sync_engine.dart](lib/services/sync/onedrive_sync_engine.dart)）：
+  导出拆成 journal / tracks / chat / fog / meta 五个分片组，每组用 drift
+  表版本计数器做指纹——相关表自上次同步以来没有写入的组，直接复用上次打包
+  好的 (bytes, MD5)，整组跳过全表读 + jsonEncode + FoW 瓦片重建 + 逐分片
+  MD5。「上传后马上下载校验」的本地基线从全量导出变为近乎瞬时。
+- **确定性 manifest**：同步导出不再写 `exportedAt` 时间戳。此前它导致
+  meta.zip 的 MD5 每次必变 → 每次 syncUp 都重传、每次 syncDown 都重新拉取
+  并重新合并 settings/layers 等模块，哪怕什么都没改。
+- `gcFogErases` 先探测再删除——drift 对 0 行 DELETE 也会发表更新通知，
+  曾使 fog 组指纹永不稳定、缓存永不命中。
+
+### 安全（把"写好没接线"的防线接上）
+
+- **HttpGuardInterceptor 真正生效**：全部 16 处 `Dio()` 改经
+  `guardedDio()` 工厂构造，明文 HTTP 到公网地址一律拒绝（LAN/RFC1918/
+  Tailscale 照常放行）。JOOX 音乐 API 无 HTTPS，按 host 显式豁免并注明风险。
+- **凭据迁入平台安全存储**：PrefsStore 读写时把 `kVaultSecretKeys`（WebDAV
+  密码、PAT、AI key、OneDrive refresh token、音乐 Cookie 等）透明迁移至
+  Android Keystore / iOS Keychain，明文 prefs 里只留 `__secure__` 占位。
+  旧安装首次启动自动迁移；安全存储不可用时回退明文（不丢凭据）。
+
+### 修复
+
+- **手账照片持久化**：选图/拍照后把文件从 image_picker 的**缓存目录**复制到
+  `documents/journal_media/` 再入库——此前存的是缓存路径，系统清缓存后照片
+  静默丢失。旧条目显示时按文件名在持久目录回退查找。
+- 后台定位 task-data 回调在取消订阅时正确注销（此前每次开始/停止录制泄漏
+  一个回调）。
+
+### 功耗
+
+- 录制时不再同时挂**前台 + 后台两条 GPS 流**：前台服务在跑时主 isolate 复用
+  它推送的样本（此前两条流的重复样本全部被去重丢弃，白白多一路 GPS 请求）。
+  无前台服务的平台（web/桌面）仍用前台流兜底。后台定位链路（watchdog、
+  LocationManager 兜底、唤醒锁）完全未动。
+- 组内音乐广播不再每 5 秒重新解析一次直链（一次真实网络请求），同一首歌
+  只解析一次。
+
+### 清理
+
+- 删除死代码：`zerotier_helper.dart`、`geojson_loader.dart`（无任何引用）；
+  README 中对应的「接入真实 GeoJSON 边界」章节一并移除。
+- README / README.zh「数据存放位置」更新为真实布局（journal_media/、
+  Keystore、后台 GPS 缓冲）。
+
 ## [Unreleased] — 2026-07-10
 
 ### 重构（路径/迷雾渲染对齐 Fog of World：任意缩放恒定清晰 + 彩色图层同几何）

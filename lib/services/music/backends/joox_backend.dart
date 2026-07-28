@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:dio/dio.dart';
 import '../music_service.dart';
 import 'music_backend.dart';
+import '../../security/http_guard.dart';
 
 /// Direct JOOX backend.
 ///
@@ -25,7 +26,7 @@ class JooxBackend implements MusicBackend {
   final Dio _dio;
 
   JooxBackend({String? cookie})
-      : _dio = Dio(BaseOptions(
+      : _dio = guardedDio(BaseOptions(
           headers: {
             'User-Agent': _ua,
             'Referer': 'https://www.joox.com/',
@@ -33,7 +34,10 @@ class JooxBackend implements MusicBackend {
           },
           sendTimeout: const Duration(seconds: 15),
           receiveTimeout: const Duration(seconds: 15),
-        ));
+          // JOOX 只有明文 HTTP API——显式豁免这个 host（见 HttpGuardInterceptor）。
+          // 注意：配置了 wmid Cookie 时它会随明文请求发送，这是 JOOX API 的
+          // 固有限制，UI 的 Cookie 输入处应提示用户自担风险。
+        ), {'api-jooxtt.sanook.com'});
 
   @override
   String get source => 'joox';

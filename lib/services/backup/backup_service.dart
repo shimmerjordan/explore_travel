@@ -198,10 +198,25 @@ class BackupService {
   /// zips itself, so producing (and then re-inflating) one big zip here was
   /// pure wasted CPU — the single biggest cause of the sync dialog sitting at
   /// "0% 导出本地数据". [onProgress] ticks once per module so the UI can move.
-  Future<Map<String, List<int>>> exportToFiles(Set<String> selected,
-      {BackupProgress? onProgress}) async {
+  Future<Map<String, List<int>>> exportToFiles(
+    Set<String> selected, {
+    BackupProgress? onProgress,
+    // Sync-path knobs (see SyncEngine._buildLocalShards):
+    //  * deterministic — omit `exportedAt` so identical data always produces
+    //    byte-identical output. With the timestamp in, meta.zip's MD5 changed
+    //    on EVERY export, so every syncUp re-uploaded it and every syncDown
+    //    re-fetched + re-merged it even when nothing had changed.
+    //  * includeManifest/forceRequired/manifestModules — let the sync engine
+    //    export one shard-group at a time (manifest only rides in the meta
+    //    group) while the manifest still lists the FULL selected module set.
+    bool deterministic = false,
+    bool includeManifest = true,
+    bool forceRequired = true,
+    List<String>? manifestModules,
+  }) async {
     // Force the required modules — caller can't opt out.
-    final modules = {...selected, ...requiredModules};
+    final modules =
+        forceRequired ? {...selected, ...requiredModules} : {...selected};
     final out = <String, List<int>>{};
     final total = modules.where(allModules.contains).length;
     var done = 0;
@@ -224,12 +239,14 @@ class BackupService {
     }
 
     // Manifest first so reads can short-circuit on version mismatch.
-    addJson('manifest.json', {
-      'version': archiveVersion,
-      'exportedAt': DateTime.now().toIso8601String(),
-      'appVersion': '0.1.0',
-      'modules': modules.toList()..sort(),
-    });
+    if (includeManifest) {
+      addJson('manifest.json', {
+        'version': archiveVersion,
+        if (!deterministic) 'exportedAt': DateTime.now().toIso8601String(),
+        'appVersion': '0.1.0',
+        'modules': [...(manifestModules ?? modules)]..sort(),
+      });
+    }
 
     if (modules.contains('journal')) {
       await step('journal');

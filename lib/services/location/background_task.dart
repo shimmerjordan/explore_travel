@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:isolate';
 import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
@@ -354,22 +353,29 @@ class BackgroundLocation {
   static Future<bool> isServiceRunning() =>
       FlutterForegroundTask.isRunningService;
 
-  /// Subscribes to GPS samples coming from the background isolate.
+  /// Subscribes to GPS samples coming from the background isolate. The
+  /// task-data callback is REMOVED again when the returned subscription is
+  /// cancelled — it used to be registered and never unregistered, so every
+  /// record start/stop cycle leaked one callback. (The old ReceivePort
+  /// round-trip is also gone: the callback already fires on the main
+  /// isolate, so a controller forwards directly.)
   static StreamSubscription<Map<String, dynamic>> listen(
       void Function(Map<String, dynamic>) onSample) {
-    final port = ReceivePort();
-    FlutterForegroundTask.addTaskDataCallback((Object data) {
+    late final StreamController<Map<String, dynamic>> ctrl;
+    void forward(Object data) {
       if (data is Map) {
         // Force a fully-modifiable copy. Some Flutter plugin Maps land here
         // as `_ConstMap` or platform-channel-derived unmodifiable views.
-        port.sendPort.send(<String, dynamic>{
+        ctrl.add(<String, dynamic>{
           for (final entry in data.entries) entry.key.toString(): entry.value,
         });
       }
-    });
-    return port
-        .cast<Map<String, dynamic>>()
-        .map((m) => <String, dynamic>{...m})
-        .listen(onSample);
+    }
+
+    ctrl = StreamController<Map<String, dynamic>>(
+      onListen: () => FlutterForegroundTask.addTaskDataCallback(forward),
+      onCancel: () => FlutterForegroundTask.removeTaskDataCallback(forward),
+    );
+    return ctrl.stream.listen(onSample);
   }
 }

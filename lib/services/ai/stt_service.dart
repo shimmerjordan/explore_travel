@@ -4,6 +4,7 @@ import 'package:dio/dio.dart';
 
 import '../../core/prefs.dart';
 import 'ai_service.dart';
+import '../security/http_guard.dart';
 
 /// 语音转文字 —— 走任何 OpenAI 兼容的 `/audio/transcriptions` 端点。
 ///
@@ -11,7 +12,7 @@ import 'ai_service.dart';
 /// 也覆盖 OpenAI（gpt-4o-mini-transcribe）、Groq（whisper-large-v3-turbo）
 /// 和自建 whisper（faster-whisper-server 等开源方案）。
 class SttService {
-  final Dio _dio = Dio();
+  final Dio _dio = guardedDio();
 
   /// 把一段录音转成文字。空白音频返回空字符串（不抛错，通话循环里
   /// 静默回到聆听态）。

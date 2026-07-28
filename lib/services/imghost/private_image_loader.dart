@@ -3,6 +3,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import '../../core/prefs.dart';
+import '../security/http_guard.dart';
 
 /// Custom URL scheme we hand back from [GithubBackend] when an entry is
 /// marked private. The display "URL" stored in the journal looks like:
@@ -116,7 +117,7 @@ class _PrivateAwareImageState extends State<PrivateAwareImage> {
     final raw =
         'https://raw.githubusercontent.com/${ref.owner}/${ref.repo}/${ref.branch}/${ref.path}';
     try {
-      final dio = Dio();
+      final dio = guardedDio();
       final resp = await dio.get<List<int>>(
         raw,
         options: Options(

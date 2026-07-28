@@ -5,6 +5,7 @@ import 'package:dio/dio.dart';
 
 import '../../core/prefs.dart';
 import 'sync_storage.dart';
+import '../security/http_guard.dart';
 
 /// [SyncStorage] backed by a GitHub repo via the Contents API. Shards are
 /// stored as files under [_base]`/<rel>` on the configured branch.
@@ -52,7 +53,7 @@ class GithubSyncStorage implements SyncStorage {
 
   static const _base = 'explore_journal/sync';
 
-  final Dio _dio = Dio(BaseOptions(
+  final Dio _dio = guardedDio(BaseOptions(
     baseUrl: 'https://api.github.com',
     connectTimeout: const Duration(seconds: 20),
     receiveTimeout: const Duration(seconds: 120),

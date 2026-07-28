@@ -28,7 +28,7 @@
 | 📍 记录 | Android 前台服务（锁屏 / Doze 持续记录；进程被杀、重启后若在记录则自动恢复并补齐缓冲）· 三档模式 **高性能 1s/2m · 平衡 10s/15m · 省电 30s/40m** · 双流架构（实时 UI + JSONL 落盘缓冲，防止后台丢点）· 每行 UUID 跨设备去重 · **记录时相机自动跟随**（手动拖动/旋转即暂停，点定位键恢复居中）· GPS 信号格只看「能否拿到定位 + 精度」，静止不动不会掉格 |
 | 🗂️ 图层 | 增删改 / 合并 / 可见性 · 每图层独立线条颜色、浓度(0.1–1)、宽度(2–60m) · 颜色 + 标签 · GPX / KML 导出 |
 | 🖋️ 手账 | Quill 富文本 + 内嵌图片/视频 · 批量导入照片（每张一条，自动读 EXIF GPS 定位）· SQLite **FTS5 全文搜索** · 地图图钉（可单个 / 全局隐藏，**导入后即时刷新**）· 公开 / 私有 + 归属人 · 全屏画廊 |
-| 🧭 探索成就 | **真实面积**进度（已点亮 km² ÷ 地区真实面积，非 bbox 估算）· 190+ ISO 国家 + 省级行政区 · **最小 bbox 归属**避免一个点被多省/多国重复计数 · 访问中「学习」出更精细的地区边界 · 可选 GeoJSON 多边形 |
+| 🧭 探索成就 | **真实面积**进度（已点亮 km² ÷ 地区真实面积，非 bbox 估算）· 190+ ISO 国家 + 省级行政区 · **最小 bbox 归属**避免一个点被多省/多国重复计数 · 访问中「学习」出更精细的地区边界 |
 | 🏆 排行榜 | **去中心化、仅追加、签名**（每台设备一对 Ed25519 密钥）· LWW 冲突合并 + TOFU 防伪 · 全球 km² + 逐月榜 · 通过 P2P 自动同步 / GitHub PR / 可选 REST 服务 |
 | 🤖 AI 规划 | OpenAI 兼容（硅基流动 / OpenAI / DeepSeek / OpenRouter…，可自定义 base URL）· 流式生成、可中途取消、30 分钟超时 · 历史保留 30 天、回屏自动续上 · 从返回 JSON 渲染迷你地图 + 能量（千卡 / 步数 / 时长）估算 · 生成搜歌关键词 |
 | 🎵 音乐 | **网易 / 酷我 / JOOX 直连后端 + GD聚合兜底** · WebView 抓登录 cookie · 按「地点 + 心情」生成 AI 歌单 · 收藏带 GPS · 收藏地图 · 可向同行广播同步播放 |
@@ -40,7 +40,7 @@
 | 👤 个人资料 | 头像（256×256 JPEG ≤30 KB，base64）· 昵称内联编辑 · peerId 复制 · 头像内嵌进排行榜与同行标记 |
 | 🐞 调试模式 | 隐藏入口（首页版本号连点 10 次）· 1000 条环形日志缓冲 + 过滤 / 分享 · 迷雾 / 记录诊断 · 模拟行走面板（Release 版也可用） |
 | 🔒 安全 | 密钥（PAT / 令牌 / WebDAV 密码 / 同行口令）存 `flutter_secure_storage`（Android Keystore / iOS Keychain）· 备份导出**剔除密钥** · 运行时 HTTP 守卫拒绝**明文连公网**（局域网 HTTP 仍可）· 无埋点、无遥测、无第三方分析 SDK |
-| 💾 数据可迁移 | 全部数据 = 一个 SQLite（schema v6、全表 UUID、FTS5）+ 一个 `media/` 目录 · 标准 GPX / KML / GeoJSON · 无任何厂商绑定 |
+| 💾 数据可迁移 | 全部数据 = 一个 SQLite（全表 UUID、FTS5）+ 一个 `journal_media/` 目录 · 标准 GPX / KML / GeoJSON · 无任何厂商绑定 |
 | 🌐 Web 回忆版 | 同一套代码构建到浏览器，作为**只读**展示/回忆版 · drift `WasmDatabase`（IndexedDB）· 导入备份 zip → 重温地图/迷雾/手账/3D 地球 · 可选**登录**：自建 Rust+Docker **NAS 后端**只存**设置**于**零知识保险箱**（你的数据仍在自己的 WebDAV/GitHub）· 支持 **PWA 安装** · 调试模式后门可解锁编辑 · [部署指南](docs/web-display-deploy.md) |
 
 ---
@@ -338,11 +338,15 @@ App 只申请**真正用到的**权限：
 ## 数据存放位置
 
 ```
-<应用支持目录>/explore_journal.sqlite      # 主数据库（Drift）
-<应用文档目录>/media/<uuid>.{jpg,mp4}      # 照片与视频
-<应用文档目录>/exports/<图层名>.{gpx,kml}  # GPX/KML 导出
-<临时目录>/restore.zip                     # 临时
+<应用支持目录>/explore_journal.sqlite       # 主数据库（Drift）
+<应用支持目录>/pending_track.jsonl          # 后台 GPS 缓冲
+<应用文档目录>/journal_media/*              # 手账照片/视频（持久目录）
+<应用文档目录>/exports/<图层名>.{gpx,kml}   # GPX/KML 导出
+Android Keystore / iOS Keychain             # 全部凭据（PAT、密码、API key）
 ```
+
+以上路径（Keystore 除外，由系统单独恢复）都在自动备份范围内
+（`backup_rules.xml`），覆盖安装与换机迁移都不会丢数据。
 
 WebDAV 远端镜像：
 
@@ -351,21 +355,6 @@ WebDAV 远端镜像：
 /explore_journal/backup_<ISO 时间>.zip     # 历史版本（手动 + 自动）
 /explore_journal/mailbox/<peer>/           # P2P 离线消息信箱
 ```
-
----
-
-## 可选：接入真实 GeoJSON 边界
-
-默认探索进度用矩形 bbox（速度快、文件小，但略粗）。要换成精确多边形：
-
-1. 找一份各国边界 GeoJSON（如 [datasets/geo-countries](https://github.com/datasets/geo-countries)
-   或 [Natural Earth](https://www.naturalearthdata.com/)），按国家拆分。
-2. 命名为 `assets/boundaries/<国家名>.geojson`，国家名必须与 `countries.json` 完全一致
-   （如 `assets/boundaries/中国.geojson`）。
-3. 重跑 `flutter pub get`，assets 通配符会自动包含新文件。
-
-启动时 `GeoJsonLoader.tryLoad()` 会扫描每个国家。有多边形用多边形（射线法 point-in-polygon），
-没有就回落到 bbox。
 
 ---
 
@@ -485,7 +474,6 @@ nas-backend/                      可选 Rust + Docker 后端（登录 + 保险�
 - [x] 零知识设置保险箱 + 可选 Rust/Docker NAS 后端
 - [x] CI：推送即构建 Web → `web-build` 分支 → Vercel / Cloudflare Pages
 - [ ] 移动端「把设置推送到 NAS」的 UI（Web 端拉取闭环已就绪）
-- [ ] 为所有内置国家配上 GeoJSON 多边形（loader 已就绪，探索页目前仍用 bbox 网格）
 - [ ] Apple Watch / Wear OS 配套
 - [ ] 实时共享地图中显示其他人的移动光标
 

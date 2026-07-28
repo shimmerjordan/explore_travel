@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
+import '../security/http_guard.dart';
 
 /// A NAS auth session. The token is bearer-equivalent and short-lived (TTL set
 /// by the server, ~1h); callers re-login (cheap) rather than persisting a
@@ -72,7 +73,7 @@ class HttpNasVaultClient implements NasVaultClient {
 
   HttpNasVaultClient(String baseUrl, {Dio? dio})
       : _dio = dio ??
-            Dio(BaseOptions(
+            guardedDio(BaseOptions(
               baseUrl: baseUrl,
               connectTimeout: const Duration(seconds: 15),
               receiveTimeout: const Duration(seconds: 30),

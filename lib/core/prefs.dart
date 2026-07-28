@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/models.dart';
 import '../services/backup/backup_service.dart' show kVaultSecretKeys;
+import '../services/security/secure_credentials.dart';
 
 class AppSettings {
   /// True once the persisted prefs have actually been read from disk.
@@ -836,6 +837,22 @@ extension PeerOverrideX on AppSettings {
 class PrefsStore {
   static const _key = 'app_settings_v1';
 
+  /// Marker persisted in the prefs JSON in place of a secret whose real
+  /// value lives in platform secure storage (Android Keystore / iOS
+  /// Keychain). The prefs XML is plaintext on disk — before this, every
+  /// PAT / WebDAV password / API key sat there readable by any forensic
+  /// tool or side-loaded backup app.
+  static const kSecureSentinel = '__secure__';
+
+  /// Prefs key listing which secret fields currently have a copy in secure
+  /// storage. Lets load/save touch the (slow, per-key) platform channel ONLY
+  /// for keys that are actually stored there — a settings save with no
+  /// secrets makes zero secure-storage calls. Survives a backup import
+  /// (which rewrites `app_settings_v1` but not this list).
+  static const _kSecureHeldKey = 'secure_credential_keys';
+
+  final SecureCredentials _creds = SecureCredentials();
+
   Future<AppSettings> load() async {
     // WEB SECRET HYGIENE: the web build is a stateless read-only viewer whose
     // settings (incl. credentials) come from the zero-knowledge vault each
@@ -846,13 +863,66 @@ class PrefsStore {
     final p = await SharedPreferences.getInstance();
     final raw = p.getString(_key);
     if (raw == null) return const AppSettings();
-    return AppSettings.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+    final Map<String, dynamic> j;
+    try {
+      j = jsonDecode(raw) as Map<String, dynamic>;
+    } catch (_) {
+      return const AppSettings();
+    }
+    // Overlay secrets from secure storage. A plaintext value still in the
+    // JSON (pre-migration, or a device whose secure storage failed on the
+    // last save) is the freshest copy — keep it and migrate it out below.
+    // A held/sentinel slot takes the secure-storage value; the held list
+    // also covers a sync-imported settings blob (exports scrub secrets to
+    // null), so a pull can never wipe this device's credentials.
+    final held = {...?p.getStringList(_kSecureHeldKey)};
+    var hasPlaintext = false;
+    for (final k in kVaultSecretKeys) {
+      final v = j[k];
+      if (v is String && v.isNotEmpty && v != kSecureSentinel) {
+        hasPlaintext = true;
+        continue;
+      }
+      if (v == kSecureSentinel || held.contains(k)) {
+        final sec = await _creds.read(k);
+        j[k] = (sec != null && sec.isNotEmpty) ? sec : null;
+      }
+    }
+    final settings = AppSettings.fromJson(j);
+    if (hasPlaintext) {
+      // One-time migration: rewrite the prefs file with the secrets moved
+      // into secure storage, now rather than on the next user edit.
+      await save(settings);
+    }
+    return settings;
   }
 
   Future<void> save(AppSettings s) async {
     if (kIsWeb) return; // see load(): web settings are in-memory only
     final p = await SharedPreferences.getInstance();
-    final raw = jsonEncode(s.toJson());
+    final j = s.toJson();
+    final held = {...?p.getStringList(_kSecureHeldKey)};
+    final nowHeld = <String>{};
+    for (final k in kVaultSecretKeys) {
+      final v = j[k];
+      if (v is String && v.isNotEmpty) {
+        // Real secret → Keystore-backed storage; prefs keeps only a marker.
+        // If the secure write fails (broken Keystore, desktop without a
+        // keyring) the plaintext stays in prefs — a recoverable soft leak
+        // beats losing the credential.
+        if (await _creds.write(k, v)) {
+          j[k] = kSecureSentinel;
+          nowHeld.add(k);
+        }
+      } else if (held.contains(k)) {
+        // Cleared → purge the secure copy too, so it can't resurrect.
+        // (Only keys actually held there — keeps the common no-secrets
+        // save free of per-key platform-channel round-trips.)
+        await _creds.write(k, null);
+      }
+    }
+    await p.setStringList(_kSecureHeldKey, nowHeld.toList()..sort());
+    final raw = jsonEncode(j);
     await p.setString(_key, raw);
     // LWW stamp for settings sync — but only when a NON-secret field really
     // changed. Volatile credential rotations (OneDrive refresh token, music

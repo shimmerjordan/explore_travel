@@ -20,10 +20,10 @@ import '../backup/backup_service.dart' show kVaultSecretKeys;
 /// devices, and the read-only web client has no leaderboard-signing role at
 /// all. So the identity stays on the device that made it. (Plan §7 Q2.)
 ///
-/// NOTE: this reads/writes [AppSettings] directly because the app currently
-/// keeps secrets in plaintext prefs (the platform-keystore [SecureCredentials]
-/// path is dead code). If that migration is ever activated, `extract`/`applyTo`
-/// must additionally bridge those keystore values.
+/// NOTE: this reads/writes the in-memory [AppSettings], which always carries
+/// the REAL secret values — PrefsStore overlays them from platform secure
+/// storage on load and moves them back on save. No keystore bridge is needed
+/// here.
 class VaultPayload {
   /// Schema version of the *plaintext* payload (independent of the encrypted
   /// blob frame version). Bumped when key names change so a future reader can

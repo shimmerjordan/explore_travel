@@ -67,15 +67,20 @@ class SecureCredentials {
     }
   }
 
-  Future<void> write(String key, String? value) async {
+  /// Returns true when the value is durably stored (or deleted). False means
+  /// secure storage is unavailable on this device — the caller must keep its
+  /// fallback copy instead of assuming the secret is safe here.
+  Future<bool> write(String key, String? value) async {
     try {
       if (value == null || value.isEmpty) {
         await _ss.delete(key: key);
       } else {
         await _ss.write(key: key, value: value);
       }
+      return true;
     } catch (e) {
       debugPrint('[SecureCredentials] write $key failed: $e');
+      return false;
     }
   }
 

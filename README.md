@@ -40,7 +40,7 @@
 | 🎞️ Playback | Per-recording **session** list (auto-split on 10-min gap, ≥10 pts) · year/month filter · period summary · stitched multi-session playback · 1-16× speed · time-clipped peer trails (persisted) · journal bubbles (hideable) |
 | 🛰️ P2P | **4 transports**: LAN UDP multicast + subnet TCP scan (`MulticastLock` on Android) · ZeroTier / virtual-LAN underlay · WebRTC (WebDAV signaling) · frp XTCP hole-punch · live route sharing · group + 1:1 private chat · push-to-talk voice · music broadcast · **AES-GCM-256 end-to-end** via PBKDF2-SHA256 (50k iters) · WebDAV mailbox for offline · group diagnostics |
 | 🐞 Debug mode | Hidden — tap version label on home 10× · log buffer (ring of 1000) with filter/share · fog & recording diagnostics · simulator panel in release builds · "fire test reveal" button |
-| 💾 Portability | Everything in one SQLite + a `media/` folder. Schema v4 with UUIDs. Standard zip backups. No vendor lock-in. |
+| 💾 Portability | Everything in one SQLite + a `journal_media/` folder. Schema v4 with UUIDs. Standard zip backups. No vendor lock-in. |
 | 🔒 Security | Credentials (PATs, tokens, WebDAV password, p2p passphrase) live in **flutter_secure_storage** → Android Keystore / iOS Keychain · backup exports **strip secret fields** so leaked archives don't leak creds · runtime HTTP guard refuses **cleartext to non-private hosts** (LAN HTTP still works) · no analytics, no remote logging, no telemetry, no third-party SDK ad/analytics call |
 | 🌐 Web 回忆版 | Same codebase built for the browser as a **read-only** display/reminiscing app · drift `WasmDatabase` (IndexedDB) · import a backup zip → relive your map, fog, journal, globe · optional **login** via a self-hosted Rust+Docker **NAS backend** that stores *only settings* inside a **zero-knowledge vault** (your data stays on your own WebDAV/GitHub) · PWA-installable · debug-mode backdoor unlocks editing · [deploy guide](docs/web-display-deploy.md) |
 
@@ -361,11 +361,16 @@ The app requests **only what's needed**:
 ## Data layout
 
 ```
-<app support>/explore_journal.sqlite      # primary DB (Drift)
-<app documents>/media/<uuid>.{jpg,mp4}    # photos & videos
-<app documents>/exports/<layer>.{gpx,kml} # exports
-<cache>/restore.zip                       # transient
+<app support>/explore_journal.sqlite       # primary DB (Drift)
+<app support>/pending_track.jsonl          # background GPS buffer
+<app documents>/journal_media/*            # journal photos & videos (persistent)
+<app documents>/exports/<layer>.{gpx,kml}  # exports
+Android Keystore / iOS Keychain            # all credentials (PATs, passwords, API keys)
 ```
+
+All of the above (except Keystore, which the OS restores separately) is inside
+the auto-backup scope (`backup_rules.xml`), so data survives in-place upgrades
+("覆盖安装") and device transfers.
 
 WebDAV mirror:
 
@@ -374,26 +379,6 @@ WebDAV mirror:
 /explore_journal/backup_<ISO date>.zip    # history (manual + auto)
 /explore_journal/mailbox/<peer>/          # offline P2P messages
 ```
-
----
-
-## Optional: real GeoJSON boundaries
-
-Out of the box, country / region progress uses rectangular bounding boxes — fast and tiny,
-but slightly approximate. To use precise polygons:
-
-1. Grab a country polygon file (e.g. from
-   [datasets/geo-countries](https://github.com/datasets/geo-countries) or
-   [Natural Earth](https://www.naturalearthdata.com/)) and split per country.
-2. Save each as `assets/boundaries/<country>.geojson` (must match the country name in
-   `countries.json` exactly — e.g. `assets/boundaries/中国.geojson`).
-3. Re-run `flutter pub get` (the asset glob picks up new files automatically).
-
-`GeoJsonLoader.tryLoad()` (ray-casting point-in-polygon for Polygon / MultiPolygon /
-FeatureCollection) is ready to consume these files. Note: the exploration screen currently
-scores progress from the **bbox grid**; full per-country polygon scoring is still on the
-roadmap, so dropping in polygons today sharpens point lookups but doesn't yet replace the
-bbox area maths everywhere.
 
 ---
 
@@ -454,7 +439,6 @@ lib/
 │   ├── ai/ai_service.dart       OpenAI-compatible client
 │   ├── export/track_export.dart GPX / KML in & out
 │   ├── fog/fog_engine.dart      Bitmap tile algorithm
-│   ├── geo/geojson_loader.dart  Polygon point-in-polygon
 │   ├── location/
 │   │   ├── location_service.dart       Foreground geolocator
 │   │   └── background_task.dart        Foreground service
@@ -523,7 +507,6 @@ Organised so a single feature lives in one folder.
 - [x] Zero-knowledge settings vault + optional Rust/Docker NAS backend
 - [x] CI: build web on push → `web-build` branch → Vercel / Cloudflare Pages
 - [ ] Mobile-side "push settings to NAS" UI (web pull loop is in place)
-- [ ] GeoJSON polygon scoring wired into the exploration screen (loader ready; screen still uses the bbox grid)
 - [ ] Apple Watch / Wear OS companion
 - [ ] Real-time peer cursors on shared map
 

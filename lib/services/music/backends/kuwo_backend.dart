@@ -1,6 +1,7 @@
 import 'package:dio/dio.dart';
 import '../music_service.dart';
 import 'music_backend.dart';
+import '../../security/http_guard.dart';
 
 /// Direct kuwo (酷我音乐) backend.
 ///
@@ -30,7 +31,7 @@ class KuwoBackend implements MusicBackend {
   final Dio _dio;
 
   KuwoBackend({String? cookie})
-      : _dio = Dio(BaseOptions(
+      : _dio = guardedDio(BaseOptions(
           headers: {
             'User-Agent': _ua,
             'Referer': '$_base/',

@@ -80,8 +80,7 @@ class RecordingController with WidgetsBindingObserver {
     if (ref.read(viewOnlyProvider)) return '展示模式下不可记录轨迹';
     final settings = ref.read(settingsProvider);
     final loc = ref.read(locationServiceProvider);
-    final ok = await loc.start(settings.recordingMode);
-    if (!ok) {
+    if (!await loc.ensurePermission()) {
       return loc.lastError ?? '无法启动定位';
     }
 
@@ -93,20 +92,28 @@ class RecordingController with WidgetsBindingObserver {
     // (e.g. a previous session the OS suspended, or a boot-resumed run).
     await _ingestBuffer();
 
-    _fgSub = loc.stream.listen((pos) => _enqueueSample({
-          'lat': pos.latitude,
-          'lng': pos.longitude,
-          'accuracy': pos.accuracy,
-          'altitude': pos.altitude,
-          'speed': pos.speed,
-          // Use the GPS fix's own capture time, not now(). Same reason
-          // as background_task.dart — when the OS buffers samples and
-          // delivers them in a burst, stamping with now() collapses
-          // their times together and the 30 s split gate stops
-          // firing, so far-apart-in-time points end up connected by a
-          // long false line on the map.
-          'timeMs': pos.timestamp.millisecondsSinceEpoch,
-        }));
+    // 功耗：前台服务已在以录制精度持续推流（应用打开时 sendDataToMain 一样
+    // 到达主 isolate），这里再开一条前台 geolocator 流等于同时挂两个 GPS
+    // 请求、样本全部被 `_lastHandledKey` 去重丢弃。只在没有前台服务的平台
+    // （web / 桌面）用前台流兜底。
+    if (!await BackgroundLocation.isServiceRunning()) {
+      final ok = await loc.start(settings.recordingMode);
+      if (!ok) return loc.lastError ?? '无法启动定位';
+      _fgSub = loc.stream.listen((pos) => _enqueueSample({
+            'lat': pos.latitude,
+            'lng': pos.longitude,
+            'accuracy': pos.accuracy,
+            'altitude': pos.altitude,
+            'speed': pos.speed,
+            // Use the GPS fix's own capture time, not now(). Same reason
+            // as background_task.dart — when the OS buffers samples and
+            // delivers them in a burst, stamping with now() collapses
+            // their times together and the 30 s split gate stops
+            // firing, so far-apart-in-time points end up connected by a
+            // long false line on the map.
+            'timeMs': pos.timestamp.millisecondsSinceEpoch,
+          }));
+    }
 
     ref.read(recordingActiveProvider.notifier).state = true;
     return null;
@@ -129,8 +136,10 @@ class RecordingController with WidgetsBindingObserver {
     _bgSub = BackgroundLocation.listen(_enqueueSample);
     _startObserving();
     await _ingestBuffer();
-    // Best-effort foreground stream for a snappy live marker; ignore errors.
-    if (await loc.start(settings.recordingMode)) {
+    // Foreground-stream fallback only where the service isn't available —
+    // same double-GPS-request reasoning as [start].
+    if (!await BackgroundLocation.isServiceRunning() &&
+        await loc.start(settings.recordingMode)) {
       _fgSub = loc.stream.listen((pos) => _enqueueSample({
             'lat': pos.latitude,
             'lng': pos.longitude,

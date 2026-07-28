@@ -1,8 +1,10 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:archive/archive.dart';
 import 'package:crypto/crypto.dart';
 import 'package:dio/dio.dart';
+import 'package:drift/drift.dart' show TableUpdate;
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -149,10 +151,67 @@ class SyncEngine {
     if (t != null && t.isCancelled) throw StateError('已取消');
   }
 
+  // ── 增量导出缓存 ────────────────────────────────────────────────────────
+  // 同步的最大耗时曾是：每次 syncUp/syncDown 都全量导出所有模块（全表读 +
+  // jsonEncode + FoW 瓦片重建 + 逐分片 MD5）——哪怕数据一行没变。这里把导出
+  // 拆成分片组（journal / tracks / chat / fog / meta），每组用 drift 表版本
+  // 计数器做指纹：自上次构建以来相关表没有任何写入 → 整组直接复用上次打包
+  // 好的 (bytes, hash)。内存代价 ≈ 一份压缩后的备份，换来「上传完马上下载
+  // 校验」的基线几乎瞬时完成。meta 组（settings/layers/收藏等小件）恒重建，
+  // 但配合确定性导出（无 exportedAt 时间戳）其 MD5 不再每次都变。
+
+  /// module → shard group. Absent modules land in `meta`.
+  static const Map<String, String> _kModuleGroup = {
+    'journal': 'journal',
+    'track_points': 'tracks',
+    'chat_messages': 'chat',
+    'fog_tiles': 'fog',
+  };
+
+  /// Tables each cacheable group's export READS. `meta` is deliberately
+  /// absent — its modules are tiny, so it rebuilds every time instead of
+  /// being fingerprinted (fewer invalidation edge cases to reason about).
+  static const Map<String, List<String>> _kGroupTables = {
+    'journal': ['journal_entries'],
+    'tracks': ['track_points'],
+    'chat': ['chat_messages'],
+    // fog export reads layers for the id→uuid mapping, so layer edits must
+    // invalidate it too.
+    'fog': ['fog_tiles', 'fog_erases', 'track_layers'],
+  };
+
+  /// Monotonic per-table write counters, bumped by drift's update stream.
+  /// Every data write in the app goes through drift APIs (or customUpdate
+  /// with an updateKind), so these catch ALL mutations of exported tables.
+  final Map<String, int> _tableVer = {};
+  StreamSubscription<Set<TableUpdate>>? _tableSub;
+
+  final Map<String, String> _groupSig = {};
+  final Map<String, Map<String, ({Uint8List bytes, String hash})>>
+      _groupShards = {};
+
+  void _ensureTableTracking() {
+    _tableSub ??= ref.read(dbProvider).tableUpdates().listen((updates) {
+      for (final u in updates) {
+        _tableVer[u.table] = (_tableVer[u.table] ?? 0) + 1;
+      }
+    });
+  }
+
+  /// Fingerprint for a cacheable group, or null for `meta` (never cached).
+  String? _groupFingerprint(String group, Set<String> groupModules) {
+    final tables = _kGroupTables[group];
+    if (tables == null) return null;
+    final mods = groupModules.toList()..sort();
+    return '${mods.join(',')}|'
+        '${tables.map((t) => '${_tableVer[t] ?? 0}').join(':')}';
+  }
+
   /// Export the selected modules and turn them into the shard set: entries
-  /// grouped by [_shardFor], oversized zips split, every shard hashed —
-  /// optionally keeping the packed bytes (uploads need them; the syncDown
-  /// baseline only needs the hashes). Progress runs [from]‰..[to]‰.
+  /// grouped by [_shardFor], oversized zips split, every shard hashed.
+  /// Unchanged groups are served from the in-memory cache; [keepBytes]
+  /// controls whether packed bytes are returned (uploads need them; the
+  /// syncDown baseline only needs the hashes). Progress runs [from]‰..[to]‰.
   Future<({Map<String, Uint8List> packed, Map<String, String> index})>
       _buildLocalShards(
     Set<String> modules, {
@@ -162,51 +221,97 @@ class SyncEngine {
     required int to,
     CancelToken? cancelToken,
   }) async {
-    final exportEnd = from + ((to - from) * 5) ~/ 9;
-    debugPrint('[Sync] export modules: ${modules.join(',')}');
-    final files = await ref.read(backupServiceProvider).exportToFiles(
-          modules,
-          onProgress: (d, t, l) => report(
-              from + (t == 0 ? 0 : ((exportEnd - from) * d / t).round()), l),
-        );
-    _throwIfCancelled(cancelToken);
-    debugPrint('[Sync] archive entries: ${files.length}');
+    _ensureTableTracking();
+    // Flush pending table-update notifications so fingerprints reflect every
+    // write that completed before this build started.
+    await Future<void>.delayed(Duration.zero);
 
-    report(exportEnd, '打包分片…（${files.length} 个文件）');
-    final grouped = <String, Map<String, List<int>>>{};
-    for (final e in files.entries) {
-      (grouped[_shardFor(e.key)] ??= {})[e.key] = e.value;
+    final selected = {
+      for (final m in {...modules, ...BackupService.requiredModules})
+        if (BackupService.allModules.contains(m)) m
+    };
+    final byGroup = <String, Set<String>>{};
+    for (final m in selected) {
+      (byGroup[_kModuleGroup[m] ?? 'meta'] ??= {}).add(m);
     }
-    final parts = _splitOversized(grouped);
+    final manifestModules = selected.toList()..sort();
+    debugPrint('[Sync] export modules: ${manifestModules.join(',')}');
 
+    final backup = ref.read(backupServiceProvider);
     final packed = <String, Uint8List>{};
     final index = <String, String>{};
-    var packedIdx = 0;
-    for (final e in parts.entries) {
+    final groups = byGroup.keys.toList()..sort();
+    var gi = 0;
+    var reused = 0;
+    for (final group in groups) {
       _throwIfCancelled(cancelToken);
-      report(exportEnd + ((to - exportEnd) * packedIdx / parts.length).round(),
-          '打包分片 ${packedIdx + 1}/${parts.length} · ${e.key}');
-      packedIdx++;
-      if (e.key.startsWith('fow/')) {
-        // Raw pass-through — the shard IS its single entry (already
-        // zlib-compressed native FoW bytes). Zipping it would break the
-        // Fog-of-World interop of the cloud folder.
-        final bytes = Uint8List.fromList(e.value.values.single);
-        if (keepBytes) packed[e.key] = bytes;
-        index[e.key] = md5.convert(bytes).toString();
+      final gFrom = from + ((to - from) * gi) ~/ groups.length;
+      final gTo = from + ((to - from) * (gi + 1)) ~/ groups.length;
+      gi++;
+
+      final sig = _groupFingerprint(group, byGroup[group]!);
+      final cached = _groupShards[group];
+      if (sig != null && cached != null && _groupSig[group] == sig) {
+        for (final e in cached.entries) {
+          if (keepBytes) packed[e.key] = e.value.bytes;
+          index[e.key] = e.value.hash;
+        }
+        reused++;
+        report(gTo, '$group 未变化，复用缓存');
         continue;
       }
-      final rawSize =
-          e.value.values.fold<int>(0, (s, b) => s + b.length);
-      final (bytes, hash) = (!kIsWeb && rawSize > _kIsolatePackThreshold)
-          ? await compute(_packAndHash, e.value)
-          : _packAndHash(e.value);
-      if (keepBytes) packed[e.key] = bytes;
-      index[e.key] = hash;
-      // Let the frame pump between potentially heavy packs.
-      await Future<void>.delayed(Duration.zero);
+
+      final exportEnd = gFrom + ((gTo - gFrom) * 5) ~/ 9;
+      final files = await backup.exportToFiles(
+        byGroup[group]!,
+        deterministic: true,
+        includeManifest: group == 'meta',
+        forceRequired: false,
+        manifestModules: manifestModules,
+        onProgress: (d, t, l) => report(
+            gFrom + (t == 0 ? 0 : ((exportEnd - gFrom) * d / t).round()), l),
+      );
+      _throwIfCancelled(cancelToken);
+
+      final grouped = <String, Map<String, List<int>>>{};
+      for (final e in files.entries) {
+        (grouped[_shardFor(e.key)] ??= {})[e.key] = e.value;
+      }
+      final parts = _splitOversized(grouped);
+      final shards = <String, ({Uint8List bytes, String hash})>{};
+      var pi = 0;
+      for (final e in parts.entries) {
+        _throwIfCancelled(cancelToken);
+        report(exportEnd + ((gTo - exportEnd) * pi / parts.length).round(),
+            '打包分片 ${pi + 1}/${parts.length} · ${e.key}');
+        pi++;
+        if (e.key.startsWith('fow/')) {
+          // Raw pass-through — the shard IS its single entry (already
+          // zlib-compressed native FoW bytes). Zipping it would break the
+          // Fog-of-World interop of the cloud folder.
+          final bytes = Uint8List.fromList(e.value.values.single);
+          shards[e.key] = (bytes: bytes, hash: md5.convert(bytes).toString());
+          continue;
+        }
+        final rawSize = e.value.values.fold<int>(0, (s, b) => s + b.length);
+        final (bytes, hash) = (!kIsWeb && rawSize > _kIsolatePackThreshold)
+            ? await compute(_packAndHash, e.value)
+            : _packAndHash(e.value);
+        shards[e.key] = (bytes: bytes, hash: hash);
+        // Let the frame pump between potentially heavy packs.
+        await Future<void>.delayed(Duration.zero);
+      }
+      if (sig != null) {
+        _groupSig[group] = sig;
+        _groupShards[group] = shards;
+      }
+      for (final e in shards.entries) {
+        if (keepBytes) packed[e.key] = e.value.bytes;
+        index[e.key] = e.value.hash;
+      }
     }
-    debugPrint('[Sync] ${files.length} files → ${parts.length} shards');
+    debugPrint('[Sync] ${index.length} shards, '
+        '$reused/${groups.length} groups reused from cache');
     return (packed: packed, index: index);
   }
 

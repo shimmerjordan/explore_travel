@@ -8,6 +8,7 @@ import 'package:latlong2/latlong.dart';
 import 'package:path_provider/path_provider.dart';
 
 import 'learned_regions.dart';
+import '../security/http_guard.dart';
 
 /// Administrative-region boundaries + lit-region matching for the
 /// "点亮地图" tab.
@@ -164,7 +165,7 @@ class AdminRegionStore {
   static const _worldUrl =
       'https://cdn.jsdelivr.net/gh/johan/world.geo.json@master/countries.geo.json';
   static const _municipalityAdcodes = {110000, 120000, 310000, 500000};
-  final Dio _dio = Dio(BaseOptions(
+  final Dio _dio = guardedDio(BaseOptions(
     connectTimeout: const Duration(seconds: 10),
     receiveTimeout: const Duration(seconds: 30),
   ));

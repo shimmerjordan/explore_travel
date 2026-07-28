@@ -45,6 +45,9 @@ class _MusicScreenState extends ConsumerState<MusicScreen> {
   };
   MusicService? _svc;
   Timer? _syncTimer;
+  // 组内广播用的直链缓存：同一首歌只 resolve 一次（见 _syncTimer）。
+  String? _syncedSongKey;
+  String? _syncedUrl;
 
   @override
   void initState() {
@@ -63,15 +66,22 @@ class _MusicScreenState extends ConsumerState<MusicScreen> {
       if (!mounted) return;
       final s = ref.read(settingsProvider);
       if (!s.groupBroadcastMusic || (s.groupId ?? '').isEmpty) return;
-      if (_now == null) return;
+      final now = _now;
+      if (now == null) return;
       final pos = _svc?.player.position.inMilliseconds ?? 0;
       try {
-        final url = await _svc!.resolveStreamUrl(_now!);
+        // 每 5s 重新 resolveStreamUrl 是一次真实网络请求（流量 + 电量）；
+        // 同一首歌的直链在播放期内不变，按歌缓存即可。
+        if (_syncedSongKey != '${now.source}:${now.id}') {
+          _syncedUrl = await _svc!.resolveStreamUrl(now);
+          _syncedSongKey = '${now.source}:${now.id}';
+        }
+        final url = _syncedUrl;
         if (url == null) return;
         await ref.read(groupServiceProvider).sendMusicPlay(
               url: url,
-              title: _now!.name,
-              artist: _now!.artist,
+              title: now.name,
+              artist: now.artist,
               positionMs: pos,
             );
       } catch (_) {}

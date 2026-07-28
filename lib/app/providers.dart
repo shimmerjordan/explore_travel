@@ -145,7 +145,9 @@ final companionProvider =
     settingsOf: () => ref.read(settingsProvider),
     geocodingOf: () => ref.read(geocodingServiceProvider),
   );
-  ref.onDispose(c.dispose);
+  // NOTE: no ref.onDispose(c.dispose) here — ChangeNotifierProvider already
+  // disposes its notifier on teardown; doing it again threw
+  // "used after being disposed" whenever the container shut down.
   return c;
 });
 
