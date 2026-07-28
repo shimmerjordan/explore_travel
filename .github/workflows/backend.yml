@@ -139,7 +139,7 @@ jobs:
           **① 本地开发跑一下**（不需要 Docker）
 
           ```bash
-          cd backends && npm start        # → http://127.0.0.1:8080
+          cd backends && npm start        # → http://127.0.0.1:48081
           ```
 
           **② 部署到服务器**（生产，推荐 compose）
@@ -161,7 +161,7 @@ jobs:
 
           | 变量 | 默认 | 说明 |
           |---|---|---|
-          | `PORT` / `HOST` | `8080` / `0.0.0.0` | 监听地址 |
+          | `PORT` / `HOST` | `48081` / `0.0.0.0` | 监听地址 |
           | `DATA_DIR` | `/data` | 排行榜持久化目录（compose 已挂 volume） |
           | `TRUST_PROXY` | 关 | `1` = 信任 `CF-Connecting-IP` / `X-Forwarded-For` 做限流分桶。**经 frp / Cloudflare 暴露时必须开**，否则所有用户共享同一个限流桶 |
           | `LB_WRITE_TOKEN` | 空 | 设了之后 `POST /entries` 需要 `Authorization: Bearer`；读接口始终公开 |
@@ -176,7 +176,7 @@ jobs:
 
           | 方式 | 命令 | 适用 |
           |---|---|---|
-          | 直接开端口 | `docker compose up -d` | 主机有公网 IP，安全组放行 8080/tcp |
+          | 直接开端口 | `docker compose up -d` | 主机有公网 IP，安全组放行 48081/tcp |
           | frpc 旁路 | 填好 `deploy/frpc.toml` 后 `docker compose --profile frp up -d` | 无公网入方向，或想复用现有 frps |
           | Cloudflare Tunnel | `export TUNNEL_TOKEN=... && docker compose --profile cloudflare up -d` | **推荐**：免公网 IP，自动 HTTPS/WSS |
           BODY

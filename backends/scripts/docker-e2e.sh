@@ -37,7 +37,7 @@ wait_healthy() {
 say "round 1: open mode (full API + data correctness + relay + docker-restart persistence)"
 docker volume create "$VOL" >/dev/null
 docker run -d --name "$NAME" \
-  -p "127.0.0.1:$PORT:8080" \
+  -p "127.0.0.1:$PORT:48081" \
   -v "$VOL:/data" \
   -e TRUST_PROXY=1 -e LOG_LEVEL=warn \
   "$IMG" >/dev/null
@@ -48,7 +48,7 @@ E2E_BASE_URL="http://127.0.0.1:$PORT" E2E_CONTAINER="$NAME" \
 say "round 2: auth mode (LB_WRITE_TOKEN + GROUP_TOKEN enforced)"
 docker rm -f "$NAME" >/dev/null
 docker run -d --name "$NAME" \
-  -p "127.0.0.1:$PORT:8080" \
+  -p "127.0.0.1:$PORT:48081" \
   -v "$VOL:/data" \
   -e TRUST_PROXY=1 -e LOG_LEVEL=warn \
   -e LB_WRITE_TOKEN=e2e-lb-secret -e GROUP_TOKEN=e2e-group-secret \

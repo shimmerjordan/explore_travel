@@ -12,18 +12,22 @@ auth.token = "your-frps-token"
 # 排行榜条目自带签名，但 HTTP 头等元数据仍值得保护）。
 transport.tls.enable = true
 
+# remotePort / vhostHTTPPort 也要避开 80 / 443 / 8080：frps 若架在家宽上，
+# 这三个端口的入方向被运营商封了，隧道能连上但公网访问不到。
+#
 # 方式 A：TCP 直通 —— 客户端 baseUrl 填 http://frps-host:18080
 [[proxies]]
 name = "ej-backend-tcp"
 type = "tcp"
 localIP = "127.0.0.1"
-localPort = 8080
+localPort = 48081
 remotePort = 18080
 
-# 方式 B：HTTP 虚拟主机（frps 需配置 vhostHTTPPort），支持多服务共用 80 口
+# 方式 B：HTTP 虚拟主机（frps 需配置 vhostHTTPPort，家宽上设成高端口如 18081，
+# 别用 80），支持多服务共用一个端口
 # [[proxies]]
 # name = "ej-backend-http"
 # type = "http"
 # localIP = "127.0.0.1"
-# localPort = 8080
+# localPort = 48081
 # customDomains = ["ej.example.com"]

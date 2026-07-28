@@ -29,7 +29,7 @@ backends/
 
 ```bash
 # 本地跑（开发）
-node server/server.js                      # http://localhost:8080
+node server/server.js                      # http://localhost:48081
 
 # 测试
 npm test                                   # 单元/集成 23 用例，含 Dart 交叉验签
@@ -38,15 +38,15 @@ npm test                                   # 单元/集成 23 用例，含 Dart 
 
 # Docker（生产）
 docker compose up -d --build
-curl http://localhost:8080/healthz         # → ok
-curl http://localhost:8080/api/status      # 模块状态/内存/在线人数
+curl http://localhost:48081/healthz         # → ok
+curl http://localhost:48081/api/status      # 模块状态/内存/在线人数
 ```
 
 ## 配置项（环境变量）
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `PORT` / `HOST` | `8080` / `0.0.0.0` | 监听地址 |
+| `PORT` / `HOST` | `48081` / `0.0.0.0` | 监听地址 |
 | `DATA_DIR` | `/data` | 排行榜持久化目录（compose 已挂 volume） |
 | `TRUST_PROXY` | 关 | `1`=信任 `CF-Connecting-IP`/`X-Forwarded-For` 做限流分桶；**经 frp/CF 暴露时必须开**，否则所有用户共享一个限流桶 |
 | `LB_WRITE_TOKEN` | 空 | 设置后 `POST /entries` 需 `Authorization: Bearer`；读接口始终公开 |
@@ -65,7 +65,7 @@ ssh user@ecs 'cd /opt/ej-backend && docker compose up -d --build'
 
 三种公网暴露方式（可叠加，详见应用内「自建服务器指南」页）：
 
-1. **直接开安全组**：放行 8080/tcp，客户端填 `http://ECS公网IP:8080`。
+1. **直接开安全组**：放行 48081/tcp，客户端填 `http://ECS公网IP:48081`。
 2. **frpc**：填 `deploy/frpc.toml` 后 `docker compose --profile frp up -d`。
 3. **Cloudflare Tunnel**（推荐，免公网 IP + 自动 HTTPS/WSS）：
    `export TUNNEL_TOKEN=... && docker compose --profile cloudflare up -d`。

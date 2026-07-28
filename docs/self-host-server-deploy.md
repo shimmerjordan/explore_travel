@@ -39,8 +39,8 @@ EOF
 docker compose up -d --build
 
 # 验证
-curl http://localhost:8080/healthz      # → ok
-curl http://localhost:8080/api/status   # 模块状态 / 内存 / 在线人数
+curl http://localhost:48081/healthz      # → ok
+curl http://localhost:48081/api/status   # 模块状态 / 内存 / 在线人数
 ```
 
 排行榜数据持久化在 Docker volume `ej-data`（`/data/leaderboard.json`，
@@ -60,7 +60,7 @@ curl http://localhost:8080/api/status   # 模块状态 / 内存 / 在线人数
 
 ### 方式 1：直接放行端口
 
-安全组放行 `8080/tcp`，客户端填 `http://ECS公网IP:8080`。
+安全组放行 `48081/tcp`，客户端填 `http://ECS公网IP:48081`。
 最简单，但没有 TLS——建议只在配合共享口令（组队端到端加密）时使用，
 或前面自套 Nginx/Caddy 做 HTTPS。
 
@@ -85,7 +85,7 @@ docker compose --profile frp up -d
 免公网 IP、自动 HTTPS/WSS、自带 CDN 抗量：
 
 1. Cloudflare Zero Trust → Networks → Tunnels → **Create tunnel**（选 Docker）
-2. Public hostname：`ej.yourdomain.com` → `HTTP://localhost:8080`
+2. Public hostname：`ej.yourdomain.com` → `HTTP://localhost:48081`
    （WebSocket 默认放行，无需额外配置）
 3. 复制 token 并启动：
 
@@ -100,7 +100,7 @@ docker compose --profile cloudflare up -d
 
 ```bash
 docker compose logs -f backend        # 日志
-curl -s localhost:8080/api/status     # 在线房间/人数/转发计数/内存
+curl -s localhost:48081/api/status     # 在线房间/人数/转发计数/内存
 docker compose pull && docker compose up -d --build   # 升级
 docker run --rm -v ej-backend_ej-data:/data alpine \
   cat /data/leaderboard.json > backup.json            # 备份榜单

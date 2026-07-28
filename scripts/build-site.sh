@@ -22,6 +22,6 @@ rm -f dist/README.md            # don't ship the site's dev README
 cp -r build/web/. dist/app/     # Flutter app → /app
 
 echo "==> done. ./dist ready (landing at /, app at /app/)."
-echo "    Serve ./dist and open the ROOT path:  cd dist && python3 -m http.server 8080"
+echo "    Serve ./dist and open the ROOT path:  cd dist && python3 -m http.server 48082"
 echo "    NOTE: build/web is now base-href=/app/ — do NOT serve build/web at '/'"
 echo "    (its assets would 404 under /app/). Serve ./dist instead."

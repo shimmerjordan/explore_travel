@@ -117,7 +117,7 @@ class AppSettings {
 
   // ── 云中继 transport (GroupTransport.relay) ────────────────────────────
   /// Self-hosted backend base URL (backends/ in this repo), e.g.
-  /// `https://ej.example.com` or `http://1.2.3.4:8080`. The client derives
+  /// `https://ej.example.com` or `http://1.2.3.4:48081`. The client derives
   /// the WebSocket endpoint (`/group/v1/ws`) from it. Empty disables.
   final String? relayServerUrl;
   /// Optional access token — must equal the server's `GROUP_TOKEN`.

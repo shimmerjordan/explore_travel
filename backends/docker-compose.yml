@@ -12,6 +12,12 @@
 #     docker compose --profile cloudflare up -d
 #
 # 三种方式可叠加。资源占用：服务本体常驻内存 ~40 MB，空闲 CPU ≈ 0。
+#
+# 端口：本服务固定用高端口 48081（ejnas 用 48080、web 展示用 48082）。
+# 家庭宽带运营商普遍封禁入方向的 80 / 443 / 8080，**别把这三个端口配回来**，
+# 否则家里/NAS 部署时从公网完全连不上。宿主端口可用 EJ_BACKEND_PORT 覆盖。
+# 注意 Cloudflare Tunnel 走的是出方向 443，不受入方向封禁影响 —— 家宽部署
+# 想被公网访问，它是最省事的一条路。
 
 services:
   backend:
@@ -20,7 +26,9 @@ services:
     container_name: ej-backend
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      # 左侧宿主端口可改（避开 80/443/8080）；右侧容器端口与 Dockerfile 的
+      # PORT 默认值绑定，改右侧要同步改 PORT。
+      - "${EJ_BACKEND_PORT:-48081}:48081"
     volumes:
       - ej-data:/data
     environment:
@@ -42,7 +50,7 @@ services:
     container_name: ej-frpc
     restart: unless-stopped
     profiles: [frp]
-    network_mode: "service:backend" # 直接以 127.0.0.1:8080 访问后端
+    network_mode: "service:backend" # 直接以 127.0.0.1:48081 访问后端
     volumes:
       - ./deploy/frpc.toml:/etc/frp/frpc.toml:ro
 

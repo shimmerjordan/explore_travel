@@ -15,7 +15,7 @@ cd explore_journal/nas-backend
 # 1) 生成密钥 + 配置 CORS（CORS 必须精确等于你 web 的访问源，见 B）
 cat > .env <<EOF
 EJ_JWT_SECRET=$(openssl rand -base64 48)
-EJ_CORS_ORIGINS=http://localhost:8080
+EJ_CORS_ORIGINS=http://localhost:48082
 EJ_ALLOW_REGISTRATION=true
 EOF
 
@@ -55,8 +55,8 @@ docker logs -f ejnas
 
 日志样例（一次成功 vs 一次源不匹配）：
 ```
-172.18.0.1 POST /auth/register   -> 200 (origin=http://localhost:8080,  corsOk=true)
-172.18.0.1 OPTIONS /auth/register -> 204 (origin=http://127.0.0.1:8080, corsOk=false)   ← 源不匹配！
+172.18.0.1 POST /auth/register   -> 200 (origin=http://localhost:48082,  corsOk=true)
+172.18.0.1 OPTIONS /auth/register -> 204 (origin=http://127.0.0.1:48082, corsOk=false)   ← 源不匹配！
 ```
 
 > ⚠️ 镜像是 **distroless（无 shell）**，所以 `docker exec -it ejnas sh` **进不去**。排错就靠 `docker logs`；要看数据库文件直接在宿主机看挂载卷 `./data/`（如 `sqlite3 ./data/ej.db`）。改完日志相关代码记得 `docker compose up -d --build` 重新构建镜像。
@@ -107,12 +107,12 @@ cd explore_journal
 flutter build web --release        # 产物在 build/web/
 
 # 本地起一个静态服务器测试（端口要和 EJ_CORS_ORIGINS 一致）
-cd build/web && python3 -m http.server 8080
-# 打开 http://localhost:8080
+cd build/web && python3 -m http.server 48082
+# 打开 http://localhost:48082
 ```
 
 **两个必须对齐的点**：
-1. **CORS 源**：浏览器访问 web 的源（`http://localhost:8080`）必须**精确**出现在后端 `EJ_CORS_ORIGINS`（scheme+host+port 完全一致，结尾不要带 `/`）。不一致 → 浏览器控制台报 CORS、登录失败。
+1. **CORS 源**：浏览器访问 web 的源（`http://localhost:48082`）必须**精确**出现在后端 `EJ_CORS_ORIGINS`（scheme+host+port 完全一致，结尾不要带 `/`）。不一致 → 浏览器控制台报 CORS、登录失败。
 2. **NAS 地址**：登录页里填的 NAS 地址必须是**浏览器能访问到**的。本机测试时后端和 web 同机 → 填 `http://localhost:48080`。注意：若 web 用 https 而 NAS 用 http，浏览器会拦截混合内容——本地 http+http 测试最省事。
 
 生产部署：把 `build/web/` 丢到任意静态托管（Nginx / Cloudflare Pages / NAS 自带 web 服务），`EJ_CORS_ORIGINS` 填该域名。
@@ -122,7 +122,7 @@ cd build/web && python3 -m http.server 8080
 ## C. 端到端测试
 
 ### C1. 登录门 + 保险库往返（现在就能测）
-1. 打开 `http://localhost:8080` → 应被重定向到**登录页**（web 默认只读、需登录）。
+1. 打开 `http://localhost:48082` → 应被重定向到**登录页**（web 默认只读、需登录）。
 2. 「后端地址」已默认填好 `http://localhost:48080`（NAS 部署时改成其地址；会记住上次用的），填邮箱、口令（≥8 位）→ 点"**注册并同步**"。
    - 客户端用口令派生 `vaultKey`(留本机) + `authVerifier`(发后端)；后端建账号、存空保险库；前端进入地图页。
 3. 刷新页面 → **仍保持登录**（会话（token + 口令派生密钥，绝不是口令本身）持久化在浏览器 localStorage，刷新静默恢复）。后端签发的 token 默认有效期 **365 天**（`EJ_TOKEN_TTL_SECS` 可调），所以实际体验是**只有手动「退出登录」才会失效**；退出会清掉本机记录。⚠️ 旧部署注意：2026-07-07 之前的默认是 1 小时——重启一次新镜像（或设 `EJ_TOKEN_TTL_SECS=31536000`）才能拿到长效 token，且需重新登录一次。
@@ -132,7 +132,7 @@ cd build/web && python3 -m http.server 8080
 ### C2. 看到数据：手动导入备份（现在就能测）
 web 端默认没有数据。最快看到足迹/日记的方式是导入一份手机导出的备份：
 1. 手机 App → 备份页 → 导出备份 zip，传到电脑。
-2. web 端登录后 → 访问 `http://localhost:8080/#/backup`（备份页）→ "导入备份" → 选那个 zip。
+2. web 端登录后 → 访问 `http://localhost:48082/#/backup`（备份页）→ "导入备份" → 选那个 zip。
    - 数据按 UUID 去重导入进浏览器的 IndexedDB（持久化，刷新不丢）。
 3. 回到地图（`/`）/ 日记（`/journal`）→ 应看到迷雾、轨迹、日记。
    - 公开图（http/https CDN）正常显示；**本地路径的图**显示"碎图"占位（预期：web 没有本地文件，需 P5 后续的私有图代理/图床）。
@@ -156,8 +156,8 @@ web 端默认没有数据。最快看到足迹/日记的方式是导入一份手
 本地一键组装 + 预览：
 ```bash
 bash scripts/build-site.sh          # 产出 ./dist （/=落地页，/app/=应用）
-cd dist && python3 -m http.server 8080
-# http://localhost:8080 看落地页 → 点"打开 Web 回忆版" → http://localhost:8080/app/
+cd dist && python3 -m http.server 48082
+# http://localhost:48082 看落地页 → 点"打开 Web 回忆版" → http://localhost:48082/app/
 ```
 > 应用用 **hash 路由**（`/app/#/login`），所以静态托管**不需要** SPA 重写规则。除非以后改用 path 路由（`usePathUrlStrategy()`），那才需要把 `/app/*` 回退到 `/app/index.html`。
 
@@ -208,11 +208,11 @@ cd dist && python3 -m http.server 8080
 ### 注册 `ERR_CONNECTION_REFUSED`（如 `POST https://localhost:48080/...`）
 两件事一起查：
 1. **后端是否在跑**：`docker compose ps` + `curl http://localhost:48080/healthz`。若没起，多半是上面的 DB 权限问题。
-2. **协议/地址**：后端是 **http**，不是 https。登录页"NAS 地址"要填 **`http://localhost:48080`**（别写 `https://`，那个端口没有 TLS → 连接被拒）。本地测试浏览器也用 `http://localhost:8080` 打开，保证 http→http 不触发混合内容拦截。
+2. **协议/地址**：后端是 **http**，不是 https。登录页"NAS 地址"要填 **`http://localhost:48080`**（别写 `https://`，那个端口没有 TLS → 连接被拒）。本地测试浏览器也用 `http://localhost:48082` 打开，保证 http→http 不触发混合内容拦截。
 
 ### 前端 404：`GET /app/flutter_bootstrap.js 404`（或 manifest.json 404）
 你在服务**错误的目录**。`build-site.sh` 会把 `build/web` 重建成 **base-href=`/app/`** 的版本——如果你 `cd build/web && http.server` 再开根路径，index.html 里的 `<base href="/app/">` 会把所有资源请求到 `/app/...`，而该目录下没有 `/app/` → 404。
-**修复**：服务组装好的 `dist/` 并开根路径：`cd dist && python3 -m http.server 8080` → `http://localhost:8080/`。
+**修复**：服务组装好的 `dist/` 并开根路径：`cd dist && python3 -m http.server 48082` → `http://localhost:48082/`。
 （只想单独测应用：重新 `flutter build web`**不带** `--base-href`，再服务 `build/web` 开 `/`。两种 base-href 别混用。）
 > 控制台里 `index.js ... siteHostMap` 之类报错通常是**浏览器扩展**，与本项目无关。
 
@@ -223,12 +223,12 @@ cd dist && python3 -m http.server 8080
 **第 1 步：边点注册边看后端日志** `docker compose logs -f ejnas`，看有没有出现 `/auth/register` 那一行：
 
 - **看到 `... corsOk=false`** → CORS 源不匹配（最常见）。日志里的 `origin=` 就是你浏览器的**真实源**；把 `EJ_CORS_ORIGINS` 改成**和它一字不差**的值，重启后端。注意三个坑：
-  - `http://localhost:8080` 与 `http://127.0.0.1:8080` 是**不同的源**——用哪个开网页就填哪个。
+  - `http://localhost:48082` 与 `http://127.0.0.1:48082` 是**不同的源**——用哪个开网页就填哪个。
   - 必须带**端口**；结尾**不要**带 `/`。
-  - 多个源用逗号分隔：`EJ_CORS_ORIGINS=http://localhost:8080,http://127.0.0.1:8080`。
+  - 多个源用逗号分隔：`EJ_CORS_ORIGINS=http://localhost:48082,http://127.0.0.1:48082`。
 - **看到 `POST /auth/register -> 200` 但网页仍报错** → 请求成功了，问题在前端之后的步骤；看浏览器 Console 的具体红字（多半是随后的后台同步，非致命）。
 - **日志里完全没有 `/auth/register`** → 请求根本没离开浏览器，是**客户端侧**：
-  1. **口令派生需要安全上下文**：若你用 `http://<局域网IP>:8080`（既非 `localhost` 也非 https）打开网页，浏览器的 `crypto.subtle` 不可用，派生密钥会直接抛错——这是 NAS/局域网场景最易踩的坑。**解法：用 `http://localhost:8080` 打开，或给 web 配 https。**
+  1. **口令派生需要安全上下文**：若你用 `http://<局域网IP>:48082`（既非 `localhost` 也非 https）打开网页，浏览器的 `crypto.subtle` 不可用，派生密钥会直接抛错——这是 NAS/局域网场景最易踩的坑。**解法：用 `http://localhost:48082` 打开，或给 web 配 https。**
   2. NAS 地址填错/不可达：浏览器能直接打开 `http://<NAS>:48080/healthz` 吗？
   3. 混合内容：https 的网页连 http 的 NAS 会被浏览器拦截。
 
@@ -242,7 +242,7 @@ cd dist && python3 -m http.server 8080
 
 ### C4. Web 端直连 OneDrive（2026-07-03 新增）
 
-web 端点「连接 OneDrive」现在走 `auth.html` 回调页（弹出微软登录窗口 → 登录后窗口自动关闭、回到应用）。**前置条件**：Azure 应用注册里必须添加 **SPA 平台** 的重定向 URI（`http://localhost:8080/auth.html` / 线上 `https://<域名>/app/auth.html`）——见 [onedrive_setup.md](onedrive_setup.md) 第 3 步的 Web 补充；没加会在登录后报 `AADSTS9002326`。此前 web 上会弹「要打开 …oauth 吗？」然后毫无反应——那是浏览器在尝试打开只有手机 App 才注册的自定义 scheme。
+web 端点「连接 OneDrive」现在走 `auth.html` 回调页（弹出微软登录窗口 → 登录后窗口自动关闭、回到应用）。**前置条件**：Azure 应用注册里必须添加 **SPA 平台** 的重定向 URI（`http://localhost:48082/auth.html` / 线上 `https://<域名>/app/auth.html`）——见 [onedrive_setup.md](onedrive_setup.md) 第 3 步的 Web 补充；没加会在登录后报 `AADSTS9002326`。此前 web 上会弹「要打开 …oauth 吗？」然后毫无反应——那是浏览器在尝试打开只有手机 App 才注册的自定义 scheme。
 
 ## E. Web 端特性与已知行为（2026-06-25 新增）
 

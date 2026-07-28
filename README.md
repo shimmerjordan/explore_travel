@@ -279,7 +279,7 @@ cd build/web && python3 -m http.server 8000
 
 # Or the integrated site (promo landing at /, app at /app/) → ./dist :
 bash scripts/build-site.sh
-cd dist && python3 -m http.server 8080
+cd dist && python3 -m http.server 48082
 ```
 
 Linux desktop:

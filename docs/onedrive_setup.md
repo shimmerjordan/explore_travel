@@ -61,7 +61,7 @@ App 通过**微软登录授权**直接读写你 OneDrive 里的一个 App 专属
    而不是 Web/移动平台**，否则浏览器侧的 token 交换会被拒绝
    （`AADSTS9002326`）。重定向 URI 按你的部署填（可多个）：
    ```
-   http://localhost:8080/auth.html          ← 本地测试
+   http://localhost:48082/auth.html          ← 本地测试
    https://<你的域名>/app/auth.html          ← 线上（build-site.sh 的 /app/ 部署）
    ```
 4. **Register** 后，在「**概述（Overview）**」复制 **应用程序(客户端) ID**。

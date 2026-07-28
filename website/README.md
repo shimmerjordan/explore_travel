@@ -45,8 +45,8 @@ videos: [
 
 ```bash
 cd website
-python3 -m http.server 8080
-# 打开 http://localhost:8080
+python3 -m http.server 48082
+# 打开 http://localhost:48082
 ```
 
 ## 部署 / Deploy

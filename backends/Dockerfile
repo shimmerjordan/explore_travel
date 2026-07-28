@@ -4,7 +4,7 @@
 FROM node:22-alpine
 
 ENV NODE_ENV=production \
-    PORT=8080 \
+    PORT=48081 \
     DATA_DIR=/data
 
 WORKDIR /app
@@ -16,7 +16,7 @@ RUN mkdir -p /data && chown node:node /data /app
 VOLUME /data
 
 USER node
-EXPOSE 8080
+EXPOSE 48081
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s \
   CMD wget -qO- "http://127.0.0.1:${PORT}/healthz" || exit 1

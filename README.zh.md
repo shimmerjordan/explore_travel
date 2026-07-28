@@ -256,7 +256,7 @@ cd build/web && python3 -m http.server 8000
 
 # 或整合站点（落地页在 /、App 在 /app/）→ ./dist：
 bash scripts/build-site.sh
-cd dist && python3 -m http.server 8080
+cd dist && python3 -m http.server 48082
 ```
 
 ### 4. 首次配置

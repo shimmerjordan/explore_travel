@@ -22,7 +22,7 @@ const { Router, sendJson } = require('./lib/router');
 const log = require('./lib/log');
 
 const cfg = {
-  port: Number(process.env.PORT || 8080),
+  port: Number(process.env.PORT || 48081),
   host: process.env.HOST || '0.0.0.0',
   dataDir: process.env.DATA_DIR || '/data',
   trustProxy: process.env.TRUST_PROXY === '1',

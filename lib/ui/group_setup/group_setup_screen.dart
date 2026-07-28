@@ -388,7 +388,7 @@ class GroupSetupScreen extends ConsumerWidget {
               '服务器地址',
               s.relayServerUrl ?? '',
               (v) => n.update((p) => p.copyWith(relayServerUrl: v.trim())),
-              hint: 'https://ej.example.com 或 http://IP:8080',
+              hint: 'https://ej.example.com 或 http://IP:48081',
             ),
             _TextSetting(
               Icons.key_rounded,

@@ -144,8 +144,8 @@ void main() {
     test('hash-routed origin → <origin>/auth.html', () {
       expect(
         OneDriveService.redirectUriForBase(
-            Uri.parse('http://localhost:8080/#/backup')),
-        'http://localhost:8080/auth.html',
+            Uri.parse('http://localhost:48082/#/backup')),
+        'http://localhost:48082/auth.html',
       );
     });
 
@@ -160,8 +160,8 @@ void main() {
     test('query strings on the base never leak into the redirect', () {
       expect(
         OneDriveService.redirectUriForBase(
-            Uri.parse('http://localhost:8080/?foo=1#/x')),
-        'http://localhost:8080/auth.html',
+            Uri.parse('http://localhost:48082/?foo=1#/x')),
+        'http://localhost:48082/auth.html',
       );
     });
   });
