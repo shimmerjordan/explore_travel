@@ -24,25 +24,61 @@ deps) + `argon2` + `jsonwebtoken` + `ureq` (proxy). No async runtime.
 > Argon2 verify, SSRF safe-IP table). Run `cargo test` / `cargo clippy` yourself
 > before deploying.
 
-## Run with Docker (recommended)
+## Deploy on a NAS from the prebuilt image (recommended)
+
+CI publishes a multi-arch (amd64 + arm64) image to GHCR on every push to
+`main`, after the container-level smoke test passes. No source checkout and no
+compiler needed on the NAS:
+
+```bash
+sudo mkdir -p /volume1/docker/ejnas/data && cd /volume1/docker/ejnas
+# grab docker-compose.ghcr.yml from this directory, then:
+cat > .env <<EOF
+EJ_JWT_SECRET=$(openssl rand -base64 48)
+EJ_DATA_PATH=/volume1/docker/ejnas/data
+EJ_CORS_ORIGINS=http://localhost:48082
+EOF
+sudo chown -R 65532:65532 /volume1/docker/ejnas/data   # container runs as UID 65532
+sudo docker compose up -d
+curl localhost:48080/healthz    # {"status":"ok"}
+```
+
+The **run summary** of the「NAS 后端镜像（GHCR）」workflow prints this same
+sequence with the compose file inlined and the exact image tag for that commit —
+copy-paste from there and it is a genuine one-shot deploy.
+
+## Build from source instead
 
 ```bash
 cd nas-backend
 echo "EJ_JWT_SECRET=$(openssl rand -base64 48)" > .env
 echo "EJ_CORS_ORIGINS=https://your-web-host.example" >> .env
 docker compose up -d            # builds the image, listens on :48080
-curl localhost:48080/healthz    # {"status":"ok"}
-```
 
-Build natively instead:
-
-```bash
+# ...or without Docker
 cargo build --release           # needs a C compiler for the bundled SQLite
 EJ_JWT_SECRET=$(openssl rand -base64 48) ./target/release/ejnas
 ```
 
-Data (config + SQLite) lives in `./data` — **back it up** (it holds every
-user's vault ciphertext) and keep it on a **local** filesystem (not NFS/SMB).
+## Where the data lives
+
+`EJ_DATA_PATH` picks the storage location, and it is the same variable in both
+compose files:
+
+| `EJ_DATA_PATH` | Result |
+|---|---|
+| unset (default) | Docker **named volume** — zero host setup, inherits the image's nonroot-owned `/data` |
+| absolute path | **bind mount** — data in your own directory; run `chown -R 65532:65532 <path>` once first, or the container exits with `unable to open database file` |
+
+Either way it holds `ej.db`, i.e. **every user's vault ciphertext** — back it
+up, and keep it on a **local** filesystem. Never NFS/SMB: SQLite's WAL and
+POSIX locks are unreliable there and will corrupt the DB.
+
+```bash
+# verify the image end to end (registration → vault round-trip → restart
+# persistence → registration lockout), against a local build:
+BUILD=1 ./scripts/docker-smoke.sh
+```
 
 ## Configuration
 

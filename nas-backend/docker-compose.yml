@@ -11,20 +11,28 @@ services:
     ports:
       - "48080:48080"
     volumes:
-      # DEFAULT: a Docker NAMED volume — it inherits the image's nonroot-owned
-      # /data, so the DB is writable with ZERO host setup (no chown needed).
-      # Holds ej.db (all your vault ciphertext). Back it up with:
-      #   docker run --rm -v ejnas_ejdata:/data -v "$PWD":/backup busybox \
-      #     tar czf /backup/ejdata.tgz -C /data .
-      - ejdata:/data
-      # ── ALTERNATIVE: host bind mount (data visible at ./data, easy backup) ──
-      # A bind mount does NOT inherit image ownership, so you MUST make ./data
-      # writable by the container's nonroot UID first:
-      #   mkdir -p data && sudo chown -R 65532:65532 data
-      # then comment out `- ejdata:/data` above and use:
-      #   - ./data:/data
-      # (Local fs only — never NFS/SMB: SQLite WAL + POSIX locks are unreliable
-      # on network mounts.)
+      # WHERE THE DATA LIVES — one variable, two modes. Holds ej.db, i.e. all
+      # your vault ciphertext. (Don't confuse this with EJ_DB_PATH below: that
+      # one is the path INSIDE the container and normally needs no change.)
+      #
+      #   unset (default) → resolves to `ejdata`, a Docker NAMED volume.
+      #     Zero host setup: a named volume inherits the image's nonroot-owned
+      #     /data, so the DB is writable out of the box.
+      #
+      #   set to an absolute path → bind mount, data sits in your own directory
+      #     (the usual choice on a NAS, so it lands on the big disk and gets
+      #     picked up by the NAS's own backup jobs):
+      #
+      #       EJ_DATA_PATH=/volume1/docker/ejnas/data
+      #
+      #     A bind mount does NOT inherit image ownership, so grant the
+      #     container's nonroot UID access ONCE before the first start:
+      #       sudo mkdir -p /volume1/docker/ejnas/data
+      #       sudo chown -R 65532:65532 /volume1/docker/ejnas/data
+      #
+      # Local filesystem only — never point this at NFS/SMB: SQLite's WAL and
+      # POSIX locks are unreliable on network mounts and will corrupt the DB.
+      - "${EJ_DATA_PATH:-ejdata}:/data"
     environment:
       # REQUIRED, >= 32 bytes. Generate once: `openssl rand -base64 48`.
       EJ_JWT_SECRET: "${EJ_JWT_SECRET:?set EJ_JWT_SECRET in a .env file}"
@@ -40,4 +48,9 @@ services:
       EJ_TOKEN_TTL_SECS: "${EJ_TOKEN_TTL_SECS:-3600}"
 
 volumes:
+  # Only used in the default (named-volume) mode; ignored when EJ_DATA_PATH
+  # points at a host directory. Its real name is prefixed with the compose
+  # project — `nas-backend_ejdata` when you run from this directory. Back it up:
+  #   docker run --rm -v nas-backend_ejdata:/data -v "$PWD":/backup busybox \
+  #     tar czf /backup/ejdata.tgz -C /data .
   ejdata:

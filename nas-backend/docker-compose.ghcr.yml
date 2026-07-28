@@ -1,0 +1,58 @@
+# ejnas — deploy from the prebuilt GHCR image (no source checkout, no build).
+#
+# This is the file the CI run summary hands you for a NAS deployment. It is
+# deliberately self-contained: `docker compose up -d` next to a .env is all it
+# needs. For building from source instead, use docker-compose.yml.
+#
+# .env next to this file (the summary generates it for you):
+#   EJ_JWT_SECRET=<openssl rand -base64 48>      REQUIRED, >= 32 bytes
+#   EJ_DATA_PATH=/volume1/docker/ejnas/data      where ej.db lives (see below)
+#   EJ_CORS_ORIGINS=https://ej.example.com       exact origin of your web build
+
+services:
+  ejnas:
+    # Multi-arch manifest (amd64 + arm64) — docker picks the right one.
+    # Pin to a commit sha instead of `latest` if you want reproducible rollouts:
+    #   image: ghcr.io/shimmerjordan/explore_travel/ejnas:sha-1a2b3c4
+    image: ${EJ_IMAGE:-ghcr.io/shimmerjordan/explore_travel/ejnas:latest}
+    container_name: ejnas
+    restart: unless-stopped
+    # High host port. NEVER use 80 / 443 / 8080: consumer ISPs block inbound
+    # traffic on those, which makes a home/NAS deployment unreachable from the
+    # internet. Siblings: backend 48081, web display 48082.
+    ports:
+      - "${EJ_PORT:-48080}:48080"
+    volumes:
+      # WHERE THE DATA LIVES — holds ej.db, i.e. all your vault ciphertext.
+      #   unset (default) → `ejdata`, a Docker named volume; zero host setup.
+      #   absolute path   → bind mount; the usual NAS choice, so the DB lands
+      #                     on the big disk and the NAS's own backup job sees it.
+      #                     Grant the container's nonroot UID access ONCE first:
+      #                       sudo mkdir -p <path> && sudo chown -R 65532:65532 <path>
+      # Local filesystem only — never NFS/SMB: SQLite's WAL + POSIX locks are
+      # unreliable on network mounts and will corrupt the DB.
+      - "${EJ_DATA_PATH:-ejdata}:/data"
+    environment:
+      EJ_JWT_SECRET: "${EJ_JWT_SECRET:?set EJ_JWT_SECRET in a .env file}"
+      EJ_LISTEN: "0.0.0.0:48080"
+      EJ_DB_PATH: "/data/ej.db"
+      EJ_CORS_ORIGINS: "${EJ_CORS_ORIGINS:-}"
+      # Flip to false once your account exists — it closes public registration.
+      EJ_ALLOW_REGISTRATION: "${EJ_ALLOW_REGISTRATION:-true}"
+      EJ_PROXY_ENABLED: "${EJ_PROXY_ENABLED:-false}"
+      EJ_PROXY_ALLOW_HOSTS: "${EJ_PROXY_ALLOW_HOSTS:-}"
+      EJ_TOKEN_TTL_SECS: "${EJ_TOKEN_TTL_SECS:-3600}"
+    # No healthcheck: the image is distroless (no shell, no wget/curl) and the
+    # binary has no self-probe subcommand. Check it from the host instead:
+    #   curl localhost:48080/healthz   → {"status":"ok"}
+    mem_limit: 256m
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+volumes:
+  # Only used when EJ_DATA_PATH is unset. Real name is prefixed with the
+  # compose project (the directory name). Back it up with:
+  #   docker run --rm -v <project>_ejdata:/data -v "$PWD":/backup busybox \
+  #     tar czf /backup/ejdata.tgz -C /data .
+  ejdata:

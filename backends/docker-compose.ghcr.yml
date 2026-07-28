@@ -1,0 +1,49 @@
+# ej-backend（社区排行榜 + 组队中继）—— 直接用 GHCR 上编好的镜像部署，
+# 不需要源码、不需要在目标机器上编译。
+#
+# 这是 CI 运行摘要里给出的那份 NAS/服务器部署文件，刻意做成自包含：
+# 旁边放一个 .env，`docker compose up -d` 就完事。要从源码编译请用
+# docker-compose.yml。
+#
+# .env（摘要里的命令会帮你生成）：
+#   EJ_BACKEND_DATA_PATH=/volume1/docker/ej-backend/data   排行榜数据存哪
+#   LB_WRITE_TOKEN=<openssl rand -hex 24>                  留空=排行榜公开可写
+#   GROUP_TOKEN=<openssl rand -hex 24>                     留空=组队中继公开可连
+
+services:
+  backend:
+    # 多架构 manifest（amd64 + arm64），docker 自动选对应架构。
+    # 想要可复现的发布就钉 sha，别用 latest：
+    #   image: ghcr.io/shimmerjordan/explore_travel/ej-backend:sha-1a2b3c4
+    image: ${EJ_BACKEND_IMAGE:-ghcr.io/shimmerjordan/explore_travel/ej-backend:latest}
+    container_name: ej-backend
+    restart: unless-stopped
+    # 高端口。绝不要用 80 / 443 / 8080——家宽运营商封这三个的入方向，
+    # 家里/NAS 部署会从公网完全连不上。兄弟服务：ejnas 48080、web 展示 48082。
+    ports:
+      - "${EJ_BACKEND_PORT:-48081}:48081"
+    volumes:
+      # 数据存哪（排行榜条目落在这里）：
+      #   不设（默认）→ `ej-data` 命名卷，零宿主配置。
+      #   绝对路径     → bind mount，NAS 上的常规选择。首次启动前先授权
+      #                  （容器用户 node，UID 1000）：
+      #                    sudo mkdir -p <path> && sudo chown -R 1000:1000 <path>
+      - "${EJ_BACKEND_DATA_PATH:-ej-data}:/data"
+    environment:
+      # 经 frp / Cloudflare / 反代暴露时必须为 1，否则所有用户共享一个限流桶。
+      TRUST_PROXY: "${TRUST_PROXY:-1}"
+      LB_WRITE_TOKEN: "${LB_WRITE_TOKEN:-}"
+      GROUP_TOKEN: "${GROUP_TOKEN:-}"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+    # 镜像自带 HEALTHCHECK（wget 打自己的 /healthz），`docker ps` 直接看得到。
+    mem_limit: 256m
+    cpus: 0.5
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+volumes:
+  # 仅在 EJ_BACKEND_DATA_PATH 未设时使用。真实卷名带 compose project 前缀。备份：
+  #   docker run --rm -v <project>_ej-data:/data -v "$PWD":/backup busybox \
+  #     tar czf /backup/ej-backend-data.tgz -C /data .
+  ej-data:

@@ -1,0 +1,276 @@
+name: NAS 后端镜像（GHCR）
+
+# ════════════════════════════════════════════════════════════════════════
+# 编译、验证并发布 nas-backend/ 的镜像 —— ejnas（鉴权 + 零知识保险箱 +
+# 读代理），Rust + distroless，NAS 上一键部署的那个服务。
+#
+# 这条流水线做什么：
+#   1. cargo test（proxy 的 SSRF 判定、auth、store 的乐观并发）
+#   2. 用与线上完全同一份 Dockerfile 交叉编译出 amd64 与 arm64 两个镜像
+#   3. 对 amd64 镜像打完整 API 冒烟（注册/会话/保险箱往返/ETag/409/
+#      重启持久化/注册关闭/代理默认关闭）；对 arm64 镜像在 QEMU 下验证
+#      二进制真能启动并服务 /healthz，且镜像架构确实是 arm64
+#   4. 把双架构 manifest 推到 GHCR
+#   5. 把「镜像地址 + NAS 上怎么一键部署」写进运行摘要页
+#
+# 为什么是交叉编译而不是 QEMU 模拟编译：rusqlite 的 bundled 特性要现编
+# SQLite 的 C 源码，在 QEMU 下编译 Rust + SQLite 单架构就要 40 分钟以上；
+# 交叉编译在原生速度下跑，几分钟完事。见 nas-backend/Dockerfile。
+#
+# PR 只验证不推送；只有 main 上的 push 才会发布 latest。
+# ════════════════════════════════════════════════════════════════════════
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'nas-backend/**'
+      - '.github/workflows/nas-backend.yml'
+  pull_request:
+    paths:
+      - 'nas-backend/**'
+      - '.github/workflows/nas-backend.yml'
+  workflow_dispatch: {}
+
+concurrency:
+  group: nas-backend-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write # 推 GHCR 需要
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}/ejnas
+
+jobs:
+  build-verify-publish:
+    name: 双架构编译 + 冒烟验证 + 推 GHCR
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # SSRF 判定（回环/私网/链路本地/ULA/IPv4-mapped/元数据地址全拒）、
+      # Argon2 验证、保险箱版本冲突 —— 都是纯逻辑，跑得很快。
+      - name: Rust 单元测试
+        working-directory: nas-backend
+        run: cargo test --locked
+
+      # QEMU 只用于「跑」arm64 容器做启动验证，不用于编译（编译走交叉）。
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 计算镜像标签
+        id: meta
+        if: github.event_name != 'pull_request'
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=sha-
+
+      # 先单架构 load 到本地 daemon，才能把容器真跑起来验。
+      - name: 编译 amd64（加载到本地）
+        uses: docker/build-push-action@v6
+        with:
+          context: nas-backend
+          platforms: linux/amd64
+          load: true
+          tags: ejnas:smoke-amd64
+          cache-from: type=gha,scope=ejnas-amd64
+          cache-to: type=gha,scope=ejnas-amd64,mode=max
+
+      - name: 冒烟验证 amd64（完整 API）
+        working-directory: nas-backend
+        run: IMAGE=ejnas:smoke-amd64 ./scripts/docker-smoke.sh
+
+      - name: 编译 arm64（加载到本地）
+        uses: docker/build-push-action@v6
+        with:
+          context: nas-backend
+          platforms: linux/arm64
+          load: true
+          tags: ejnas:smoke-arm64
+          cache-from: type=gha,scope=ejnas-arm64
+          cache-to: type=gha,scope=ejnas-arm64,mode=max
+
+      # LEVEL=boot：只证明交叉编译出来的 arm64 二进制真能在 arm64 上跑起来
+      # 并服务 HTTP。不在 QEMU 下跑 Argon2（故意设计得慢的 KDF，模拟下更慢），
+      # 那不会带来额外信号。
+      - name: 冒烟验证 arm64（QEMU 启动 + 架构核对）
+        working-directory: nas-backend
+        run: IMAGE=ejnas:smoke-arm64 LEVEL=boot PLATFORM=linux/arm64 ./scripts/docker-smoke.sh
+
+      - name: 推送双架构 manifest
+        id: push
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: nas-backend
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: |
+            type=gha,scope=ejnas-amd64
+            type=gha,scope=ejnas-arm64
+
+      # 运行摘要页是点进一次运行后落地的地方。没有它就只是一片绿勾，
+      # 看不出发布了什么、怎么部署。
+      #
+      # 缩进说明：下面所有内容都在块标量的基准缩进上，YAML 会把它剥掉，
+      # heredoc 正文到达 shell 时在第 0 列 —— 这样 markdown 才不会被渲染
+      # 成代码块。别给这些行重新加缩进。
+      - name: 写入运行摘要
+        if: always()
+        working-directory: nas-backend
+        env:
+          JOB_STATUS: ${{ job.status }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+          IS_PR: ${{ github.event_name == 'pull_request' }}
+        run: |
+          S="$GITHUB_STEP_SUMMARY"
+
+          if [ "$JOB_STATUS" = success ]; then
+            if [ "$IS_PR" = true ]; then
+              echo "## ✅ NAS 后端镜像验证通过（PR 不发布）" >> "$S"
+            else
+              echo "## ✅ NAS 后端镜像已发布到 GHCR" >> "$S"
+            fi
+          else
+            {
+              echo "## ❌ NAS 后端镜像流水线失败（状态：$JOB_STATUS）"
+              echo ""
+              echo "排查：展开上面失败的那一步；冒烟失败会自动打印容器最后 30 行日志。"
+              echo "本机复现：\`cd nas-backend && BUILD=1 ./scripts/docker-smoke.sh\`（需要 docker）。"
+            } >> "$S"
+          fi
+
+          cat >> "$S" <<'HEADER'
+
+          **发布对象**：`nas-backend/` —— ejnas（账号鉴权 + 零知识保险箱 + 读代理），Rust 编译进 distroless 镜像，以非 root（UID 65532）运行，无 shell。
+
+          HEADER
+
+          {
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| 架构 | \`linux/amd64\` + \`linux/arm64\`（同一个 manifest，pull 时自动选） |"
+            echo "| 摘要 digest | \`${DIGEST:-—（PR 不推送）}\` |"
+            echo "| 提交 | \`${GITHUB_SHA:0:7}\` |"
+            echo "| 基础镜像 | \`gcr.io/distroless/cc-debian12:nonroot\` |"
+          } >> "$S"
+
+          if [ -n "$TAGS" ]; then
+            {
+              echo ""
+              echo "**本次标签**"
+              echo ""
+              echo '```'
+              echo "$TAGS"
+              echo '```'
+            } >> "$S"
+          fi
+
+          cat >> "$S" <<'VERIFIED'
+
+          ### 本次验证了什么
+
+          - **单元测试** —— SSRF 判定（回环 / 私网 / 链路本地 / ULA / IPv4-mapped / 云元数据地址全拒）、Argon2 校验、保险箱版本冲突
+          - **amd64 完整 API 冒烟** —— 注册 → 会话 → 保险箱写入/读回字节一致 → ETag 304 → 过期 `If-Match` 得 409（不会丢更新）→ 同凭据登录成功、错凭据 401 → `docker restart` 后密文仍在 → 关闭注册后新账号被拒 → 读代理默认关闭
+          - **arm64 启动验证** —— 交叉编译出的 arm64 二进制在 QEMU 下真能启动并服务 `/healthz`，且镜像架构核对为 `arm64`（防止交叉编译静默产出宿主架构的产物）
+
+          VERIFIED
+
+          if [ "$IS_PR" = true ]; then
+            cat >> "$S" <<'PRNOTE'
+          ### 本次不发布
+
+          PR 只做验证。合并到 `main` 后会自动推 `latest` 与 `sha-<7位>` 两个标签。
+
+          PRNOTE
+            exit 0
+          fi
+
+          cat >> "$S" <<HOWTO
+
+          ### 在 NAS 上一键部署
+
+          在 NAS 上开个 SSH，四步。把 \`/volume1/docker/ejnas\` 换成你的实际路径（群晖一般是 \`/volume1/docker/…\`，威联通是 \`/share/Container/…\`）。
+
+          **① 建目录**
+
+          \`\`\`bash
+          sudo mkdir -p /volume1/docker/ejnas/data && cd /volume1/docker/ejnas
+          \`\`\`
+
+          **② 写 compose 文件**（整段复制执行）
+
+          HOWTO
+
+          {
+            echo '```bash'
+            echo "cat > docker-compose.yml <<'YAML'"
+            cat docker-compose.ghcr.yml
+            echo 'YAML'
+            echo '```'
+          } >> "$S"
+
+          cat >> "$S" <<HOWTO2
+
+          **③ 生成配置**（密钥自动生成，别手填；\`EJ_CORS_ORIGINS\` 换成你 web 展示版的实际来源）
+
+          \`\`\`bash
+          cat > .env <<EOF
+          EJ_JWT_SECRET=\$(openssl rand -base64 48)
+          EJ_DATA_PATH=/volume1/docker/ejnas/data
+          EJ_CORS_ORIGINS=http://localhost:48082
+          EOF
+          sudo chown -R 65532:65532 /volume1/docker/ejnas/data
+          \`\`\`
+
+          最后那条 \`chown\` 是必须的：容器以 UID 65532 运行，而 bind mount 不会继承镜像里的目录所有权，不改权限数据库就写不进去。
+
+          **④ 起服务并自检**
+
+          \`\`\`bash
+          sudo docker compose up -d
+          curl localhost:48080/healthz          # → {"status":"ok"}
+          \`\`\`
+
+          ### 之后的运维
+
+          \`\`\`bash
+          # 升级到最新镜像
+          sudo docker compose pull && sudo docker compose up -d
+
+          # 钉到本次这个版本（可复现、可回滚）
+          echo 'EJ_IMAGE=${IMAGE}:sha-${GITHUB_SHA:0:7}' >> .env && sudo docker compose up -d
+
+          # 备份（保险箱密文全在这一个文件里）
+          sudo tar czf ejnas-backup-\$(date +%F).tgz -C /volume1/docker/ejnas/data .
+
+          # 建好账号后关掉注册，避免别人注册进来
+          echo 'EJ_ALLOW_REGISTRATION=false' >> .env && sudo docker compose up -d
+          \`\`\`
+
+          ### 几个容易踩的点
+
+          - **端口**：\`48080\` 是刻意选的高端口。家宽运营商封 \`80\` / \`443\` / \`8080\` 的入方向，配到那三个上从公网连不上。同项目其他服务：ej-backend \`48081\`、web 展示 \`48082\`。
+          - **数据别放网络盘**：\`EJ_DATA_PATH\` 必须指向 NAS 本地文件系统。指到 NFS/SMB 上，SQLite 的 WAL 和 POSIX 锁不可靠，会静默损坏数据库。
+          - **CORS 要精确匹配**：\`EJ_CORS_ORIGINS\` 得和浏览器打开 web 的来源完全一致（协议+主机+端口，结尾不要 \`/\`）。\`http://localhost:48082\` 和 \`http://127.0.0.1:48082\` 是两个不同来源。
+          - **口令派生需要安全上下文**：web 用 \`http://<局域网IP>\` 打开时浏览器不给 \`crypto.subtle\`，派生密钥会直接抛错。用 \`localhost\` 或给 web 配 https。
+          - **镜像可见性**：GHCR 容器包**首次推送后默认是 private**，公开仓库也不会让它自动公开（container 类型不继承仓库可见性）。所以 NAS 上第一次 \`pull\` 基本都会报 \`denied\`/\`unauthorized\`。二选一：① 在 NAS 上 \`docker login ghcr.io -u <你的用户名>\`，密码填带 \`read:packages\` 的 PAT，一次就够，包可以一直保持私有；② 把包改成公开 —— 打开包页 → 右侧齿轮 **Package settings** → **滚到页面最底部的 Danger Zone** → **Change visibility**（入口在这里，很容易漏）。注意公开后**不能再改回私有**。
+          HOWTO2

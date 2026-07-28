@@ -22,7 +22,9 @@ backends/
 │     └─ group.js          组队中继（WebSocket）
 ├─ test/                   node --test 套件（含 Dart 签名跨语言向量）
 ├─ deploy/                 frpc / cloudflared 配置样例
-├─ Dockerfile  docker-compose.yml
+├─ Dockerfile
+├─ docker-compose.yml         从源码现编
+├─ docker-compose.ghcr.yml    用 GHCR 上编好的镜像部署（NAS/服务器推荐）
 ```
 
 ## 快速开始
@@ -56,7 +58,33 @@ curl http://localhost:48081/api/status      # 模块状态/内存/在线人数
 | `GROUP_MSGS_PER_SEC` / `GROUP_BYTES_PER_SEC` | 50 / 512K | 单连接限速（PTT 语音 ~4 条/秒也远够用） |
 | `LOG_LEVEL` | info | trace/info/warn/error |
 
-## 部署到 ECS
+## 部署
+
+**推荐：用 GHCR 上编好的镜像**（不需要源码，不需要在目标机器上编译）。CI 每次
+推 `main` 都会在容器级 E2E 通过后发布 amd64 + arm64 双架构镜像，
+`docker-compose.ghcr.yml` 就是给这种部署用的：
+
+```bash
+sudo mkdir -p /volume1/docker/ej-backend/data && cd /volume1/docker/ej-backend
+# 放好 docker-compose.ghcr.yml（改名 docker-compose.yml），然后：
+cat > .env <<EOF
+EJ_BACKEND_DATA_PATH=/volume1/docker/ej-backend/data
+LB_WRITE_TOKEN=$(openssl rand -hex 24)
+GROUP_TOKEN=$(openssl rand -hex 24)
+EOF
+sudo chown -R 1000:1000 /volume1/docker/ej-backend/data   # 容器以 node（UID 1000）运行
+sudo docker compose up -d
+curl localhost:48081/healthz
+```
+
+「Docker 后端编译」流水线的**运行摘要页**会把上面这套命令连同 compose 文件内容
+和本次提交对应的镜像标签一起打印出来，直接复制粘贴即可。
+
+**数据存哪**由 `EJ_BACKEND_DATA_PATH` 决定：留空是 Docker 命名卷（零宿主配置），
+填绝对路径就是 bind mount（备份方便，NAS 推荐；需先 `chown` 到 UID 1000）。
+别指向 NFS/SMB。
+
+**或者从源码现编**：
 
 ```bash
 scp -r backends/ user@ecs:/opt/ej-backend
@@ -88,9 +116,10 @@ ssh user@ecs 'cd /opt/ej-backend && docker compose up -d --build'
 
 CI：`.github/workflows/backend.yml`（Actions 页显示为「**Docker 后端编译**」）
 在 backends/ 任何改动时自动跑 `npm test` + 完整 Docker E2E（构建生产镜像并
-驱动全 API/数据正确性/中继/重启持久化验证）。每次运行的摘要页会列出镜像
-大小、验证项和完整部署命令。注意它**不推送镜像**——部署时在目标机器上
-`docker compose up -d --build` 现编。
+驱动全 API/数据正确性/中继/重启持久化验证），**通过后**才把 amd64 + arm64
+双架构 manifest 推到 GHCR（`ghcr.io/<owner>/<repo>/ej-backend`）。没有任何
+未经真容器验证的镜像会进 registry。PR 只验证不发布。每次运行的摘要页会列出
+镜像标签、digest、验证项和可直接复制的部署命令。
 
 带宽/资源取向的取舍：
 

@@ -10,11 +10,15 @@ name: Docker 后端编译
 #   3. 把镜像当生产环境跑起来（非 root + /data volume + HEALTHCHECK），
 #      对着容器打完整的 API / 数据正确性 / WS 中继 / 重启持久化 E2E，
 #      跑两轮：开放模式、令牌鉴权模式
-#   4. 把「编译结果 + 怎么部署」写进 GitHub 的运行摘要页
+#   4. 把双架构（amd64 + arm64）manifest 推到 GHCR
+#   5. 把「镜像地址 + NAS/服务器上怎么一键部署」写进运行摘要页
 #
-# 这条流水线【不】做什么：
-#   不推送镜像到任何 registry。镜像只在 runner 上验证完就销毁——部署时在
-#   目标机器上 `docker compose up -d --build` 现编即可（见运行摘要）。
+# 验证用的是原生 amd64 镜像（跑真容器打完整 E2E）；arm64 只参与最后的
+# manifest 构建——镜像里没有编译步骤，只有 COPY 和一次 mkdir/chown，跨架构
+# 没有可失败的余地。需要在 arm64 上跑真容器验证的是 nas-backend（Rust 交叉
+# 编译），那条流水线里做了。
+#
+# PR 只验证不推送；只有 main 上的 push 才会发布 latest。
 #
 # 注意：本文件名保持 backend.yml 不变（重命名会断掉历史运行记录的链接，
 # 以及分支保护里按名字引用的必需检查项）。Actions 页显示的是上面的 name。
@@ -38,10 +42,14 @@ concurrency:
 
 permissions:
   contents: read
+  packages: write # 推 GHCR 需要
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}/ej-backend
 
 jobs:
   test-and-docker-e2e:
-    name: 编译镜像 + 容器级 E2E
+    name: 编译镜像 + 容器级 E2E + 推 GHCR
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -77,6 +85,47 @@ jobs:
           echo "size=${SIZE:-—}" >> "$GITHUB_OUTPUT"
           echo "id=${ID:-—}" >> "$GITHUB_OUTPUT"
 
+      # Publish only after the E2E above has actually passed on this commit —
+      # nothing reaches GHCR that hasn't served real traffic in a container.
+      # QEMU is here purely so the arm64 layer's mkdir/chown can execute.
+      - uses: docker/setup-qemu-action@v3
+        if: github.event_name != 'pull_request'
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@v3
+        if: github.event_name != 'pull_request'
+
+      - name: 登录 GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 计算镜像标签
+        id: meta
+        if: github.event_name != 'pull_request'
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=sha-
+
+      - name: 推送双架构 manifest
+        id: push
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: backends
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=ej-backend
+          cache-to: type=gha,scope=ej-backend,mode=max
+
       # The run-summary page is where you land when you click a run. Without
       # this it's a wall of green ticks that says nothing about what was
       # built or how to deploy it.
@@ -91,11 +140,18 @@ jobs:
           JOB_STATUS: ${{ job.status }}
           IMG_SIZE: ${{ steps.img.outputs.size }}
           IMG_ID: ${{ steps.img.outputs.id }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+          IS_PR: ${{ github.event_name == 'pull_request' }}
         run: |
           S="$GITHUB_STEP_SUMMARY"
 
           if [ "$JOB_STATUS" = success ]; then
-            echo "## ✅ Docker 后端编译通过" >> "$S"
+            if [ "$IS_PR" = true ]; then
+              echo "## ✅ Docker 后端验证通过（PR 不发布）" >> "$S"
+            else
+              echo "## ✅ Docker 后端镜像已发布到 GHCR" >> "$S"
+            fi
           else
             {
               echo "## ❌ Docker 后端编译失败（状态：$JOB_STATUS）"
@@ -115,10 +171,22 @@ jobs:
             echo "| 项 | 值 |"
             echo "|---|---|"
             echo "| 镜像大小 | ${IMG_SIZE} |"
-            echo "| 镜像 ID | \`${IMG_ID}\` |"
+            echo "| 架构 | \`linux/amd64\` + \`linux/arm64\`（同一个 manifest，pull 时自动选） |"
+            echo "| 摘要 digest | \`${DIGEST:-—（PR 不推送）}\` |"
             echo "| 基础镜像 | \`node:22-alpine\`（以非 root 用户 \`node\` 运行） |"
             echo "| 提交 | \`${GITHUB_SHA:0:7}\` |"
           } >> "$S"
+
+          if [ -n "$TAGS" ]; then
+            {
+              echo ""
+              echo "**本次标签**"
+              echo ""
+              echo '```'
+              echo "$TAGS"
+              echo '```'
+            } >> "$S"
+          fi
 
           cat >> "$S" <<'BODY'
 
@@ -130,32 +198,87 @@ jobs:
           - **容器级 E2E · 第 2 轮「鉴权模式」** —— `LB_WRITE_TOKEN` + `GROUP_TOKEN` 强制生效，未带令牌的写入被拒
           - **HEALTHCHECK** —— 容器能真的转为 `healthy`
 
-          ### ⚠️ 本流水线不推送镜像
+          上面的镜像大小/E2E 跑的是原生 amd64 镜像。推到 GHCR 的是同一份 `Dockerfile` 构建的 amd64 + arm64 双架构 manifest。
 
-          镜像只在 runner 上编译验证完就销毁，**没有推到任何 registry**。部署时在目标机器上现编即可 —— 下面三条是完整流程。
+          BODY
 
-          ### 怎么用
+          if [ "$IS_PR" = true ]; then
+            cat >> "$S" <<'PRNOTE'
+          ### 本次不发布
 
-          **① 本地开发跑一下**（不需要 Docker）
+          PR 只做验证。合并到 `main` 后会自动推 `latest` 与 `sha-<7位>` 两个标签。
+
+          PRNOTE
+          else
+
+          cat >> "$S" <<HOWTO
+          ### 在 NAS / 服务器上一键部署
+
+          不需要源码、不需要在目标机器上编译。三步，把 \`/volume1/docker/ej-backend\` 换成你的实际路径。
+
+          **① 建目录**
+
+          \`\`\`bash
+          sudo mkdir -p /volume1/docker/ej-backend/data && cd /volume1/docker/ej-backend
+          \`\`\`
+
+          **② 写 compose 文件**（整段复制执行）
+
+          HOWTO
+
+          {
+            echo '```bash'
+            echo "cat > docker-compose.yml <<'YAML'"
+            cat docker-compose.ghcr.yml
+            echo 'YAML'
+            echo '```'
+          } >> "$S"
+
+          cat >> "$S" <<HOWTO2
+
+          **③ 生成配置并起服务**
+
+          \`\`\`bash
+          cat > .env <<EOF
+          EJ_BACKEND_DATA_PATH=/volume1/docker/ej-backend/data
+          LB_WRITE_TOKEN=\$(openssl rand -hex 24)
+          GROUP_TOKEN=\$(openssl rand -hex 24)
+          EOF
+          sudo chown -R 1000:1000 /volume1/docker/ej-backend/data
+          sudo docker compose up -d
+          curl localhost:48081/healthz          # → ok
+          curl localhost:48081/api/status       # 模块状态 / 内存 / 在线人数
+          \`\`\`
+
+          那条 \`chown\` 是必须的：容器以 \`node\`（UID 1000）运行，bind mount 不继承镜像里的目录所有权，不改权限排行榜就写不进去。把生成的两个令牌填进 App：排行榜页「配置社区服务器」填 \`LB_WRITE_TOKEN\`，组队设置「中继令牌」填 \`GROUP_TOKEN\`。
+
+          ### 之后的运维
+
+          \`\`\`bash
+          # 升级
+          sudo docker compose pull && sudo docker compose up -d
+
+          # 钉到本次这个版本（可复现、可回滚）
+          echo 'EJ_BACKEND_IMAGE=${IMAGE}:sha-${GITHUB_SHA:0:7}' >> .env && sudo docker compose up -d
+          \`\`\`
+
+          数据存哪由 \`EJ_BACKEND_DATA_PATH\` 决定：留空是 Docker 命名卷（零配置），填绝对路径就是 bind mount（备份方便，NAS 推荐）。别指向 NFS/SMB。
+
+          GHCR 容器包**首次推送后默认是 private**（公开仓库也不继承），所以 NAS 上第一次 \`pull\` 基本都会报 \`denied\`/\`unauthorized\`。二选一：① 在 NAS 上 \`docker login ghcr.io -u <你的用户名>\` + 带 \`read:packages\` 的 PAT，一次即可，包保持私有；② 改成公开 —— 包页 → 右侧齿轮 **Package settings** → **滚到最底部 Danger Zone** → **Change visibility**（公开后不可逆）。
+
+          HOWTO2
+
+          fi
+
+          cat >> "$S" <<'BODY2'
+          ### 本地开发与复现
 
           ```bash
-          cd backends && npm start        # → http://127.0.0.1:48081
+          cd backends && npm start                  # 本地跑，不需要 Docker → http://127.0.0.1:48081
+          cd backends && ./scripts/docker-e2e.sh    # 复现这条流水线；需要 docker + node ≥ 20，退出码 0 = 全过
           ```
 
-          **② 部署到服务器**（生产，推荐 compose）
-
-          ```bash
-          scp -r backends/ user@主机:/opt/ej-backend
-          ssh user@主机 'cd /opt/ej-backend && docker compose up -d --build'
-          ```
-
-          服务本体常驻内存约 40 MB，空闲 CPU ≈ 0（compose 已设 256 MB / 0.5 核上限）。排行榜数据落在 `ej-data` volume 的 `/data`。
-
-          **③ 在本机复现这条流水线**
-
-          ```bash
-          cd backends && ./scripts/docker-e2e.sh    # 需要 docker + node ≥ 20；退出码 0 = 全过
-          ```
+          服务本体常驻内存约 40 MB，空闲 CPU ≈ 0（compose 已设 256 MB / 0.5 核上限）。
 
           ### 关键环境变量
 
@@ -179,7 +302,9 @@ jobs:
           | 直接开端口 | `docker compose up -d` | 主机有公网 IP，安全组放行 48081/tcp |
           | frpc 旁路 | 填好 `deploy/frpc.toml` 后 `docker compose --profile frp up -d` | 无公网入方向，或想复用现有 frps |
           | Cloudflare Tunnel | `export TUNNEL_TOKEN=... && docker compose --profile cloudflare up -d` | **推荐**：免公网 IP，自动 HTTPS/WSS |
-          BODY
+
+          `48081` 是刻意选的高端口 —— 家宽运营商封 `80` / `443` / `8080` 的入方向。Cloudflare Tunnel 走的是出方向，不受影响。
+          BODY2
 
       - name: 失败时打印容器日志
         if: failure()
