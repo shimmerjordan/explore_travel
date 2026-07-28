@@ -258,8 +258,19 @@ class _LocationTaskHandler extends TaskHandler {
 class BackgroundLocation {
   static bool _initialized = false;
 
+  /// flutter_foreground_task ships plugin implementations for Android and iOS
+  /// ONLY. On desktop (this repo also targets Linux) every one of its calls
+  /// hits a MethodChannel with no registered handler and throws
+  /// MissingPluginException — which used to escape [start] and kill recording
+  /// outright. Gate the whole surface so desktop degrades cleanly to the
+  /// foreground geolocator stream instead. (Web never gets here: it compiles
+  /// against background_task_stub.dart.)
+  static bool get supported =>
+      defaultTargetPlatform == TargetPlatform.android ||
+      defaultTargetPlatform == TargetPlatform.iOS;
+
   static void init() {
-    if (_initialized) return;
+    if (_initialized || !supported) return;
     _initialized = true;
     FlutterForegroundTask.init(
       androidNotificationOptions: AndroidNotificationOptions(
@@ -295,6 +306,7 @@ class BackgroundLocation {
   }
 
   static Future<bool> requestPermissions() async {
+    if (!supported) return false;
     final notif = await FlutterForegroundTask.checkNotificationPermission();
     if (notif != NotificationPermission.granted) {
       await FlutterForegroundTask.requestNotificationPermission();
@@ -308,6 +320,7 @@ class BackgroundLocation {
   }
 
   static Future<void> start(RecordingMode mode) async {
+    if (!supported) return;
     init();
     await requestPermissions();
     // Persist BEFORE startService so the service's onStart sees a true flag
@@ -331,6 +344,7 @@ class BackgroundLocation {
   }
 
   static Future<void> stop() async {
+    if (!supported) return;
     // Clear the flag first so an OS restart racing with our stop won't
     // resume a recording the user just ended.
     await FlutterForegroundTask.saveData(
@@ -350,8 +364,8 @@ class BackgroundLocation {
   }
 
   /// Whether the foreground service is currently alive.
-  static Future<bool> isServiceRunning() =>
-      FlutterForegroundTask.isRunningService;
+  static Future<bool> isServiceRunning() async =>
+      supported && await FlutterForegroundTask.isRunningService;
 
   /// Subscribes to GPS samples coming from the background isolate. The
   /// task-data callback is REMOVED again when the returned subscription is

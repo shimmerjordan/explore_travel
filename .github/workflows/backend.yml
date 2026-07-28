@@ -1,10 +1,24 @@
-name: Backend (leaderboard + group relay)
+name: Docker 后端编译
 
-# Validates backends/ on every change: unit suite (incl. the Dart-generated
-# cross-language signature vector), then the production Docker image is
-# built and driven through the full container-level E2E — all API
-# endpoints, data correctness, WS relay, token enforcement, and
-# volume persistence across `docker restart`.
+# ════════════════════════════════════════════════════════════════════════
+# 编译并验证 backends/ 的生产 Docker 镜像 —— explore_journal 自建后端
+# （社区排行榜 + 组队中继，零 npm 依赖）。
+#
+# 这条流水线做什么：
+#   1. 跑单元测试（含与 Dart 端逐字节对齐的 canonical-JSON / Ed25519 向量）
+#   2. 用与线上完全同一份 Dockerfile 编译生产镜像
+#   3. 把镜像当生产环境跑起来（非 root + /data volume + HEALTHCHECK），
+#      对着容器打完整的 API / 数据正确性 / WS 中继 / 重启持久化 E2E，
+#      跑两轮：开放模式、令牌鉴权模式
+#   4. 把「编译结果 + 怎么部署」写进 GitHub 的运行摘要页
+#
+# 这条流水线【不】做什么：
+#   不推送镜像到任何 registry。镜像只在 runner 上验证完就销毁——部署时在
+#   目标机器上 `docker compose up -d --build` 现编即可（见运行摘要）。
+#
+# 注意：本文件名保持 backend.yml 不变（重命名会断掉历史运行记录的链接，
+# 以及分支保护里按名字引用的必需检查项）。Actions 页显示的是上面的 name。
+# ════════════════════════════════════════════════════════════════════════
 
 on:
   push:
@@ -27,6 +41,7 @@ permissions:
 
 jobs:
   test-and-docker-e2e:
+    name: 编译镜像 + 容器级 E2E
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -41,15 +56,131 @@ jobs:
       # Unit + integration suite: canonical-JSON/Ed25519 cross-language
       # vector, leaderboard API behaviour (LWW/TOFU/token/persistence),
       # WS relay routing. Zero npm dependencies → no install step.
-      - name: Unit tests (node --test)
+      - name: 单元测试（node --test）
         run: npm test
 
       # Build the production image and run the container-level E2E twice
       # (open mode + auth mode). This is the exact image an ECS deploy
       # would run, including non-root user, volume and healthcheck.
-      - name: Docker E2E (build image + full API/data/relay/persistence)
+      - name: 编译生产镜像 + 容器级 E2E
         run: ./scripts/docker-e2e.sh
 
-      - name: Container logs on failure
+      # Size/id of what was just built — the one genuinely per-run fact worth
+      # surfacing. Never fails the job: on a build failure the image simply
+      # doesn't exist and the summary renders a dash.
+      - name: 采集镜像信息
+        id: img
+        if: always()
+        run: |
+          SIZE=$(docker images --format '{{.Size}}' explore-journal-backend:e2e | head -1 || true)
+          ID=$(docker images --format '{{.ID}}' explore-journal-backend:e2e | head -1 || true)
+          echo "size=${SIZE:-—}" >> "$GITHUB_OUTPUT"
+          echo "id=${ID:-—}" >> "$GITHUB_OUTPUT"
+
+      # The run-summary page is where you land when you click a run. Without
+      # this it's a wall of green ticks that says nothing about what was
+      # built or how to deploy it.
+      #
+      # NOTE on indentation: everything below sits at the block scalar's base
+      # indent, so YAML strips it and the heredoc body reaches the shell at
+      # column 0 — which is what keeps the markdown from rendering as code
+      # blocks. Don't re-indent these lines.
+      - name: 写入运行摘要
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+          IMG_SIZE: ${{ steps.img.outputs.size }}
+          IMG_ID: ${{ steps.img.outputs.id }}
+        run: |
+          S="$GITHUB_STEP_SUMMARY"
+
+          if [ "$JOB_STATUS" = success ]; then
+            echo "## ✅ Docker 后端编译通过" >> "$S"
+          else
+            {
+              echo "## ❌ Docker 后端编译失败（状态：$JOB_STATUS）"
+              echo ""
+              echo "排查：展开上面失败的那一步看日志，容器日志见最后一步「失败时打印容器日志」。"
+              echo "本机复现：\`cd backends && ./scripts/docker-e2e.sh\`（需要 docker + node ≥ 20）。"
+            } >> "$S"
+          fi
+
+          cat >> "$S" <<'HEADER'
+
+          **编译对象**：`backends/` —— explore_journal 自建后端（社区排行榜 + 组队中继），零 npm 依赖，镜像里只有 Node 运行时和约 1500 行 JS。
+
+          HEADER
+
+          {
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| 镜像大小 | ${IMG_SIZE} |"
+            echo "| 镜像 ID | \`${IMG_ID}\` |"
+            echo "| 基础镜像 | \`node:22-alpine\`（以非 root 用户 \`node\` 运行） |"
+            echo "| 提交 | \`${GITHUB_SHA:0:7}\` |"
+          } >> "$S"
+
+          cat >> "$S" <<'BODY'
+
+          ### 本次验证了什么
+
+          - **单元测试** —— 与 Dart 端逐字节对齐的 canonical-JSON / Ed25519 签名向量、排行榜 API 行为（LWW 合并 / TOFU 信任 / 令牌 / 落盘持久化）、WS 中继路由
+          - **生产镜像编译** —— 与线上部署完全同一份 `Dockerfile`
+          - **容器级 E2E · 第 1 轮「开放模式」** —— 全部 API、数据正确性、WS 中继，以及 `docker restart` 之后 volume 里的数据仍在
+          - **容器级 E2E · 第 2 轮「鉴权模式」** —— `LB_WRITE_TOKEN` + `GROUP_TOKEN` 强制生效，未带令牌的写入被拒
+          - **HEALTHCHECK** —— 容器能真的转为 `healthy`
+
+          ### ⚠️ 本流水线不推送镜像
+
+          镜像只在 runner 上编译验证完就销毁，**没有推到任何 registry**。部署时在目标机器上现编即可 —— 下面三条是完整流程。
+
+          ### 怎么用
+
+          **① 本地开发跑一下**（不需要 Docker）
+
+          ```bash
+          cd backends && npm start        # → http://127.0.0.1:8080
+          ```
+
+          **② 部署到服务器**（生产，推荐 compose）
+
+          ```bash
+          scp -r backends/ user@主机:/opt/ej-backend
+          ssh user@主机 'cd /opt/ej-backend && docker compose up -d --build'
+          ```
+
+          服务本体常驻内存约 40 MB，空闲 CPU ≈ 0（compose 已设 256 MB / 0.5 核上限）。排行榜数据落在 `ej-data` volume 的 `/data`。
+
+          **③ 在本机复现这条流水线**
+
+          ```bash
+          cd backends && ./scripts/docker-e2e.sh    # 需要 docker + node ≥ 20；退出码 0 = 全过
+          ```
+
+          ### 关键环境变量
+
+          | 变量 | 默认 | 说明 |
+          |---|---|---|
+          | `PORT` / `HOST` | `8080` / `0.0.0.0` | 监听地址 |
+          | `DATA_DIR` | `/data` | 排行榜持久化目录（compose 已挂 volume） |
+          | `TRUST_PROXY` | 关 | `1` = 信任 `CF-Connecting-IP` / `X-Forwarded-For` 做限流分桶。**经 frp / Cloudflare 暴露时必须开**，否则所有用户共享同一个限流桶 |
+          | `LB_WRITE_TOKEN` | 空 | 设了之后 `POST /entries` 需要 `Authorization: Bearer`；读接口始终公开 |
+          | `GROUP_TOKEN` | 空 | 设了之后组队连接需带令牌（App 内「中继令牌」填同一个值） |
+          | `LB_READS_PER_MIN` / `LB_WRITES_PER_MIN` | 60 / 10 | 每 IP 限流 |
+          | `GROUP_MAX_ROOM_SIZE` | 32 | 单房间人数上限 |
+          | `LOG_LEVEL` | `info` | trace / info / warn / error |
+
+          完整清单见 `backends/README.md` 的「配置项（环境变量）」一节。
+
+          ### 三种公网暴露方式（可叠加）
+
+          | 方式 | 命令 | 适用 |
+          |---|---|---|
+          | 直接开端口 | `docker compose up -d` | 主机有公网 IP，安全组放行 8080/tcp |
+          | frpc 旁路 | 填好 `deploy/frpc.toml` 后 `docker compose --profile frp up -d` | 无公网入方向，或想复用现有 frps |
+          | Cloudflare Tunnel | `export TUNNEL_TOKEN=... && docker compose --profile cloudflare up -d` | **推荐**：免公网 IP，自动 HTTPS/WSS |
+          BODY
+
+      - name: 失败时打印容器日志
         if: failure()
         run: docker ps -a && docker ps -aq --filter name=ej-e2e | head -1 | xargs -r docker logs | tail -100

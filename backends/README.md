@@ -86,9 +86,11 @@ ssh user@ecs 'cd /opt/ej-backend && docker compose up -d --build'
 数组里加一行；路由按 `/<module>/v1/…` 命名空间（排行榜因协议文档要求
 保留根路径）。
 
-CI：`.github/workflows/backend.yml` 在 backends/ 任何改动时自动跑
-`npm test` + 完整 Docker E2E（构建生产镜像并驱动全 API/数据正确性/
-中继/重启持久化验证）。
+CI：`.github/workflows/backend.yml`（Actions 页显示为「**Docker 后端编译**」）
+在 backends/ 任何改动时自动跑 `npm test` + 完整 Docker E2E（构建生产镜像并
+驱动全 API/数据正确性/中继/重启持久化验证）。每次运行的摘要页会列出镜像
+大小、验证项和完整部署命令。注意它**不推送镜像**——部署时在目标机器上
+`docker compose up -d --build` 现编。
 
 带宽/资源取向的取舍：
 
