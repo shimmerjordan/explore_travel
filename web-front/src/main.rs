@@ -3,6 +3,7 @@ mod atomic_file;
 mod auth;
 mod config;
 mod config_store;
+mod metrics;
 mod proxy;
 mod session;
 mod static_files;
@@ -78,6 +79,25 @@ struct AppState {
     /// concurrent read always observes a complete file, old or new, never a
     /// torn one.
     config_write: Mutex<()>,
+    /// Request counters. Holds a mutex of its own, but a *leaf* one: nothing
+    /// in `metrics` acquires another lock, so it is outside the order above
+    /// and can be taken anywhere.
+    ///
+    /// The other half of "leaf" has to be maintained here, not there: never
+    /// take this lock while holding one of the three above. Both credential
+    /// checks (`handle_login`, `handle_change_password`) therefore `drop(admin)`
+    /// before counting their 401. Nothing deadlocks if you forget -- metrics
+    /// takes nothing else -- but the moment one call site nests it, "metrics is
+    /// a leaf" stops being checkable by reading this list and becomes something
+    /// the next person has to audit every call site to believe.
+    metrics: metrics::Metrics,
+    /// When this process started, for the uptime the console shows. An
+    /// `Instant` rather than a wall-clock time because it is monotonic: a
+    /// clock correction (NTP step on a NAS that just got its network back)
+    /// must not make uptime jump or go negative.
+    // The console's metrics endpoint is what reads this back.
+    #[allow(dead_code)]
+    started: Instant,
 }
 
 /// A fully-formed response.
@@ -156,6 +176,7 @@ fn main() {
     };
     let sessions = session::Sessions::new(cfg.token_ttl_secs);
 
+    let sample_interval = Duration::from_secs(cfg.metrics_interval_secs);
     let state = Arc::new(AppState {
         sessions,
         admin: Mutex::new(admin),
@@ -163,7 +184,11 @@ fn main() {
         limiter: Mutex::new(Limiter::new()),
         agent: proxy::safe_agent(),
         config_write: Mutex::new(()),
+        metrics: metrics::Metrics::load_or_new(data_dir.clone()),
+        started: Instant::now(),
     });
+
+    spawn_metrics_sampler(state.clone(), sample_interval);
 
     let server = match Server::http(&listen) {
         Ok(s) => Arc::new(s),
@@ -188,6 +213,49 @@ fn main() {
     for h in handles {
         let _ = h.join();
     }
+}
+
+/// Start the metrics sampler: one detached thread that appends a point to the
+/// ring every `interval`, and rewrites `metrics.json` every
+/// `PERSIST_EVERY_SAMPLES` of those.
+///
+/// The two cadences are separate on purpose. The ring is what the console
+/// graphs, so it must gain a point per interval; the file only has to be recent
+/// enough that a restart doesn't lose history worth caring about. Writing on
+/// every sample meant rewriting the whole ~160 KB document (plus two fsyncs)
+/// once a minute forever -- see `PERSIST_EVERY_SAMPLES` for the arithmetic and
+/// what is being traded.
+///
+/// Detached on purpose -- it is never joined, so it cannot hold up process
+/// exit. Docker sends SIGTERM and the process dies with whatever the last
+/// written file said; a partial window of counters is not worth a shutdown
+/// handshake.
+///
+/// It also must not be able to take the service down with it. `persist`
+/// returns its error instead of unwrapping (a full or read-only volume logs a
+/// warning and the loop keeps sampling in memory), and the body does nothing
+/// else that can fail: no indexing, no parsing, no `unwrap` on anything but
+/// the metrics mutex, whose only failure mode is poisoning by an earlier panic
+/// -- which the release profile's `panic = "abort"` makes unreachable (see
+/// `AppState`).
+fn spawn_metrics_sampler(state: Arc<AppState>, interval: Duration) {
+    thread::spawn(move || {
+        // Counts samples since the last write, so the first write lands one
+        // full persist period in rather than immediately.
+        let mut since_write: u32 = 0;
+        loop {
+            // Sleep first: sampling at t=0 would only record an empty process.
+            thread::sleep(interval);
+            state.metrics.take_sample();
+            since_write += 1;
+            if since_write >= metrics::PERSIST_EVERY_SAMPLES {
+                since_write = 0;
+                if let Err(e) = state.metrics.persist() {
+                    eprintln!("WARN: metrics persist failed: {e}");
+                }
+            }
+        }
+    });
 }
 
 fn header(req: &Request, name: &str) -> Option<String> {
@@ -452,9 +520,8 @@ fn serve(state: &AppState, mut req: Request) {
 
     let (bucket, limit) = bucket_for(routed_method, &path);
     if !allow(state, &ip, bucket, limit) {
-        log_access(&ip, &method, &path, 429);
         let out = Out::json(429, json!({"error":"rate limited"})).with("Retry-After", "60");
-        respond(req, out);
+        finish(state, req, &ip, &method, &path, out);
         return;
     }
 
@@ -471,8 +538,8 @@ fn serve(state: &AppState, mut req: Request) {
         // apply, which is the check order this route promises: session
         // before size.
         if method == "PUT" && path == "/api/config" && !has_valid_session(state, &req) {
-            log_access(&ip, &method, &path, 401);
-            respond(req, Out::json(401, json!({"error":"unauthorized"})));
+            let out = Out::json(401, json!({"error":"unauthorized"}));
+            finish(state, req, &ip, &method, &path, out);
             return;
         }
         let cap = body_cap(&method, &path);
@@ -481,17 +548,59 @@ fn serve(state: &AppState, mut req: Request) {
         // just to be thrown away by the length check below.
         let _ = req.as_reader().take(cap + 1).read_to_end(&mut body);
         if body.len() as u64 > cap {
-            log_access(&ip, &method, &path, 413);
-            respond(req, Out::json(413, json!({"error":"body too large"})));
+            let out = Out::json(413, json!({"error":"body too large"}));
+            finish(state, req, &ip, &method, &path, out);
             return;
         }
     }
 
     let out = route(state, &req, routed_method, &path, &query, &body);
-    // Logged as the method the client actually sent, not the one it was
-    // routed as -- `HEAD /` and `GET /` must stay distinguishable in the log.
-    log_access(&ip, &method, &path, out.status);
-    respond(req, out);
+    finish(state, req, &ip, &method, &path, out);
+}
+
+/// The single exit from `serve`: log the request, count it, send it.
+///
+/// Every early return above funnels through here rather than logging and
+/// responding on its own. When those three steps were spelled out per exit,
+/// each new observability concern had to be added in four places, and the
+/// exits most worth watching -- the 429 and the 413, i.e. exactly the ones
+/// that fire when something is going wrong -- were the easiest to miss.
+///
+/// The send is inlined here rather than kept as its own `respond(req, out)`
+/// helper, and that is the point: consuming the `Request` is the only way to
+/// answer it, so with no other function willing to take one by value, a future
+/// exit *cannot* be written that skips the log and the counter. Had `respond`
+/// survived as a callable function, `respond(req, out); return;` would compile,
+/// pass the end-to-end suites (they assert status codes), and only show up as
+/// one missing `docker logs` line. Same technique as `Persisted` and
+/// `write_json` below in metrics.rs: make the wrong state unrepresentable
+/// instead of documenting it.
+///
+/// `method` is the verb the client actually sent, not the one the request was
+/// routed as, so `HEAD /` and `GET /` stay distinguishable in the log; that is
+/// the pre-existing `log_access` format and operators read it in
+/// `docker logs`, so it is unchanged.
+fn finish(state: &AppState, req: Request, ip: &str, method: &str, path: &str, out: Out) {
+    log_access(ip, method, path, out.status);
+    // Body length, not bytes on the wire: response headers aren't counted, and
+    // a `HEAD` is billed for the body tiny_http suppresses (see the routing
+    // note above). Both are knowingly approximate -- this number exists to
+    // show which routes move data, and a second accounting path just to make
+    // `HEAD` exact would be more machinery than the answer is worth.
+    state
+        .metrics
+        .record_access(path, out.status, out.body.len() as u64, ip);
+
+    let mut resp = Response::from_data(out.body).with_status_code(out.status);
+    if let Ok(h) = Header::from_bytes(b"Content-Type".as_ref(), out.content_type.as_bytes()) {
+        resp = resp.with_header(h);
+    }
+    for (k, v) in out.extra.iter() {
+        if let Ok(h) = Header::from_bytes(k.as_bytes(), v.as_bytes()) {
+            resp = resp.with_header(h);
+        }
+    }
+    let _ = req.respond(resp);
 }
 
 /// Per-route cap on the request body `serve` reads before dispatch. Every
@@ -668,6 +777,12 @@ fn handle_login(state: &AppState, body: &[u8]) -> Out {
     let ok = req_body.username == admin.username
         && auth::verify_password(&admin.password_phc, req_body.password.as_bytes());
     if !ok {
+        // Release `admin` before touching the metrics mutex. Not a deadlock
+        // risk (metrics is a leaf lock and takes nothing else), but keeping
+        // the nesting one-directional is what lets that stay a checkable
+        // property instead of a comment.
+        drop(admin);
+        state.metrics.record_login_failure();
         return Out::json(401, json!({"error":"unauthorized"}));
     }
 
@@ -805,6 +920,17 @@ fn handle_change_password(state: &AppState, req: &Request, body: &[u8]) -> Out {
     // Undifferentiated 401 -- same rationale as `handle_login`: never lets a
     // caller distinguish "wrong old password" from any other failure mode.
     if !auth::verify_password(&admin.password_phc, req_body.old.as_bytes()) {
+        // Counted as a login failure, like `handle_login`'s 401. `bucket_for`
+        // already treats `POST /api/session` and `PUT /api/password` as one
+        // `("auth", 10)` bucket because they are the same kind of credential
+        // check; a brute-force run against this endpoint has to show up in the
+        // same counter, or the console reads zero while it happens.
+        //
+        // `admin` is released first: the metrics mutex is a leaf lock and
+        // taking it under `admin` would be the one place in the process where
+        // it is not, which is the property `AppState` claims.
+        drop(admin);
+        state.metrics.record_login_failure();
         return Out::json(401, json!({"error":"unauthorized"}));
     }
     if req_body.new.len() < 8 {
@@ -1033,19 +1159,6 @@ fn do_proxy(state: &AppState, req: &Request, target: &str) -> Out {
     }
 }
 
-fn respond(req: Request, out: Out) {
-    let mut resp = Response::from_data(out.body).with_status_code(out.status);
-    if let Ok(h) = Header::from_bytes(b"Content-Type".as_ref(), out.content_type.as_bytes()) {
-        resp = resp.with_header(h);
-    }
-    for (k, v) in out.extra.iter() {
-        if let Ok(h) = Header::from_bytes(k.as_bytes(), v.as_bytes()) {
-            resp = resp.with_header(h);
-        }
-    }
-    let _ = req.respond(resp);
-}
-
 // ── tiny URL helpers ─────────────────────────────────────────────────────────
 
 fn query_get(query: &str, key: &str) -> Option<String> {
@@ -1137,6 +1250,8 @@ mod tests {
                 is_default: true,
             }),
             config_write: Mutex::new(()),
+            metrics: metrics::Metrics::new(std::env::temp_dir().join("wf-main-tests")),
+            started: Instant::now(),
         }
     }
 

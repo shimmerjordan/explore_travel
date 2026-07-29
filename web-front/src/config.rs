@@ -19,6 +19,11 @@ pub struct Config {
     pub token_ttl_secs: u64,
     pub trust_proxy_header: bool,
     pub workers: usize,
+    /// How often the background sampler appends a point to the metrics ring.
+    /// `metrics.json` is rewritten every `PERSIST_EVERY_SAMPLES` of those, not
+    /// every one -- see metrics.rs. Clamped to
+    /// `[1, MAX_SAMPLE_INTERVAL_SECS]`.
+    pub metrics_interval_secs: u64,
 }
 
 impl Default for Config {
@@ -41,6 +46,11 @@ impl Default for Config {
             token_ttl_secs: 3600,
             trust_proxy_header: false,
             workers: 8,
+            // 60 s pairs with the 1440-point ring for exactly 24 hours of
+            // history -- see metrics.rs. Lower it and the ring covers less
+            // time, and metrics.json is rewritten proportionally more often,
+            // which on a NAS's spinning disk is the cost that matters.
+            metrics_interval_secs: crate::metrics::DEFAULT_SAMPLE_INTERVAL_SECS,
         }
     }
 }
@@ -89,6 +99,21 @@ impl Config {
         if let Ok(v) = env::var("EJ_TRUST_PROXY") {
             cfg.trust_proxy_header = boolish(&v);
         }
+        if let Ok(v) = env::var("EJ_METRICS_INTERVAL_SECS") {
+            match v.parse::<u64>() {
+                Ok(n) => cfg.metrics_interval_secs = n,
+                // Unlike the settings above, a rejected value here is said out
+                // loud. Silently keeping the default is fine for a TTL that
+                // still works; for the sampler it looks identical to a broken
+                // sampler, and the operator's next move ("why is the graph
+                // empty?") is a long one.
+                Err(e) => eprintln!(
+                    "WARN: EJ_METRICS_INTERVAL_SECS={v} is not a number ({e}); \
+                     using {}s",
+                    cfg.metrics_interval_secs
+                ),
+            }
+        }
 
         if cfg.token_ttl_secs == 0 {
             cfg.token_ttl_secs = 3600;
@@ -96,15 +121,37 @@ impl Config {
         if cfg.workers == 0 {
             cfg.workers = 8;
         }
+        // Both ends of this range fail invisibly if left alone, which is why
+        // they are the only settings in this function that log when they bite.
+        // Zero would spin the sampler in a tight loop rewriting the file; a
+        // huge value (`u64::MAX` is what a stray `-1` parses to) would park the
+        // thread forever -- no samples, no `metrics.json`, no log line, and an
+        // operator staring at an empty graph with nothing to go on.
+        if cfg.metrics_interval_secs == 0 {
+            eprintln!(
+                "WARN: EJ_METRICS_INTERVAL_SECS=0 would spin the metrics sampler; using {}s",
+                crate::metrics::DEFAULT_SAMPLE_INTERVAL_SECS
+            );
+            cfg.metrics_interval_secs = crate::metrics::DEFAULT_SAMPLE_INTERVAL_SECS;
+        }
+        if cfg.metrics_interval_secs > crate::metrics::MAX_SAMPLE_INTERVAL_SECS {
+            eprintln!(
+                "WARN: EJ_METRICS_INTERVAL_SECS={} exceeds the {}s maximum; clamped",
+                cfg.metrics_interval_secs,
+                crate::metrics::MAX_SAMPLE_INTERVAL_SECS
+            );
+            cfg.metrics_interval_secs = crate::metrics::MAX_SAMPLE_INTERVAL_SECS;
+        }
         Ok(cfg)
     }
 
     /// Log-safe summary (no secret).
     pub fn redacted(&self) -> String {
         format!(
-            "listen={} dataDir={} webRoot={} proxy={} proxyHosts={:?} tokenTTL={}s workers={}",
+            "listen={} dataDir={} webRoot={} proxy={} proxyHosts={:?} tokenTTL={}s workers={} metricsInterval={}s",
             self.listen, self.data_dir, self.web_root,
-            self.proxy_enabled, self.proxy_allow_hosts, self.token_ttl_secs, self.workers
+            self.proxy_enabled, self.proxy_allow_hosts, self.token_ttl_secs, self.workers,
+            self.metrics_interval_secs
         )
     }
 }
