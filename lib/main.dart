@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'dart:ui';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -134,15 +135,16 @@ class _ExploreJournalAppState extends ConsumerState<ExploreJournalApp> {
     refreshListenable: ref.read(authControllerProvider),
     redirect: (context, state) {
       if (!kIsWeb) return null; // native is never gated
-      final s = ref.read(authStateProvider);
-      if (s.status == AuthStatus.unknown) return null; // still resolving
-      final atLogin = state.matchedLocation == '/login';
-      if (s.status == AuthStatus.loggedOut && !atLogin) return '/login';
-      if (s.status == AuthStatus.loggedIn && atLogin) return '/';
-      return null;
+      // The whole policy lives in webAuthRedirect (unit-tested there): deny
+      // while resolving, and carry the intercepted location through login.
+      return webAuthRedirect(
+          status: ref.read(authStateProvider).status, uri: state.uri);
     },
     routes: [
       GoRoute(path: '/login', builder: (_, __) => const LoginScreen()),
+      // Where `unknown` parks: nothing to query, nothing to render, nothing to
+      // flash. It is unreachable once auth resolves.
+      GoRoute(path: '/splash', builder: (_, __) => const _AuthSplash()),
       GoRoute(path: '/', builder: (_, __) => const MapScreen()),
       GoRoute(path: '/globe', builder: (_, __) => const GlobeScreen()),
       GoRoute(path: '/menu', builder: (_, __) => const HomeScreen()),
@@ -206,48 +208,75 @@ class _ExploreJournalAppState extends ConsumerState<ExploreJournalApp> {
             routerConfig: _router,
             localizationsDelegates: _localizationsDelegates,
             supportedLocales: _supportedLocales,
-            builder: (_, child) => _withDefaultPasswordNotice(child),
+            builder: (_, child) => _withSecurityNotices(child),
           )
         : _buildWithForegroundTask(context);
   }
 
-  /// A console still on `admin/admin` is one open port away from being someone
-  /// else's. The warning rides above every route (not the login screen, which
-  /// the router leaves the instant login succeeds) and can't be dismissed —
-  /// changing the password is what makes it go away.
-  Widget _withDefaultPasswordNotice(Widget? child) {
-    if (!ref.watch(defaultPasswordWarningProvider)) {
-      return child ?? const SizedBox.shrink();
-    }
+  /// Standing security notices above every route.
+  ///
+  ///  * A console still on `admin/admin` is one open port away from being
+  ///    someone else's, and changing the password is what makes that one go
+  ///    away — so it can't be dismissed.
+  ///  * A logout the server never confirmed leaves a live session (and a live
+  ///    `ej_session` cookie) behind; on a shared browser the user needs to
+  ///    know that "back at the login page" wasn't the whole story.
+  ///
+  /// Both ride the router's `builder:`, not the login screen — the router
+  /// leaves that the instant login succeeds, so anything drawn there would
+  /// flash past unread. See [defaultPasswordWarningProvider] for why this is
+  /// wired on web only today.
+  Widget _withSecurityNotices(Widget? child) {
+    final body = child ?? const SizedBox.shrink();
+    final bars = <Widget>[
+      if (ref.watch(defaultPasswordWarningProvider))
+        _noticeBar('仍在使用默认密码 admin/admin，请尽快修改'),
+      if (ref.watch(logoutNoticeProvider) case final t?) _noticeBar(t),
+    ];
+    if (bars.isEmpty) return body;
     return Column(
       children: [
-        Material(
-          color: const Color(0xFF8C1D18),
-          child: SafeArea(
-            bottom: false,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              child: Row(
-                children: [
-                  const Icon(Icons.warning_amber_rounded,
-                      size: 18, color: Colors.white),
-                  const SizedBox(width: 8),
-                  const Expanded(
-                    child: Text(
-                      '仍在使用默认密码 admin/admin，请尽快修改',
-                      style: TextStyle(color: Colors.white, fontSize: 13),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-        Expanded(child: child ?? const SizedBox.shrink()),
+        // ONE SafeArea for the whole stack — each bar adding its own would
+        // inset the status bar height per bar.
+        SafeArea(bottom: false, child: Column(children: bars)),
+        // The bars eat real height and real top inset. Without rewriting the
+        // MediaQuery, everything below is told it has the FULL window height
+        // (~37px more than it got) and still has an unconsumed status-bar
+        // inset — which is how the companion card, sized as
+        // `size.height - padding.top - 56 - 136`, ran off the bottom of a
+        // narrow window.
+        Expanded(child: ShrunkMediaQuery(child: body)),
       ],
     );
   }
 
+  Widget _noticeBar(String text) => Material(
+        color: const Color(0xFF8C1D18),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          child: Row(
+            children: [
+              const Icon(Icons.warning_amber_rounded,
+                  size: 18, color: Colors.white),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  text,
+                  style: const TextStyle(color: Colors.white, fontSize: 13),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+
+  // NOTE (deliberate gap): the native shell has NO `builder:`, so
+  // `_withSecurityNotices` never runs on a phone — `defaultPasswordWarningProvider`
+  // and `logoutNoticeProvider` are set by AuthController there and silently not
+  // rendered. That is only acceptable while the native login screen is
+  // unreachable (no entry point exists yet). When that entry point lands, add
+  // `builder: (_, child) => _withSecurityNotices(child)` to the
+  // MaterialApp.router below — that one line is the whole fix.
   Widget _buildWithForegroundTask(BuildContext context) {
     return platform.wrapWithForegroundTask(
       child: MaterialApp.router(
@@ -437,4 +466,58 @@ class _ExploreJournalAppState extends ConsumerState<ExploreJournalApp> {
 
   static final _lightTheme = _buildTheme(Brightness.light);
   static final _darkTheme = _buildTheme(Brightness.dark);
+}
+
+/// Re-states the `MediaQuery` to match the box the child was actually given.
+///
+/// `MaterialApp.builder` can shrink the Navigator (we put notice bars above it)
+/// but it cannot shrink `MediaQuery`: the child keeps reading the full window
+/// height and the full `padding.top`, even though the bar above already ate
+/// both. Anything doing its own arithmetic off `size.height` / `padding.top` —
+/// e.g. the map's companion card — then overflows by exactly the bar's height.
+///
+/// Public so a widget test can pin the rewrite without pumping the whole app.
+class ShrunkMediaQuery extends StatelessWidget {
+  final Widget child;
+  const ShrunkMediaQuery({super.key, required this.child});
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+        builder: (ctx, c) {
+          final mq = MediaQuery.of(ctx);
+          if (!c.hasBoundedHeight) return child;
+          // What the bars above consumed, top padding included (they wrap
+          // themselves in the SafeArea, so the child needs none of it left).
+          final eaten = math.max(0.0, mq.size.height - c.maxHeight);
+          if (eaten == 0) return child;
+          double inset(double v) => math.max(0.0, v - eaten);
+          return MediaQuery(
+            data: mq.copyWith(
+              size: Size(mq.size.width, c.maxHeight),
+              padding: mq.padding.copyWith(top: inset(mq.padding.top)),
+              viewPadding:
+                  mq.viewPadding.copyWith(top: inset(mq.viewPadding.top)),
+            ),
+            child: child,
+          );
+        },
+      );
+}
+
+/// Shown while the web gate is still deciding. Deliberately inert — no DB
+/// reads, no tiles, nothing that would have to be thrown away when the answer
+/// turns out to be `/login`.
+class _AuthSplash extends StatelessWidget {
+  const _AuthSplash();
+
+  @override
+  Widget build(BuildContext context) => const Scaffold(
+        body: Center(
+          child: SizedBox(
+            width: 28,
+            height: 28,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
+        ),
+      );
 }

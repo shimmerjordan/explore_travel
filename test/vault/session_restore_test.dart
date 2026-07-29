@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter/services.dart' show MissingPluginException;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -91,6 +92,72 @@ void main() {
           reason: 'the derived key must not be left in localStorage forever');
       expect(p.getString('nas_web_session_v1'), isNull);
     });
+
+    // The purge lives on all THREE store operations, and the first thing a
+    // fresh web login does is write() — a read()-only purge would leave the
+    // derived key in place for anyone who logs in before they refresh.
+    test('write() also DELETES the pre-console record', () async {
+      SharedPreferences.setMockInitialValues({
+        'nas_web_session_v1': jsonEncode({
+          'token': 'old-jwt',
+          'vaultKey': base64.encode(List.filled(32, 9)),
+        }),
+      });
+
+      await PrefsAdminSessionStore().write(_session());
+
+      final p = await SharedPreferences.getInstance();
+      expect(p.containsKey('nas_web_session_v1'), isFalse);
+      expect(p.containsKey('ej_admin_session_v1'), isTrue,
+          reason: 'the new record must still have been written');
+    });
+
+    test('clear() also DELETES the pre-console record', () async {
+      SharedPreferences.setMockInitialValues({
+        'ej_admin_session_v1': jsonEncode(_session().toJson()),
+        'nas_web_session_v1': jsonEncode({
+          'token': 'old-jwt',
+          'vaultKey': base64.encode(List.filled(32, 9)),
+        }),
+      });
+
+      await PrefsAdminSessionStore().clear();
+
+      final p = await SharedPreferences.getInstance();
+      expect(p.containsKey('nas_web_session_v1'), isFalse);
+      expect(p.containsKey('ej_admin_session_v1'), isFalse);
+    });
+
+    group('the retired NATIVE keychain token （F8）', () {
+      test('is deleted on the first store operation, once per instance',
+          () async {
+        final deleted = <String>[];
+        final store = PrefsAdminSessionStore(
+            legacyKeychainDelete: (k) async => deleted.add(k));
+
+        await store.read();
+        await store.write(_session());
+        await store.clear();
+
+        expect(deleted, ['nas_session_token'],
+            reason: 'the dead bearer token must go, but only one keychain '
+                'round-trip per process');
+      });
+
+      test('a platform without secure_storage does not break the session store',
+          () async {
+        // `flutter test` has no secure_storage impl at all — the delete throws
+        // MissingPluginException. Wiping waste paper must never fail a login.
+        final store = PrefsAdminSessionStore(
+            legacyKeychainDelete: (_) async =>
+                throw MissingPluginException('no impl'));
+
+        await store.write(_session());
+        final back = await store.read();
+
+        expect(back?.token, 'session-token');
+      });
+    });
   });
 
   group('ConfigSyncController.restoreSession（刷新后静默恢复）', () {
@@ -152,6 +219,49 @@ void main() {
       expect(ctrl.isLoggedIn, isFalse);
       expect(store.session, isNull,
           reason: 'a dead session must not retrigger on every refresh');
+    });
+
+    // ── F1：只有 401 才算「未登录」 ────────────────────────────────────
+    // Reloading the page right after restarting the NAS container is the most
+    // common way this request fails, and the token is perfectly good when it
+    // does. Deleting the record there costs the user their password.
+    for (final (label, err) in <(String, Object)>[
+      ('an unreachable console (container restarting / wifi blip)',
+          const AdminConfigException(0, '无法连接到服务器：连接被拒绝或网络不可达')),
+      ('a server-side 500 (the password-change window)',
+          const AdminConfigException(500, '读取配置失败（HTTP 500）')),
+      ('a TLS/DNS style failure with no status at all',
+          const AdminConfigException(0, '无法连接到服务器：证书不被信任')),
+      ('anything unexpected on the way through', StateError('boom')),
+    ]) {
+      test('$label → false but the stored session SURVIVES', () async {
+        store.session = _session();
+        client = _FakeClient(fetchError: err);
+        await build();
+
+        expect(await ctrl.restoreSession(), isFalse,
+            reason: 'we did not manage to resume');
+        expect(ctrl.isLoggedIn, isFalse,
+            reason: 'an unvalidated token must not count as a live session');
+        expect(store.session, isNotNull,
+            reason: 'the token is probably still valid — the NEXT refresh '
+                'must be able to resume instead of demanding the password');
+        expect(store.session!.token, 'session-token');
+      });
+    }
+
+    test('a transient failure then a working server resumes on the retry',
+        () async {
+      // The whole point of keeping the record: the second attempt works.
+      store.session = _session();
+      client = _FakeClient(
+          fetchError: const AdminConfigException(0, '无法连接到服务器'));
+      await build();
+      expect(await ctrl.restoreSession(), isFalse);
+
+      client = _FakeClient(); // console is back
+      expect(await ctrl.restoreSession(), isTrue);
+      expect(ctrl.isLoggedIn, isTrue);
     });
   });
 

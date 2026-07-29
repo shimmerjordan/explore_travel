@@ -11,6 +11,22 @@ import 'admin_config_client.dart';
 import 'admin_session_store.dart';
 import 'config_payload.dart';
 
+/// What [ConfigSyncController.logout] actually managed to do.
+///
+/// Logging out never fails locally, so this is not an error channel — it is the
+/// one bit of truth the UI needs in order to stop lying to the user.
+class LogoutOutcome {
+  /// True when the console confirmed `DELETE /api/session`.
+  ///
+  /// False means the server-side session is still alive until its sliding TTL
+  /// expires — and in a browser so is the `ej_session` cookie, which the server
+  /// treats as bearer-equivalent. On a shared machine that is the difference
+  /// between "logged out" and "the next person can GET /api/config and read
+  /// every credential in it", so it has to be surfaced, not just logged.
+  final bool serverNotified;
+  const LogoutOutcome({required this.serverNotified});
+}
+
 /// Keeps the roaming settings config in step with the console server: log in,
 /// pull the stored config down onto local settings (local-first overlay), and —
 /// on the phone — push local edits back up.
@@ -110,9 +126,15 @@ class ConfigSyncController {
   }
 
   /// Silently resume a previously persisted session (web refresh). Returns
-  /// true when the stored token is still accepted by the server; any failure
-  /// (expired token, unreachable server, corrupt record) clears the session and
-  /// returns false so the router falls back to the login page.
+  /// true when the stored token is still accepted by the server.
+  ///
+  /// **Only a 401 discards the stored record.** Everything else — a NAS
+  /// container mid-restart, a dropped wifi association, a DNS or TLS hiccup,
+  /// even a server-side 500 — leaves the record in place and just reports "not
+  /// resumed", so the very next refresh can try again. Treating those as "not
+  /// logged in" (which is what a bare `catch` did) deleted a perfectly valid
+  /// token at the single most likely moment for the request to fail: the user
+  /// reloading the page right after restarting the console.
   Future<bool> restoreSession() async {
     final s = await _sessionStore.read();
     if (s == null) return false;
@@ -128,23 +150,47 @@ class ConfigSyncController {
             .update((p) => p.copyWith(nasServerUrl: s.baseUrl));
       }
       return true;
+    } on AdminAuthException catch (e) {
+      debugPrint('[ConfigSync] stored session rejected (401), dropping it: $e');
+      await _forgetSession();
+      return false;
     } catch (e) {
-      debugPrint('[ConfigSync] session restore failed: $e');
-      await logout();
+      // Transport-level: the token may well still be good. Drop the in-memory
+      // half only, KEEP the persisted record.
+      debugPrint('[ConfigSync] session restore deferred, record kept: $e');
+      _debounce?.cancel();
+      _token = null;
+      _client = null;
+      _lastPushedHash = null;
       return false;
     }
   }
 
   /// PUT the current settings subset. No-op if not logged in, or if the config
   /// is byte-identical to the last push.
+  ///
+  /// A 401 here means the session died while nothing was using it (the TTL
+  /// slides only on use, and a console restart invalidates every session), so
+  /// it drops the session instead of logging and carrying on. The phone only
+  /// touches the API when a config field actually changes, so "log it and keep
+  /// `isLoggedIn` true" meant one idle day turned the device into a client that
+  /// silently never published again. The exception is still rethrown — the
+  /// caller decides whether that is worth showing.
   Future<bool> pushNow({bool force = false}) async {
     final client = _client;
     final token = _token;
     if (client == null || token == null) return false;
     final cfg = ConfigPayload.extract(ref.read(settingsProvider)).toJson();
-    final hash = _hash(cfg);
+    final hash = configDigest(cfg);
     if (!force && hash == _lastPushedHash) return false;
-    await client.push(token, cfg);
+    try {
+      await client.push(token, cfg);
+    } on AdminAuthException catch (e) {
+      debugPrint('[ConfigSync] push rejected (401) — session dropped, '
+          're-login required: $e');
+      await _forgetSession();
+      rethrow;
+    }
     _lastPushedHash = hash;
     return true;
   }
@@ -161,39 +207,68 @@ class ConfigSyncController {
     _applyingRemote = true;
     try {
       await ref.read(settingsProvider.notifier).update(payload.applyTo);
+    } catch (e) {
+      // A config we can't read must not be a config we can't LOG IN past.
+      // [ConfigPayload.applyTo] already type-filters the fields it knows; this
+      // is the backstop for whatever it doesn't — the alternative is a Dart
+      // type error on the login screen with correct credentials and no
+      // client-side way to repair the stored config.
+      debugPrint('[ConfigSync] stored config could not be applied, '
+          'continuing with local settings: $e');
     } finally {
       _applyingRemote = false;
     }
     // Reflect what the server holds so the apply-triggered listener doesn't
     // immediately push the same content back.
-    _lastPushedHash = _hash(cfg);
+    _lastPushedHash = configDigest(cfg);
   }
 
   /// Clear the session. Does NOT touch local data (local-first) — only the
-  /// token and the persisted web session record. The server-side session is
-  /// dropped too, best-effort: a console we can't reach expires it on its own
-  /// TTL, and that must not make logging out fail.
-  Future<void> logout() async {
+  /// token and the persisted web session record.
+  ///
+  /// Never throws: the local half has already happened by the time the network
+  /// call runs, and a console we can't reach expires the session on its own
+  /// TTL. But the caller is told whether the server was actually notified (see
+  /// [LogoutOutcome.serverNotified]) — one retry first, because the common
+  /// cause is a single dropped request rather than a down server.
+  Future<LogoutOutcome> logout() async {
     final client = _client;
     final token = _token;
+    await _forgetSession();
+    if (client == null || token == null) {
+      return const LogoutOutcome(serverNotified: true); // nothing to notify
+    }
+    for (var attempt = 1; attempt <= 2; attempt++) {
+      try {
+        await client.logout(token);
+        return const LogoutOutcome(serverNotified: true);
+      } catch (e) {
+        debugPrint('[ConfigSync] server-side logout failed '
+            '(attempt $attempt/2): $e');
+        if (attempt == 1) {
+          await Future<void>.delayed(const Duration(milliseconds: 400));
+        }
+      }
+    }
+    return const LogoutOutcome(serverNotified: false);
+  }
+
+  /// Forget everything that makes this controller "logged in", including the
+  /// persisted web record. Local-only — never talks to the server.
+  Future<void> _forgetSession() async {
     _debounce?.cancel();
     _token = null;
     _lastPushedHash = null;
     _client = null;
     await _sessionStore.clear();
-    if (client != null && token != null) {
-      try {
-        await client.logout(token);
-      } catch (e) {
-        debugPrint('[ConfigSync] server-side logout failed: $e');
-      }
-    }
   }
 
   void _schedulePush() {
     if (_applyingRemote || !isLoggedIn) return;
     _debounce?.cancel();
     _debounce = Timer(_debounceWindow, () {
+      // A 401 has already dropped the session inside pushNow, so this logs the
+      // last failure rather than the first of an endless silent series.
       pushNow().catchError((e) {
         debugPrint('[ConfigSync] auto-push failed: $e');
         return false;
@@ -205,9 +280,27 @@ class ConfigSyncController {
 
   /// Key-order-independent digest, so a pull followed by an identical
   /// re-extract dedupes instead of round-tripping the same config forever.
-  static String _hash(Map<String, dynamic> cfg) {
-    final keys = cfg.keys.toList()..sort();
-    final canonical = jsonEncode({for (final k in keys) k: cfg[k]});
-    return md5.convert(utf8.encode(canonical)).toString();
+  ///
+  /// Canonicalization is RECURSIVE. Sorting only the top level was enough by
+  /// accident — the console stores the raw request bytes and hands them back
+  /// verbatim, so nested key order round-trips today. The moment it parses into
+  /// a `serde_json::Value` and re-serializes (which sorts keys), a nested
+  /// reorder would change the digest and the dedupe would quietly stop working:
+  /// every launch re-uploading a byte-identical config forever.
+  static String configDigest(Map<String, dynamic> cfg) =>
+      md5.convert(utf8.encode(jsonEncode(_canonical(cfg)))).toString();
+
+  /// Maps sorted by key at every depth; lists keep their order (in a JSON
+  /// config, list order IS content).
+  static Object? _canonical(Object? v) {
+    if (v is Map) {
+      final entries = v.entries.toList()
+        ..sort((a, b) => a.key.toString().compareTo(b.key.toString()));
+      return <String, Object?>{
+        for (final e in entries) e.key.toString(): _canonical(e.value),
+      };
+    }
+    if (v is List) return v.map(_canonical).toList();
+    return v;
   }
 }

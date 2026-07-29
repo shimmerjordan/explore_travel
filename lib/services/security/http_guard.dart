@@ -1,5 +1,24 @@
 import 'package:dio/dio.dart';
 
+/// Why [HttpGuardInterceptor] rejected a request, as a TYPE rather than a bare
+/// string.
+///
+/// The guard's diagnostic used to travel only as `DioException.error`'s
+/// stringified form, which left callers with two bad options: show the English
+/// sentence to the user, or pattern-match on its wording. Neither survived
+/// contact with a Chinese UI, so the reason is a class now — callers switch on
+/// the type and phrase it themselves, while [toString] keeps the original
+/// developer-facing wording for logs.
+class CleartextRefusedError {
+  /// The public host the request was aimed at.
+  final String host;
+  const CleartextRefusedError(this.host);
+
+  @override
+  String toString() => 'Refused: cleartext HTTP to public host "$host". '
+      'Use https:// or point at a private LAN address.';
+}
+
 /// Dio interceptor that **refuses cleartext HTTP to non-private hosts**.
 ///
 /// Android's `network_security_config.xml` can't whitelist IP ranges,
@@ -41,9 +60,7 @@ class HttpGuardInterceptor extends Interceptor {
         DioException(
           requestOptions: options,
           type: DioExceptionType.badResponse,
-          error:
-              'Refused: cleartext HTTP to public host "${uri.host}". '
-              'Use https:// or point at a private LAN address.',
+          error: CleartextRefusedError(uri.host),
         ),
         true,
       );

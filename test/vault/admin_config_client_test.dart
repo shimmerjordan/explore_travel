@@ -179,12 +179,142 @@ void main() {
     });
   });
 
-  test('logout swallows a failing DELETE — the local session is already gone',
-      () async {
-    final rig = _rig('', (o) {
-      throw DioException.connectionError(requestOptions: o, reason: 'down');
+  group('logout', () {
+    test('a failing DELETE SURFACES so the caller can warn （F7）', () async {
+      // The server treats its ej_session cookie as bearer-equivalent and this
+      // DELETE is the only thing that expires it. Swallowing the failure here
+      // (as this used to) is what left a live session on a shared browser with
+      // nothing on screen to say so. ConfigSyncController.logout still doesn't
+      // FAIL — it catches this and reports serverNotified: false.
+      final rig = _rig('', (o) {
+        throw DioException.connectionError(requestOptions: o, reason: 'down');
+      });
+      await expectLater(
+        rig.client.logout('tok'),
+        throwsA(isA<AdminConfigException>()
+            .having((e) => e.message, 'message', contains('无法连接到服务器'))),
+      );
+      expect(rig.adapter.uris, ['/api/session']);
     });
-    await rig.client.logout('tok'); // must not throw
-    expect(rig.adapter.uris, ['/api/session']);
+
+    test('a 401 is NOT a failure — the session is already gone', () async {
+      final rig = _rig('', (_) => _json(401, {'error': 'unauthorized'}));
+      await rig.client.logout('stale'); // must not throw
+    });
+  });
+
+  group('error copy the user actually reads', () {
+    test('the cleartext guard\'s reason reaches the user, translated （F3）',
+        () async {
+      // `http://synology:5000` — a bare hostname is not private, so the guard
+      // rejects it with the diagnostic in DioException.error and a NULL
+      // message. Reading only `message` turned all of this into
+      // "无法连接到服务器：登录失败".
+      final rig = _rig('http://synology:5000', (_) => _json(200, {}));
+      Object? caught;
+      try {
+        await rig.client.login('admin', 'pw');
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught, isA<AdminConfigException>());
+      final msg = (caught! as AdminConfigException).message;
+      expect(msg, contains('synology'), reason: 'name the host at fault');
+      expect(msg, contains('https://'));
+      expect(msg, contains('局域网'), reason: 'and what to do instead');
+      expect(msg, isNot(contains('登录失败')),
+          reason: 'the real reason must not be replaced by the fallback');
+      expect(msg, isNot(contains('Refused')), reason: 'no English at the user');
+      // ignore: avoid_print
+      print('CLEARTEXT → $msg');
+    });
+
+    test('429 becomes a wait instruction and carries Retry-After （F4）',
+        () async {
+      final rig = _rig(
+          '',
+          (_) => ResponseBody.fromString(
+                jsonEncode({'error': 'rate limited'}),
+                429,
+                headers: {
+                  Headers.contentTypeHeader: ['application/json'],
+                  'retry-after': ['60'],
+                },
+              ));
+      Object? caught;
+      try {
+        await rig.client.login('admin', 'pw');
+      } catch (e) {
+        caught = e;
+      }
+      final e = caught! as AdminConfigException;
+      expect(e.statusCode, 429);
+      expect(e.retryAfterSeconds, 60);
+      expect(e.message, '操作过于频繁，请 60 秒后再试');
+      expect(e.message, isNot(contains('rate limited')),
+          reason: 'English + no wait time is what made users keep retrying');
+      // ignore: avoid_print
+      print('429 → ${e.message}');
+    });
+
+    test('a connect timeout does not hand dio\'s tuning advice to the user',
+        () async {
+      final rig = _rig('http://192.168.1.9:48080', (o) {
+        throw DioException.connectionTimeout(
+            timeout: const Duration(seconds: 15), requestOptions: o);
+      });
+      Object? caught;
+      try {
+        await rig.client.login('admin', 'pw');
+      } catch (e) {
+        caught = e;
+      }
+      final msg = (caught! as AdminConfigException).message;
+      expect(msg, '无法连接到服务器：连接超时，请确认地址与端口正确、设备与服务在同一网络');
+      expect(msg, isNot(contains('connectTimeout')));
+      expect(msg, isNot(contains('RequestOptions')));
+      // ignore: avoid_print
+      print('TIMEOUT → $msg');
+    });
+
+    test('a self-signed certificate reads as a certificate problem', () async {
+      final rig = _rig('https://nas.example.com', (o) {
+        throw DioException(
+          requestOptions: o,
+          type: DioExceptionType.badCertificate,
+          message: 'The certificate of the response is not approved.',
+        );
+      });
+      Object? caught;
+      try {
+        await rig.client.fetch('tok');
+      } catch (e) {
+        caught = e;
+      }
+      final msg = (caught! as AdminConfigException).message;
+      expect(msg, contains('证书'));
+      expect(msg, isNot(contains('certificate')));
+      // ignore: avoid_print
+      print('BAD CERT → $msg');
+    });
+
+    test('a reason that only exists in `error` is not dropped', () async {
+      // dio leaves `message` null whenever it wraps a non-Dio throw, so
+      // `e.message ?? e.error ?? fallback` is the whole point.
+      final rig = _rig('', (o) {
+        throw DioException(
+            requestOptions: o,
+            type: DioExceptionType.unknown,
+            error: 'SocketException: host lookup failed');
+      });
+      Object? caught;
+      try {
+        await rig.client.fetch('tok');
+      } catch (e) {
+        caught = e;
+      }
+      expect((caught! as AdminConfigException).message,
+          contains('host lookup failed'));
+    });
   });
 }

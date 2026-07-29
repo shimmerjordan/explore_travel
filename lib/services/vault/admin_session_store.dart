@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// A resumable console login: just where the server is and the bearer token it
@@ -53,6 +54,32 @@ class PrefsAdminSessionStore implements AdminSessionStore {
   /// never be half-parsed into a session either.
   static const _legacyKey = 'nas_web_session_v1';
 
+  /// The pre-console NATIVE token, written by the retired
+  /// `SecureNasTokenStore` into the platform keychain. The `/auth/*` endpoints
+  /// it authenticated no longer exist, so the value is waste paper — but it is
+  /// still bearer-equivalent material sitting in a store nobody reads any
+  /// more, and the same reasoning that wipes [_legacyKey] applies. Deleted
+  /// once per process on the first store operation.
+  static const _legacyKeychainKey = 'nas_session_token';
+
+  /// Matches the retired store's options, so the delete lands in the same
+  /// EncryptedSharedPreferences file the token was written to.
+  static const _keychainOpts = AndroidOptions(encryptedSharedPreferences: true);
+
+  /// Injectable so a test can observe the purge; production deletes from the
+  /// platform keychain.
+  final Future<void> Function(String key) _legacyKeychainDelete;
+
+  PrefsAdminSessionStore({Future<void> Function(String key)? legacyKeychainDelete})
+      : _legacyKeychainDelete = legacyKeychainDelete ?? _deleteFromKeychain;
+
+  static Future<void> _deleteFromKeychain(String key) =>
+      const FlutterSecureStorage(aOptions: _keychainOpts).delete(key: key);
+
+  /// Once per process — the keychain round-trip is not free and the value can
+  /// only come back if an old build writes it again.
+  bool _keychainPurged = false;
+
   @override
   Future<AdminSession?> read() async {
     try {
@@ -91,6 +118,16 @@ class PrefsAdminSessionStore implements AdminSessionStore {
 
   Future<void> _purgeLegacy(SharedPreferences p) async {
     if (p.containsKey(_legacyKey)) await p.remove(_legacyKey);
+    if (_keychainPurged) return;
+    _keychainPurged = true;
+    try {
+      await _legacyKeychainDelete(_legacyKeychainKey);
+    } catch (e) {
+      // No secure_storage platform impl under `flutter test` (and none on some
+      // desktop targets) — that throws MissingPluginException. Wiping a dead
+      // token is housekeeping; it must never break a login or a refresh.
+      debugPrint('[AdminSessionStore] legacy keychain purge skipped: $e');
+    }
   }
 }
 
