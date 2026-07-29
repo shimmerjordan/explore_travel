@@ -11,13 +11,12 @@ services:
     ports:
       - "48080:48080"
     volumes:
-      # WHERE THE DATA LIVES — one variable, two modes. Holds ej.db, i.e. all
-      # your vault ciphertext. (Don't confuse this with EJ_DB_PATH below: that
-      # one is the path INSIDE the container and normally needs no change.)
+      # WHERE THE DATA LIVES — one variable, two modes. Holds admin.json (and,
+      # from Task 8 onward, the encrypted config blob).
       #
       #   unset (default) → resolves to `ejdata`, a Docker NAMED volume.
       #     Zero host setup: a named volume inherits the image's nonroot-owned
-      #     /data, so the DB is writable out of the box.
+      #     /data, so it's writable out of the box.
       #
       #   set to an absolute path → bind mount, data sits in your own directory
       #     (the usual choice on a NAS, so it lands on the big disk and gets
@@ -30,18 +29,12 @@ services:
       #       sudo mkdir -p /volume1/docker/web-front/data
       #       sudo chown -R 65532:65532 /volume1/docker/web-front/data
       #
-      # Local filesystem only — never point this at NFS/SMB: SQLite's WAL and
-      # POSIX locks are unreliable on network mounts and will corrupt the DB.
+      # Local filesystem only — never point this at NFS/SMB: unreliable POSIX
+      # locking on network mounts risks corrupting the on-disk files.
       - "${EJ_DATA_PATH:-ejdata}:/data"
     environment:
-      # REQUIRED, >= 32 bytes. Generate once: `openssl rand -base64 48`.
-      EJ_JWT_SECRET: "${EJ_JWT_SECRET:?set EJ_JWT_SECRET in a .env file}"
       EJ_LISTEN: "0.0.0.0:48080"
-      EJ_DB_PATH: "/data/ej.db"
-      # Exact origins of your deployed Flutter web build (comma-separated).
-      EJ_CORS_ORIGINS: "${EJ_CORS_ORIGINS:-}"
-      # Close registration after you've created your account.
-      EJ_ALLOW_REGISTRATION: "${EJ_ALLOW_REGISTRATION:-true}"
+      EJ_DATA_DIR: "/data"
       # Read proxy for private images / CORS-less hosts (off by default).
       EJ_PROXY_ENABLED: "${EJ_PROXY_ENABLED:-false}"
       EJ_PROXY_ALLOW_HOSTS: "${EJ_PROXY_ALLOW_HOSTS:-}"

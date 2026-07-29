@@ -2,26 +2,35 @@ mod admin_file;
 mod auth;
 mod config;
 mod proxy;
+mod session;
 
+use admin_file::AdminFile;
 use config::Config;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::Read;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use tiny_http::{Header, Method, Request, Response, Server};
 
-const MAX_AUTH_BODY: u64 = 8 << 10; // 8 KiB
-const MAX_VAULT_BODY: u64 = 256 << 10; // 256 KiB — kept for Task 8's payload-cap config reuse
+// Only /api/* routes carry a request body today (POST /api/session, PUT
+// /api/password), and both payloads are small JSON objects -- proxy routes
+// are GET-only. Task 8's config storage may introduce its own, larger cap
+// when it adds a body-carrying config endpoint.
+const MAX_API_BODY: u64 = 8 << 10; // 8 KiB
 
 struct AppState {
     cfg: Config,
     limiter: Mutex<HashMap<String, (Instant, u32)>>,
     agent: ureq::Agent,
+    sessions: session::Sessions,
+    admin: Mutex<AdminFile>,
 }
 
-/// A fully-formed response, before CORS headers are layered on.
+/// A fully-formed response.
 struct Out {
     status: u16,
     content_type: String,
@@ -60,11 +69,28 @@ fn main() {
             std::process::exit(1);
         }
     };
-    println!("explore_journal NAS backend — {}", cfg.redacted());
+    println!("explore_journal web-front — {}", cfg.redacted());
 
     let listen = cfg.listen.clone();
     let workers = cfg.workers;
+
+    let data_dir = std::path::PathBuf::from(&cfg.data_dir);
+    if let Err(e) = std::fs::create_dir_all(&data_dir) {
+        eprintln!("failed to create data dir {}: {e}", data_dir.display());
+        std::process::exit(1);
+    }
+    let admin = match admin_file::load_or_init(&data_dir) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("admin file error: {e}");
+            std::process::exit(1);
+        }
+    };
+    let sessions = session::Sessions::new(cfg.token_ttl_secs);
+
     let state = Arc::new(AppState {
+        sessions,
+        admin: Mutex::new(admin),
         cfg,
         limiter: Mutex::new(HashMap::new()),
         agent: proxy::safe_agent(),
@@ -102,6 +128,36 @@ fn header(req: &Request, name: &str) -> Option<String> {
         .map(|h| h.value.as_str().to_string())
 }
 
+/// Extract the session token from a request: `Authorization: Bearer <token>`
+/// takes priority (native/mobile clients), falling back to the `ej_session`
+/// cookie (the browser client).
+fn session_token(req: &Request) -> Option<String> {
+    if let Some(auth) = header(req, "Authorization") {
+        if let Some(tok) = auth.strip_prefix("Bearer ") {
+            let tok = tok.trim();
+            if !tok.is_empty() {
+                return Some(tok.to_string());
+            }
+        }
+    }
+    if let Some(cookie) = header(req, "Cookie") {
+        for part in cookie.split(';') {
+            if let Some(v) = part.trim().strip_prefix("ej_session=") {
+                if !v.is_empty() {
+                    return Some(v.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn has_valid_session(state: &AppState, req: &Request) -> bool {
+    session_token(req)
+        .map(|t| state.sessions.get_key(&t).is_some())
+        .unwrap_or(false)
+}
+
 fn client_ip(state: &AppState, req: &Request) -> String {
     if state.cfg.trust_proxy_header {
         if let Some(xff) = header(req, "X-Forwarded-For") {
@@ -113,10 +169,16 @@ fn client_ip(state: &AppState, req: &Request) -> String {
         .unwrap_or_default()
 }
 
-fn allow(state: &AppState, ip: &str, limit: u32) -> bool {
+/// Rate limit `ip` within `bucket`. `bucket` keeps the counter for `/api/*`
+/// (tight cap, brute-force resistance on the credential checks) separate
+/// from the counter for everything else (looser cap) -- sharing one counter
+/// across both would let a burst of ordinary requests exhaust the `/api/*`
+/// budget and lock the admin out of logging in.
+fn allow(state: &AppState, ip: &str, bucket: &str, limit: u32) -> bool {
     let mut m = state.limiter.lock().unwrap();
     let now = Instant::now();
-    let e = m.entry(ip.to_string()).or_insert((now, 0));
+    let key = format!("{ip}|{bucket}");
+    let e = m.entry(key).or_insert((now, 0));
     if now.duration_since(e.0) > Duration::from_secs(60) {
         *e = (now, 1);
         return true;
@@ -128,31 +190,12 @@ fn allow(state: &AppState, ip: &str, limit: u32) -> bool {
     true
 }
 
-fn cors_for(state: &AppState, origin: &Option<String>) -> Vec<(String, String)> {
-    let mut v = Vec::new();
-    if let Some(o) = origin {
-        if state.cfg.cors_origins.iter().any(|a| a == o) {
-            // Exact-origin echo only — never "*", never a prefix match.
-            v.push(("Access-Control-Allow-Origin".into(), o.clone()));
-            v.push(("Vary".into(), "Origin".into()));
-            v.push(("Access-Control-Allow-Methods".into(), "GET,POST,PUT,OPTIONS".into()));
-            v.push((
-                "Access-Control-Allow-Headers".into(),
-                "Authorization,Content-Type,If-Match,If-None-Match,X-Upstream-Authorization".into(),
-            ));
-            v.push(("Access-Control-Expose-Headers".into(), "ETag".into()));
-            v.push(("Access-Control-Max-Age".into(), "600".into()));
-        }
-    }
-    v
-}
-
 fn serve(state: &AppState, mut req: Request) {
     let method = match req.method() {
         Method::Get => "GET",
         Method::Post => "POST",
         Method::Put => "PUT",
-        Method::Options => "OPTIONS",
+        Method::Delete => "DELETE",
         _ => "OTHER",
     }
     .to_string();
@@ -162,106 +205,185 @@ fn serve(state: &AppState, mut req: Request) {
         Some((p, q)) => (p.to_string(), q.to_string()),
         None => (raw_url.clone(), String::new()),
     };
-    let origin = header(&req, "Origin");
-    let upstream_auth = header(&req, "X-Upstream-Authorization");
-    let accept = header(&req, "Accept");
     let ip = client_ip(state, &req);
 
-    let cors = cors_for(state, &origin);
-
-    // Preflight: answer OPTIONS before anything else. Logged so `docker logs`
-    // shows whether the browser's CORS preflight is even reaching us, and
-    // whether the Origin matched (corsOk).
-    if method == "OPTIONS" {
-        let cors_ok = !cors.is_empty();
-        log_access(&ip, &method, &path, 204, &origin, cors_ok);
-        respond(req, Out::bytes(204, "text/plain", Vec::new()), &cors);
-        return;
-    }
-
-    // Rate limit (auth endpoints are tighter).
-    let limit = if path.starts_with("/auth/") { 10 } else { 60 };
-    if !allow(state, &ip, limit) {
-        log_access(&ip, &method, &path, 429, &origin, !cors.is_empty());
+    // /api/* (login, logout, password change) gets its own, tighter-capped
+    // counter -- brute-force resistance on the credential checks -- kept
+    // separate from the general-route counter (see `allow`'s doc comment).
+    let (bucket, limit) = if path.starts_with("/api/") { ("api", 10) } else { ("other", 60) };
+    if !allow(state, &ip, bucket, limit) {
+        log_access(&ip, &method, &path, 429);
         let out = Out::json(429, json!({"error":"rate limited"})).with("Retry-After", "60");
-        respond(req, out, &cors);
+        respond(req, out);
         return;
     }
 
-    // Read the body (capped) for methods that carry one.
-    let max_body = if path == "/vault" { MAX_VAULT_BODY } else { MAX_AUTH_BODY };
+    // Read the body (capped) for methods that carry one. Today that's only
+    // POST /api/session and PUT /api/password; both fit comfortably under
+    // MAX_API_BODY.
     let mut body = Vec::new();
     if method == "POST" || method == "PUT" {
-        let _ = req.as_reader().take(max_body + 1).read_to_end(&mut body);
-        if body.len() as u64 > max_body {
-            log_access(&ip, &method, &path, 413, &origin, !cors.is_empty());
-            respond(req, Out::json(413, json!({"error":"body too large"})), &cors);
+        let _ = req.as_reader().take(MAX_API_BODY + 1).read_to_end(&mut body);
+        if body.len() as u64 > MAX_API_BODY {
+            log_access(&ip, &method, &path, 413);
+            respond(req, Out::json(413, json!({"error":"body too large"})));
             return;
         }
     }
 
-    let out = route(state, &method, &path, &query, &upstream_auth, &accept);
-    log_access(&ip, &method, &path, out.status, &origin, !cors.is_empty());
-    respond(req, out, &cors);
+    let out = route(state, &req, &method, &path, &query, &body);
+    log_access(&ip, &method, &path, out.status);
+    respond(req, out);
 }
 
-/// One access-log line per request → visible in `docker logs web-front`. Includes
-/// the request Origin and whether it matched the CORS allowlist (corsOk), the
-/// #1 thing to check when a browser request "fails" with no server error.
-fn log_access(ip: &str, method: &str, path: &str, status: u16, origin: &Option<String>, cors_ok: bool) {
-    println!(
-        "{ip} {method} {path} -> {status} (origin={}, corsOk={})",
-        origin.as_deref().unwrap_or("-"),
-        cors_ok
-    );
+/// One access-log line per request → visible in `docker logs web-front`.
+fn log_access(ip: &str, method: &str, path: &str, status: u16) {
+    println!("{ip} {method} {path} -> {status}");
 }
 
-fn route(
-    state: &AppState,
-    method: &str,
-    path: &str,
-    query: &str,
-    upstream_auth: &Option<String>,
-    accept: &Option<String>,
-) -> Out {
+fn route(state: &AppState, req: &Request, method: &str, path: &str, query: &str, body: &[u8]) -> Out {
     match (method, path) {
         ("GET", "/healthz") => Out::json(200, json!({"status":"ok"})),
+        ("POST", "/api/session") => handle_login(state, body),
+        ("DELETE", "/api/session") => handle_logout(state, req),
+        ("PUT", "/api/password") => handle_change_password(state, body),
         ("GET", p) if p.starts_with("/proxy/gh/") => {
-            guard_proxy(state, || {
-                handle_proxy_gh(state, &p["/proxy/gh/".len()..], upstream_auth, accept)
-            })
+            guard_proxy(state, req, || handle_proxy_gh(state, req, &p["/proxy/gh/".len()..]))
         }
         ("GET", "/proxy/url") => {
-            guard_proxy(state, || handle_proxy_url(state, query, upstream_auth, accept))
+            guard_proxy(state, req, || handle_proxy_url(state, req, query))
         }
         _ => Out::json(404, json!({"error":"not found"})),
     }
 }
 
-/// Gate a proxy call on the config toggle. Single-admin session auth will be
-/// layered back in here once `AppState` grows a `sessions`/`admin` field.
-fn guard_proxy<F: FnOnce() -> Out>(state: &AppState, f: F) -> Out {
+/// Gate a proxy call on BOTH the config toggle and a valid admin session.
+/// Without the session check, `/proxy/gh/*` and `/proxy/url` are an open
+/// relay to any allowlisted host for anyone who can reach this port.
+fn guard_proxy<F: FnOnce() -> Out>(state: &AppState, req: &Request, f: F) -> Out {
     if !state.cfg.proxy_enabled {
         return Out::json(404, json!({"error":"not found"}));
+    }
+    if !has_valid_session(state, req) {
+        return Out::json(401, json!({"error":"unauthorized"}));
     }
     f()
 }
 
-fn handle_proxy_gh(
-    state: &AppState,
-    rest: &str,
-    upstream_auth: &Option<String>,
-    accept: &Option<String>,
-) -> Out {
+#[derive(Deserialize)]
+struct LoginBody {
+    username: String,
+    password: String,
+}
+
+/// `POST /api/session`: verify the admin credential and mint a session.
+///
+/// Failure is always a single undifferentiated 401 -- it never distinguishes
+/// "unknown username" from "wrong password", so the response can't be used
+/// to enumerate the (single, fixed) admin username.
+fn handle_login(state: &AppState, body: &[u8]) -> Out {
+    let req_body: LoginBody = match serde_json::from_slice(body) {
+        Ok(b) => b,
+        Err(_) => return Out::json(400, json!({"error":"bad request"})),
+    };
+
+    let admin = state.admin.lock().unwrap();
+    let ok = req_body.username == admin.username
+        && auth::verify_password(&admin.password_phc, req_body.password.as_bytes());
+    if !ok {
+        return Out::json(401, json!({"error":"unauthorized"}));
+    }
+
+    let key_salt = match admin.key_salt() {
+        Ok(k) => k,
+        Err(e) => return Out::json(500, json!({"error": e})),
+    };
+    let key = match auth::derive_config_key(req_body.password.as_bytes(), &key_salt) {
+        Ok(k) => k,
+        Err(e) => return Out::json(500, json!({"error": e})),
+    };
+    let is_default = admin.is_default;
+    drop(admin);
+
+    let token = state.sessions.create(key);
+    let ttl = state.cfg.token_ttl_secs;
+    Out::json(
+        200,
+        json!({"ok": true, "is_default_password": is_default, "token": token}),
+    )
+    .with(
+        "Set-Cookie",
+        // Deliberately no `Secure` attribute: LAN access over plain HTTP is
+        // this project's normal deployment mode (self-hosted NAS, no TLS),
+        // and `Secure` would make browsers silently refuse to store the
+        // cookie at all under http://, breaking login outright.
+        &format!("ej_session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={ttl}"),
+    )
+}
+
+/// `DELETE /api/session`: drop only the caller's own session (a sibling
+/// session, e.g. a concurrently logged-in phone, is left untouched) and
+/// clear the cookie.
+fn handle_logout(state: &AppState, req: &Request) -> Out {
+    if let Some(token) = session_token(req) {
+        state.sessions.remove(&token);
+    }
+    Out::json(200, json!({"ok": true}))
+        .with("Set-Cookie", "ej_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0")
+}
+
+#[derive(Deserialize)]
+struct PasswordBody {
+    old: String,
+    new: String,
+}
+
+/// `PUT /api/password`: rotate the admin password.
+///
+/// SIMPLIFIED for Task 5: config storage doesn't exist yet, so this only
+/// verifies `old`, writes the new PHC, clears `is_default`, and revokes every
+/// existing session (every previously issued session key was derived from
+/// the now-stale password, so keeping them alive would leak a key nothing
+/// can use safely). Task 8 MUST extend this to decrypt the stored config
+/// under the OLD derived key and re-encrypt it under the NEW one before
+/// persisting -- otherwise existing config ciphertext becomes permanently
+/// unreadable the moment the password changes.
+fn handle_change_password(state: &AppState, body: &[u8]) -> Out {
+    let req_body: PasswordBody = match serde_json::from_slice(body) {
+        Ok(b) => b,
+        Err(_) => return Out::json(400, json!({"error":"bad request"})),
+    };
+    if req_body.new.len() < 8 {
+        return Out::json(400, json!({"error":"new password too short"}));
+    }
+
+    let mut admin = state.admin.lock().unwrap();
+    if !auth::verify_password(&admin.password_phc, req_body.old.as_bytes()) {
+        return Out::json(401, json!({"error":"unauthorized"}));
+    }
+
+    let new_phc = match auth::hash_password(req_body.new.as_bytes()) {
+        Ok(p) => p,
+        Err(e) => return Out::json(500, json!({"error": e})),
+    };
+    admin.password_phc = new_phc;
+    admin.is_default = false;
+    if let Err(e) = admin_file::save(Path::new(&state.cfg.data_dir), &admin) {
+        return Out::json(500, json!({"error": e}));
+    }
+    drop(admin);
+
+    state.sessions.revoke_all();
+    Out::json(200, json!({"ok": true}))
+}
+
+fn handle_proxy_gh(state: &AppState, req: &Request, rest: &str) -> Out {
     // rest = owner/repo/branch/<path...>
     let parts: Vec<&str> = rest.splitn(4, '/').collect();
     if parts.len() < 4 {
         return Out::json(400, json!({"error":"expected owner/repo/branch/path"}));
     }
-    let enc_path: Vec<String> = parts[3]
-        .split('/')
-        .map(|seg| url_encode(seg))
-        .collect();
+    let enc_path: Vec<String> = parts[3].split('/').map(url_encode).collect();
     let target = format!(
         "https://raw.githubusercontent.com/{}/{}/{}/{}",
         url_encode(parts[0]),
@@ -269,15 +391,10 @@ fn handle_proxy_gh(
         url_encode(parts[2]),
         enc_path.join("/")
     );
-    do_proxy(state, &target, upstream_auth, accept)
+    do_proxy(state, req, &target)
 }
 
-fn handle_proxy_url(
-    state: &AppState,
-    query: &str,
-    upstream_auth: &Option<String>,
-    accept: &Option<String>,
-) -> Out {
+fn handle_proxy_url(state: &AppState, req: &Request, query: &str) -> Out {
     let Some(target) = query_get(query, "u") else {
         return Out::json(400, json!({"error":"missing u"}));
     };
@@ -288,15 +405,12 @@ fn handle_proxy_url(
     if !state.cfg.proxy_allow_hosts.iter().any(|h| h.eq_ignore_ascii_case(&host)) {
         return Out::json(403, json!({"error":"host not allowlisted"}));
     }
-    do_proxy(state, &target, upstream_auth, accept)
+    do_proxy(state, req, &target)
 }
 
-fn do_proxy(
-    state: &AppState,
-    target: &str,
-    upstream_auth: &Option<String>,
-    accept: &Option<String>,
-) -> Out {
+fn do_proxy(state: &AppState, req: &Request, target: &str) -> Out {
+    let upstream_auth = header(req, "X-Upstream-Authorization");
+    let accept = header(req, "Accept");
     match proxy::fetch(&state.agent, target, upstream_auth.as_deref(), accept.as_deref()) {
         Some(f) => {
             let ct = f.content_type.unwrap_or_else(|| "application/octet-stream".into());
@@ -306,12 +420,12 @@ fn do_proxy(
     }
 }
 
-fn respond(req: Request, out: Out, cors: &[(String, String)]) {
+fn respond(req: Request, out: Out) {
     let mut resp = Response::from_data(out.body).with_status_code(out.status);
     if let Ok(h) = Header::from_bytes(b"Content-Type".as_ref(), out.content_type.as_bytes()) {
         resp = resp.with_header(h);
     }
-    for (k, v) in cors.iter().chain(out.extra.iter()) {
+    for (k, v) in out.extra.iter() {
         if let Ok(h) = Header::from_bytes(k.as_bytes(), v.as_bytes()) {
             resp = resp.with_header(h);
         }

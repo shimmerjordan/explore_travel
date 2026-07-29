@@ -5,9 +5,7 @@
 # needs. For building from source instead, use docker-compose.yml.
 #
 # .env next to this file (the summary generates it for you):
-#   EJ_JWT_SECRET=<openssl rand -base64 48>      REQUIRED, >= 32 bytes
-#   EJ_DATA_PATH=/volume1/docker/web-front/data      where ej.db lives (see below)
-#   EJ_CORS_ORIGINS=https://ej.example.com       exact origin of your web build
+#   EJ_DATA_PATH=/volume1/docker/web-front/data      where admin.json lives (see below)
 
 services:
   web-front:
@@ -23,22 +21,19 @@ services:
     ports:
       - "${EJ_PORT:-48080}:48080"
     volumes:
-      # WHERE THE DATA LIVES — holds ej.db, i.e. all your vault ciphertext.
+      # WHERE THE DATA LIVES — holds admin.json (and, from Task 8 onward, the
+      # encrypted config blob).
       #   unset (default) → `ejdata`, a Docker named volume; zero host setup.
-      #   absolute path   → bind mount; the usual NAS choice, so the DB lands
+      #   absolute path   → bind mount; the usual NAS choice, so the data lands
       #                     on the big disk and the NAS's own backup job sees it.
       #                     Grant the container's nonroot UID access ONCE first:
       #                       sudo mkdir -p <path> && sudo chown -R 65532:65532 <path>
-      # Local filesystem only — never NFS/SMB: SQLite's WAL + POSIX locks are
-      # unreliable on network mounts and will corrupt the DB.
+      # Local filesystem only — never NFS/SMB: unreliable POSIX locking on
+      # network mounts risks corrupting the on-disk files.
       - "${EJ_DATA_PATH:-ejdata}:/data"
     environment:
-      EJ_JWT_SECRET: "${EJ_JWT_SECRET:?set EJ_JWT_SECRET in a .env file}"
       EJ_LISTEN: "0.0.0.0:48080"
-      EJ_DB_PATH: "/data/ej.db"
-      EJ_CORS_ORIGINS: "${EJ_CORS_ORIGINS:-}"
-      # Flip to false once your account exists — it closes public registration.
-      EJ_ALLOW_REGISTRATION: "${EJ_ALLOW_REGISTRATION:-true}"
+      EJ_DATA_DIR: "/data"
       EJ_PROXY_ENABLED: "${EJ_PROXY_ENABLED:-false}"
       EJ_PROXY_ALLOW_HOSTS: "${EJ_PROXY_ALLOW_HOSTS:-}"
       EJ_TOKEN_TTL_SECS: "${EJ_TOKEN_TTL_SECS:-3600}"
