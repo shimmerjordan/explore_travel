@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:dio/dio.dart' show CancelToken;
@@ -16,6 +17,13 @@ import '../../services/sync/onedrive_service.dart';
 import '../../services/sync/onedrive_sync_engine.dart';
 import '../../services/fog/fog_engine.dart';
 import '../../services/fog/fow_compat.dart';
+import '../../services/vault/admin_config_client.dart' show AdminAuthException;
+import '../../services/vault/auth_controller.dart'
+    show defaultPasswordWarningProvider, kConsoleLogoutNotNotifiedNotice;
+import '../../services/vault/config_payload.dart' show ConfigPayload;
+import '../../services/vault/config_sync_controller.dart'
+    show ConfigSyncController;
+import '../auth/login_screen.dart' show humanizeLoginError, validateLoginInput;
 import '../widgets/responsive_content.dart';
 
 /// 统一备份页：模块选择 + 本地导出/导入 + WebDAV 上传/恢复。
@@ -255,6 +263,13 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
             enabled: !_busy,
             onTap: _busy ? null : _importFromLocalFolder,
           ),
+
+          // ── Web 前端 · 配置推送 ────────────────────────────────────────
+          //
+          // Native only. In the browser this config is what the app was HANDED
+          // (the console serves the bundle and the config together), so a push
+          // button there would suggest the read-only viewer can republish it.
+          if (!kIsWeb) const ConsolePushSection(),
 
           // ── Fog of World 兼容 ─────────────────────────────────────────
           const _SectionHeader('Fog of World 兼容'),
@@ -972,6 +987,504 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
   }
 }
 
+/// The address in the form the controller would store it, so a trailing slash
+/// never counts as a different server. Falls back to the raw text for anything
+/// unparseable — `validateLoginInput` is what rejects those, not this.
+String _normalizedOrRaw(String raw) {
+  try {
+    return ConfigSyncController.normalizeServerUrl(raw);
+  } catch (_) {
+    return raw.trim();
+  }
+}
+
+/// Whether two console addresses name the SAME server.
+///
+/// Not `==`: per RFC 3986 the scheme and host are case-insensitive, so
+/// `HTTP://HOST-A:48080` and `http://host-a:48080` are one server — and reading
+/// them as two would force a pointless re-login out of the console's 10-per-
+/// minute bucket. `Uri` also resolves the default port, so `http://h` and
+/// `http://h:80` agree. Everything below the authority (path) still has to
+/// match: a console mounted under a sub-path is a different endpoint.
+///
+/// Unparseable input falls back to a trimmed string compare rather than
+/// pretending two nonsense strings are the same host.
+bool _sameConsole(String a, String b) {
+  final ua = Uri.tryParse(a.trim());
+  final ub = Uri.tryParse(b.trim());
+  if (ua == null || ub == null) return a.trim() == b.trim();
+  String path(Uri u) =>
+      u.path.endsWith('/') ? u.path.substring(0, u.path.length - 1) : u.path;
+  return ua.scheme.toLowerCase() == ub.scheme.toLowerCase() &&
+      ua.host.toLowerCase() == ub.host.toLowerCase() &&
+      ua.port == ub.port &&
+      path(ua) == path(ub);
+}
+
+/// How many roaming-config fields the login's pull rewrote on this device.
+///
+/// Reported to the user because the merge is invisible otherwise: the value they
+/// last typed on the phone can be replaced by the server's older one and then
+/// re-published as if it were theirs. A count is enough to make them look; the
+/// field names would be a wall of text on a phone, and some of them are secrets.
+///
+/// `_schema` is not a config field. Values are compared as JSON so a Map-typed
+/// key (none today — see `ConfigPayload.mapKeys`) compares by content, not
+/// identity.
+int _countOverwrittenFields(
+    Map<String, dynamic> before, Map<String, dynamic> after) {
+  var n = 0;
+  for (final k in {...before.keys, ...after.keys}) {
+    if (k == '_schema') continue;
+    if (jsonEncode(before[k]) != jsonEncode(after[k])) n++;
+  }
+  return n;
+}
+
+String _hhmmss(DateTime t) =>
+    '${t.hour.toString().padLeft(2, '0')}:'
+    '${t.minute.toString().padLeft(2, '0')}:'
+    '${t.second.toString().padLeft(2, '0')}';
+
+/// 「Web 前端 · 配置推送」— the phone's only way to publish its settings config
+/// to the self-hosted console, and the only place its session can be ended.
+///
+/// Before this existed, [ConfigSyncController.pushNow]'s only caller was the
+/// debounced auto-push, which requires `isLoggedIn` — and the login route only
+/// exists on web. So the phone could never log in and the config never left the
+/// device: the whole "phone publishes → browser displays" chain was unreachable
+/// on real hardware.
+///
+/// Public (and a widget of its own) so a test can pump the section alone: the
+/// page around it is a long [ListView] whose bottom half is never laid out on a
+/// test surface, so nothing here would be findable through [BackupScreen].
+class ConsolePushSection extends ConsumerStatefulWidget {
+  const ConsolePushSection({super.key});
+
+  @override
+  ConsumerState<ConsolePushSection> createState() => _ConsolePushSectionState();
+}
+
+class _ConsolePushSectionState extends ConsumerState<ConsolePushSection> {
+  /// Prefilled from (and written back to) [AppSettings.nasServerUrl].
+  final _server = TextEditingController();
+
+  /// Page-local on purpose: the server is single-admin, so `admin` is already
+  /// the right answer and a new persisted settings field would be one more
+  /// thing to migrate, export, and roam for no gain.
+  final _username = TextEditingController(text: 'admin');
+
+  /// NEVER persisted, never logged. The console derives the config's encryption
+  /// key from this password, so a copy on disk beside the ciphertext defeats the
+  /// envelope entirely. It lives in this controller and nowhere else, and is
+  /// released in [dispose]. The session token — not the password — is what gets
+  /// stored, and only by `AdminSessionStore` on web.
+  final _password = TextEditingController();
+
+  bool _busy = false;
+  String? _message;
+  bool _isError = false;
+
+  /// Set only by a 401 from the PUSH (not from the login). `pushNow` has already
+  /// dropped the session by then, so this is the mount point that turns the
+  /// primary action into 「重新登录并推送」.
+  bool _needsRelogin = false;
+
+  DateTime? _lastPushAt;
+
+  @override
+  void initState() {
+    super.initState();
+    _server.text = ref.read(settingsProvider).nasServerUrl ?? '';
+    // The primary action's label depends on what is CURRENTLY typed (a retyped
+    // address means the held session is for the wrong host), and typing a
+    // controller's text does not rebuild the widget that reads it.
+    _server.addListener(_onServerEdited);
+    // Settings load from disk asynchronously; opening this page during a cold
+    // start would otherwise leave the address blank forever. Fill it in when it
+    // arrives, but never over something the user has already typed.
+    ref.listenManual<AppSettings>(settingsProvider, (_, next) {
+      final url = next.nasServerUrl ?? '';
+      if (url.isNotEmpty && _server.text.isEmpty) _server.text = url;
+    });
+  }
+
+  void _onServerEdited() {
+    if (!mounted) return;
+    setState(() {
+      // 「已推送配置到服务器」was about the address that was in the box at the
+      // time. Once the user retypes it, that line is a claim about a server
+      // they may no longer be talking to, so it goes. Error lines stay: they
+      // are usually the reason the address is being edited.
+      if (_message != null && !_isError) _message = null;
+    });
+  }
+
+  @override
+  void dispose() {
+    _server.removeListener(_onServerEdited);
+    _server.dispose();
+    _username.dispose();
+    _password.dispose();
+    super.dispose();
+  }
+
+  /// Log in (when we don't hold a session) and publish the current config.
+  ///
+  /// [withLogin] false is the "already logged in, just push again" path — it
+  /// must not spend one of the console's 10 logins per minute.
+  Future<void> _run({required bool withLogin}) async {
+    // The re-entrancy guard belongs HERE, not only on the tile. `onTap` is a
+    // closure captured when the tile was built, and `setState(_busy = true)`
+    // merely marks this element dirty — any second pointer-up that lands before
+    // the rebuild (a dropped frame, a request still in flight, TalkBack's
+    // double-tap-to-activate) runs that same live closure. `enabled: false` on
+    // the tile is only the visual half. Without this line the phone spends two
+    // of the console's ten logins per minute and uploads the config twice.
+    if (_busy) return;
+    if (withLogin) {
+      // Same pre-flight the login screen uses. A blank password or a typo'd
+      // address must not cost a slot in that 10/min bucket.
+      final bad = validateLoginInput(
+        needsServer: true, // a phone has no same-origin to fall back on
+        server: _server.text,
+        username: _username.text,
+        password: _password.text,
+      );
+      if (bad != null) {
+        setState(() {
+          _message = bad;
+          _isError = true;
+        });
+        return;
+      }
+    }
+    setState(() {
+      _busy = true;
+      _message = null;
+      _isError = false;
+      _needsRelogin = false;
+    });
+    final ctrl = ref.read(configSyncControllerProvider);
+    // Grabbed BEFORE the first await, on purpose. This flag is the only thing
+    // that tells the user their console still answers to admin/admin, and this
+    // section is its only native renderer. If the user leaves the page while the
+    // login is in flight, the login still SUCCEEDS server-side — so the flag has
+    // to be set even though `ref` is by then unusable. The notifier object lives
+    // in the ProviderContainer rather than in this widget, so holding it across
+    // the gap is safe; calling `ref.read` after dispose is not.
+    final warn = ref.read(defaultPasswordWarningProvider.notifier);
+    // Which half of the operation a 401 came from. A 401 while logging in is a
+    // wrong credential; a 401 while pushing is a dead session with a perfectly
+    // good credential — telling the user "用户名或密码错误" there sends them
+    // hunting for a typo that isn't in the form.
+    var authenticated = !withLogin;
+    // Snapshot of the roaming config as it stands BEFORE the login's pull, so
+    // the merge can be reported rather than merely disclosed in the subtitle.
+    final before = withLogin
+        ? ConfigPayload.extract(ref.read(settingsProvider)).toJson()
+        : null;
+    var overwritten = 0;
+    try {
+      if (withLogin) {
+        final url = ConfigSyncController.normalizeServerUrl(_server.text);
+        final isDefaultPassword = await ctrl.login(
+          serverUrl: url,
+          username: _username.text.trim(),
+          password: _password.text,
+        );
+        authenticated = true;
+        // NOT behind a `mounted` check — see `warn` above. Losing this line is
+        // losing the sentence 「你的服务端还是默认口令」forever: nothing else sets
+        // it, and re-entering the page does not recompute it.
+        warn.state = isDefaultPassword;
+        if (!mounted) return;
+        // Read before the `nasServerUrl` write below, which is not a config
+        // field but would still be one more diff to reason about.
+        overwritten = _countOverwrittenFields(
+            before!, ConfigPayload.extract(ref.read(settingsProvider)).toJson());
+        // Remember WHERE the console is — never the credential — so the next
+        // launch prefills. Normalized, so it matches what the controller stored.
+        await ref
+            .read(settingsProvider.notifier)
+            .update((p) => p.copyWith(nasServerUrl: url));
+        if (!mounted) return;
+      }
+      // force: a manual tap means "publish now, unconditionally". Without it the
+      // digest dedupe inside pushNow makes "nothing changed since the last
+      // push" indistinguishable from a completed upload — the user taps, sees a
+      // success line, and the config never leaves the phone.
+      final pushed = await ctrl.pushNow(force: true);
+      if (!mounted) return;
+      setState(() {
+        if (pushed) {
+          // The credential has done its whole job; keeping it in a live
+          // controller only leaves a plaintext password in memory for as long as
+          // the page stays open. Cleared only on FULL success: after a push 401
+          // the retry needs it, and clearing there would make the re-login
+          // entry point demand a retype for nothing.
+          _password.clear();
+          _lastPushAt = DateTime.now();
+          _message = '已推送配置到服务器（${_hhmmss(_lastPushAt!)}）'
+              '${overwritten > 0 ? '。注意：其中 $overwritten 项先被服务器上已有的值覆盖，'
+                  '上传的是覆盖后的结果' : ''}';
+          _isError = false;
+        } else {
+          _message = '没有可用会话，配置未推送 —— 请先登录';
+          _isError = true;
+        }
+      });
+    } on AdminAuthException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        if (authenticated) {
+          _needsRelogin = true;
+          // Not "retype your password": after a push 401 the password is still
+          // in the form (it is only cleared on a completed push), so a plain
+          // second tap usually works. It IS empty when the session was resumed
+          // without one, hence the conditional phrasing.
+          _message = '会话已过期，配置未推送。密码若已清空请重新填写，然后「重新登录并推送」。';
+        } else {
+          _message = humanizeLoginError(e);
+        }
+        _isError = true;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      // humanizeLoginError already turns 429 / 413 / transport failures into
+      // sentences a user can act on — a second mapping here would only drift.
+      setState(() {
+        _message = humanizeLoginError(e);
+        _isError = true;
+      });
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _logout() async {
+    if (_busy) return; // same re-entrancy as _run, same reason
+    setState(() {
+      _busy = true;
+      _message = null;
+      _isError = false;
+    });
+    // Before the await, and cleared in BOTH exits below: `logout()` forgets the
+    // token before it does anything else, so however the rest of it ends, this
+    // device is locally logged out and a warning about the console's password is
+    // no longer ours to display.
+    final warn = ref.read(defaultPasswordWarningProvider.notifier);
+    try {
+      final outcome = await ref.read(configSyncControllerProvider).logout();
+      warn.state = false;
+      if (!mounted) return;
+      _password.clear();
+      setState(() {
+        _needsRelogin = false;
+        _lastPushAt = null;
+        _message = outcome.serverNotified
+            ? '已退出登录，服务端会话也已注销'
+            : kConsoleLogoutNotNotifiedNotice;
+        _isError = !outcome.serverNotified;
+      });
+      // The native shell has no notice bar (that `builder:` is on the web
+      // branch only), so an unconfirmed logout is surfaced here — a status line
+      // below the fold plus a snackbar the user can't miss.
+      if (!outcome.serverNotified) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(kConsoleLogoutNotNotifiedNotice),
+            duration: Duration(seconds: 8),
+          ),
+        );
+      }
+    } catch (e) {
+      // `logout()` documents that it never throws, and its own network half is
+      // wrapped — but the local half reaches the platform keychain through
+      // `AdminSessionStore.clear()`, which can throw a PlatformException. Without
+      // this branch that surfaced as the tile flickering once and saying nothing
+      // at all, which reads exactly like a successful logout.
+      warn.state = false;
+      if (!mounted) return;
+      setState(() {
+        _needsRelogin = false;
+        _lastPushAt = null;
+        _message = '已在本机退出（会话令牌已丢弃），但清理会话记录时出错：'
+            '${humanizeLoginError(e)}';
+        _isError = true;
+      });
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final s = ref.watch(settingsProvider);
+    final usingDefaultPassword = ref.watch(defaultPasswordWarningProvider);
+    // A plain Provider, so watching it never rebuilds this on its own. That is
+    // fine but NOT because "only this page can change the login state" — the
+    // native auto-push drops the session on a 401 entirely outside this widget,
+    // and until something rebuilds, the line below still says 「已登录」. It
+    // self-heals: the next tap finds no session, `pushNow` returns false, and the
+    // 「没有可用会话」branch both says so and rebuilds with the truth. What would
+    // NOT be acceptable is a stale 「已登录」that also let the user believe a push
+    // happened, and that cannot occur — the push result is read, not assumed.
+    final sync = ref.watch(configSyncControllerProvider);
+    final loggedIn = sync.isLoggedIn;
+    final consoleUrl = (s.nasServerUrl ?? '').isNotEmpty
+        ? s.nasServerUrl!
+        : (_server.text.trim().isEmpty ? '服务器地址' : _server.text.trim());
+    // A session belongs to ONE console: the controller keeps the client it was
+    // built with. So a session held from an earlier address would publish to
+    // THAT host while the form on screen names another one — and report success.
+    // Retyping the address therefore demands a fresh login.
+    //
+    // Compared against the SESSION's own base URL, never against
+    // `s.nasServerUrl`. That field is persisted settings, and all four restore
+    // actions on this very screen overwrite the settings map wholesale and
+    // reload — a backup made on another device carries ITS `nasServerUrl`. Using
+    // it as the yardstick therefore failed in both directions: after such a
+    // restore, typing the restored address made the check answer 「没换服务器」and
+    // ship every credential to the host the session actually belongs to, while
+    // touching nothing at all made it accuse the user of changing the address and
+    // burn a login.
+    final typed = _normalizedOrRaw(_server.text);
+    final sessionUrl = sync.sessionBaseUrl;
+    final addressChanged = loggedIn &&
+        typed.isNotEmpty &&
+        sessionUrl != null &&
+        !_sameConsole(typed, sessionUrl);
+    final needsLogin = !loggedIn || addressChanged;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const _SectionHeader('Web 前端 · 配置推送'),
+        // Same one-paragraph-then-tiles shape (and the same margins, size, and
+        // colour) as the 本地文件夹 section immediately above — not a second
+        // typographic system. Trimmed to the one thing the tiles below can't
+        // say for themselves: which direction this sync runs in. The password's
+        // "never stored" promise lives in that field's own hint.
+        Container(
+          margin: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+          child: Text(
+            '把本机的同步配置（WebDAV / OneDrive 凭据、图床、AI 定位等）推到你自建的 '
+            'web-front，浏览器打开它就能只读浏览这些足迹。手机是发布方，网页是消费方。',
+            style: TextStyle(
+                fontSize: 11, height: 1.5, color: cs.onSurfaceVariant),
+          ),
+        ),
+        _TextSetting.controlled(Icons.dns_rounded, '服务器地址', _server,
+            hint: '需带 http(s)://，例如 http://192.168.1.9:48080',
+            // A URL keyboard and no autocorrect, matching the login screen: a
+            // helpfully capitalised host or an "corrected" IP costs a login out
+            // of the 10-per-minute bucket to discover.
+            keyboardType: TextInputType.url,
+            autocorrect: false,
+            enabled: !_busy),
+        _TextSetting.controlled(Icons.person_rounded, '用户名', _username,
+            hint: '服务端只有一个管理员账号，默认 admin',
+            autocorrect: false,
+            enabled: !_busy),
+        _TextSetting.controlled(Icons.lock_rounded, '密码', _password,
+            hint: '不会保存在本机；换设备或重装需要重新输入',
+            obscure: true,
+            autocorrect: false,
+            // Enter submits, like the login screen. `_run` re-checks `_busy`
+            // itself, so a keyboard submit can't race the tile.
+            onSubmitted: (_) => _run(withLogin: needsLogin),
+            enabled: !_busy),
+        ListTile(
+          leading: _busy
+              ? const SizedBox(
+                  width: 24,
+                  height: 24,
+                  child: CircularProgressIndicator(strokeWidth: 2.4))
+              : Icon(_needsRelogin
+                  ? Icons.refresh_rounded
+                  : (needsLogin
+                      ? Icons.login_rounded
+                      : Icons.cloud_upload_rounded)),
+          title: Text(_needsRelogin
+              ? '重新登录并推送'
+              : (needsLogin ? '登录并推送当前配置' : '推送当前配置')),
+          // Every login-flavoured branch says the merge out loud, because
+          // `ConfigSyncController.login` pulls the stored config and applies it
+          // BEFORE this screen pushes — and `ConfigPayload.applyTo` lets any
+          // non-empty remote value win. So the upload that follows carries the
+          // MERGED result: a WebDAV token changed on the phone but not yet
+          // published can be replaced by the server's older one and then frozen
+          // back into it. The pull is not removable (the web build's login is the
+          // same call), so the button has to stop describing itself as a one-way
+          // publish. The no-login branch really is one-way, and says so.
+          subtitle: Text(_needsRelogin
+              ? '上次推送时服务端说会话已失效，需要重新登录一次；'
+                  '登录会先合并服务器上已有的配置（服务器已有的值优先），再整份上传'
+              : (addressChanged
+                  ? '服务器地址改过了，现有会话属于旧地址 —— 会重新登录到新地址；'
+                      '登录会先合并该服务器已有的配置（它已有的值优先），再整份上传'
+                  : (needsLogin
+                      ? '先登录换取会话令牌 —— 登录会把服务器上已有的配置合并进本机'
+                          '（服务器已有的值优先），然后把合并结果整份上传'
+                      : '已持有会话，直接无条件上传本机当前配置'
+                          '（不再拉取合并，也不做「没改过就跳过」判断）'))),
+          enabled: !_busy,
+          onTap: _busy ? null : () => _run(withLogin: needsLogin),
+        ),
+        if (loggedIn)
+          ListTile(
+            leading: const Icon(Icons.logout_rounded),
+            title: const Text('退出登录'),
+            subtitle: const Text('只丢弃会话令牌，本机数据与配置一律不动'),
+            enabled: !_busy,
+            onTap: _busy ? null : _logout,
+          ),
+        ListTile(
+          dense: true,
+          leading: Icon(
+            loggedIn ? Icons.verified_user_rounded : Icons.lock_open_rounded,
+            color: loggedIn ? cs.primary : cs.onSurfaceVariant,
+          ),
+          title: Text(loggedIn ? '当前状态：已登录' : '当前状态：未登录'),
+          subtitle: Text(_lastPushAt == null
+              ? '本次进入此页后还没有成功推送过'
+              : '上次成功推送：${_hhmmss(_lastPushAt!)}'),
+        ),
+        if (_message != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Text(
+              _message!,
+              style: TextStyle(
+                fontSize: 12,
+                height: 1.5,
+                color: _isError ? cs.error : cs.onSurfaceVariant,
+              ),
+            ),
+          ),
+        if (usingDefaultPassword)
+          Container(
+            margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: cs.errorContainer,
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(color: cs.error.withValues(alpha: 0.4)),
+            ),
+            child: Text(
+              '服务端仍在使用默认密码 admin / admin —— 任何能连到它的人都能读走刚推上去的'
+              '全部凭据。手机端没有改密入口，请在浏览器打开 $consoleUrl 登录后修改。',
+              style: TextStyle(
+                  fontSize: 12, height: 1.6, color: cs.onErrorContainer),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
 class _SectionHeader extends StatelessWidget {
   final String label;
   const _SectionHeader(this.label);
@@ -989,39 +1502,77 @@ class _SectionHeader extends StatelessWidget {
 
 /// Live-saving text field. Mirrors the pattern in the imghost screen so
 /// every keystroke writes through to settings — no save button needed.
+///
+/// [_TextSetting.controlled] is the second mode: the CALLER owns the controller
+/// and there is no write-through. The console section needs it because its
+/// password must exist in exactly one place, be released with the page, and
+/// never be handed to a persisting `onChanged`.
 class _TextSetting extends StatefulWidget {
   final IconData icon;
   final String label;
   final String value;
-  final ValueChanged<String> onChanged;
+  final ValueChanged<String>? onChanged;
   final String? hint;
   final bool obscure;
+
+  /// Non-null → caller-owned; this widget must not dispose it.
+  final TextEditingController? controller;
+  final bool enabled;
+
+  /// Keyboard affordances, matching the login screen's fields. Defaulted so the
+  /// existing live-saving call sites are unchanged.
+  final TextInputType? keyboardType;
+  final bool autocorrect;
+  final ValueChanged<String>? onSubmitted;
+
   const _TextSetting(this.icon, this.label, this.value, this.onChanged,
-      {this.hint, this.obscure = false});
+      {this.hint, this.obscure = false})
+      : controller = null,
+        enabled = true,
+        keyboardType = null,
+        autocorrect = true,
+        onSubmitted = null;
+
+  const _TextSetting.controlled(this.icon, this.label, this.controller,
+      {this.hint,
+      this.obscure = false,
+      this.enabled = true,
+      this.keyboardType,
+      this.autocorrect = true,
+      this.onSubmitted})
+      : value = '',
+        onChanged = null;
+
   @override
   State<_TextSetting> createState() => _TextSettingState();
 }
 
 class _TextSettingState extends State<_TextSetting> {
-  late final TextEditingController _ctrl;
+  /// Only set in the live-saving mode; null when the caller supplied one.
+  TextEditingController? _owned;
+
+  TextEditingController get _ctrl => widget.controller ?? _owned!;
 
   @override
   void initState() {
     super.initState();
-    _ctrl = TextEditingController(text: widget.value);
+    if (widget.controller == null) {
+      _owned = TextEditingController(text: widget.value);
+    }
   }
 
   @override
   void didUpdateWidget(covariant _TextSetting old) {
     super.didUpdateWidget(old);
-    if (widget.value != old.value && widget.value != _ctrl.text) {
-      _ctrl.text = widget.value;
+    final owned = _owned;
+    if (owned != null && widget.value != old.value && widget.value != owned.text) {
+      owned.text = widget.value;
     }
   }
 
   @override
   void dispose() {
-    _ctrl.dispose();
+    _owned?.dispose();
     super.dispose();
   }
 
@@ -1032,6 +1583,10 @@ class _TextSettingState extends State<_TextSetting> {
       child: TextField(
         controller: _ctrl,
         obscureText: widget.obscure,
+        enabled: widget.enabled,
+        keyboardType: widget.keyboardType,
+        autocorrect: widget.autocorrect,
+        onSubmitted: widget.onSubmitted,
         decoration: InputDecoration(
           prefixIcon: Icon(widget.icon, size: 18),
           labelText: widget.label,

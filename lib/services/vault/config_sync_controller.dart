@@ -67,11 +67,26 @@ class ConfigSyncController {
 
   AdminConfigClient? _client;
   String? _token;
+  String? _sessionBaseUrl;
   String? _lastPushedHash;
   bool _applyingRemote = false;
   Timer? _debounce;
 
   bool get isLoggedIn => _token != null;
+
+  /// Which console the CURRENT session belongs to — the normalized base URL the
+  /// token was issued by (empty string = same-origin web). Null when logged out.
+  ///
+  /// Read-only, and it exists because the obvious substitute is wrong: a UI
+  /// asking "is the session I hold for the host in the address box?" used to
+  /// compare against `AppSettings.nasServerUrl`, which is a *persisted settings
+  /// field* — every restore path (OneDrive, local folder, zip import) overwrites
+  /// the whole settings map and reloads, so a restore taken on another device
+  /// silently rewrites the yardstick. The check then answers about the wrong
+  /// host, and the next push ships every credential to the console the session
+  /// was actually opened against while reporting success. This value is the
+  /// session's own property; nothing outside [_adoptSession] can rewrite it.
+  String? get sessionBaseUrl => _token == null ? null : _sessionBaseUrl;
 
   /// Validate + normalize the console base URL. The user's own NAS is
   /// frequently a LAN host (http://192.168.x.x:48080), so — unlike proxy
@@ -111,6 +126,7 @@ class ConfigSyncController {
       AdminConfigClient client, String url, String token) async {
     _client = client;
     _token = token;
+    _sessionBaseUrl = url;
     // Web: persist the resumable session so a page refresh doesn't log the
     // user out.
     if (kIsWeb) {
@@ -141,6 +157,7 @@ class ConfigSyncController {
     try {
       _client = _clientFactory(s.baseUrl);
       _token = s.token;
+      _sessionBaseUrl = s.baseUrl;
       // Validates the token AND applies the stored sync config in one go
       // (an expired/revoked token throws here).
       await pullAndApply();
@@ -160,6 +177,7 @@ class ConfigSyncController {
       debugPrint('[ConfigSync] session restore deferred, record kept: $e');
       _debounce?.cancel();
       _token = null;
+      _sessionBaseUrl = null;
       _client = null;
       _lastPushedHash = null;
       return false;
@@ -258,6 +276,7 @@ class ConfigSyncController {
   Future<void> _forgetSession() async {
     _debounce?.cancel();
     _token = null;
+    _sessionBaseUrl = null;
     _lastPushedHash = null;
     _client = null;
     await _sessionStore.clear();

@@ -17,17 +17,18 @@ class AuthState {
 }
 
 /// True while the console still accepts the shipped `admin/admin`. Set from the
-/// server's own answer at login and rendered by the app shell, NOT by the login
-/// screen — the router navigates away the instant login succeeds, so anything
-/// drawn there would flash past unread.
+/// server's own answer at login, and NOT rendered by the login screen — the
+/// router navigates away the instant login succeeds, so anything drawn there
+/// would flash past unread.
 ///
-/// **Rendered on WEB only, on purpose (for now).** [login] sets this on native
-/// too, but the native shell (`_buildWithForegroundTask` in `main.dart`) has no
-/// notice bar, so on a phone the flag is currently set and never shown. That is
-/// tolerable only because the native login screen is unreachable today — there
-/// is no entry point to it yet. When that entry point lands, wrap the native
-/// `MaterialApp.router` with the same `builder:` the web branch uses so this
-/// warning (and [logoutNoticeProvider]) render there as well.
+/// **Two renderers, deliberately different ones.** On web the app shell's
+/// `builder:` draws it as a notice bar above the router. On native there is no
+/// such shell and no router gate to hang one on, so it is rendered in place by
+/// the 「Web 前端 · 配置推送」section of the backup screen — the same widget that
+/// performs the native login and therefore the only thing that can set this flag
+/// on a phone. Wrapping the native `MaterialApp` in the web branch's `builder:`
+/// was considered and rejected: a global bar would outlive the section that
+/// produced it and duplicate a warning the user is already looking at.
 final defaultPasswordWarningProvider = StateProvider<bool>((ref) => false);
 
 /// Non-null while the last logout could NOT be confirmed by the server.
@@ -39,11 +40,23 @@ final defaultPasswordWarningProvider = StateProvider<bool>((ref) => false);
 /// stays alive on a possibly shared machine.
 final logoutNoticeProvider = StateProvider<String?>((ref) => null);
 
-/// The text of that notice. A constant so a test can pin it without copying a
-/// string that would then drift.
+/// The text of that notice, for the WEB shell. A constant so a test can pin it
+/// without copying a string that would then drift.
 const kLogoutNotNotifiedNotice =
     '已在本机退出，但没能通知服务器：服务端会话可能仍然有效。'
     '若这是公用设备，请清理浏览器数据（Cookie）。';
+
+/// The same fact for the NATIVE renderer (the backup screen's console section).
+///
+/// Kept beside [kLogoutNotNotifiedNotice] on purpose: they are one decision in
+/// two dialects, and when they lived in different files nobody could see that
+/// only the *advice* differs. It has to differ — "clear your browser cookies" is
+/// meaningless on a phone (this client sends a bearer token and keeps no cookie
+/// jar), while "restart the container" actually works, because console sessions
+/// live in the server's memory.
+const kConsoleLogoutNotNotifiedNotice =
+    '已在本机退出，但没能通知服务器：服务端会话可能仍然有效，要等它自己到期。'
+    '若这台服务对外可达且你在意，重启 web-front 容器会立刻作废全部会话。';
 
 /// Thin controller over [ConfigSyncController] that exposes a routable auth
 /// state. The web router gates on this; native ignores it (viewOnly handling
