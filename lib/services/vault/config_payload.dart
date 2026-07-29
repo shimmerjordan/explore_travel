@@ -13,11 +13,12 @@ import '../backup/backup_service.dart' show kVaultSecretKeys;
 /// server CAN read these fields. The confidentiality boundary is the admin
 /// credential, not the transport.
 ///
-/// Two halves, both drawn from a single authoritative key set:
-///   * **secrets** — exactly [kVaultSecretKeys] (the same constant the backup
-///     scrubber uses), so a credential field is covered by both the scrubber
-///     and this payload, never one and not the other. A unit test pins the
-///     superset relationship.
+/// Two halves:
+///   * **secrets** — [kVaultSecretKeys] (the constant the backup scrubber
+///     uses) minus [deviceOnlySecretKeys]. Sharing the scrubber's set is
+///     deliberate: a credential that gets scrubbed from backups is a
+///     credential worth thinking about here too, so the two can't silently
+///     drift apart as fields are added.
 ///   * **locators** — non-secret config (URLs, owners, repos, CDN templates)
 ///     that's useless to an attacker alone but required to *use* the secrets.
 ///
@@ -27,6 +28,8 @@ import '../backup/backup_service.dart' show kVaultSecretKeys;
 /// cracked password forge leaderboard entries as every one of the user's
 /// devices, and the read-only web client has no leaderboard-signing role at
 /// all. So the identity stays on the device that made it.
+///
+/// Also excluded, for a different reason: see [deviceOnlySecretKeys].
 ///
 /// NOTE: this reads/writes the in-memory [AppSettings], which always carries
 /// the REAL secret values — PrefsStore overlays them from platform secure
@@ -41,6 +44,31 @@ class ConfigPayload {
   /// being silent. Actual migrations go in [applyTo] when v2 exists.
   static const schemaVersion = 1;
 
+  /// Credentials the backup scrubber covers but that deliberately do NOT roam.
+  ///
+  /// [kVaultSecretKeys] answers "would leaking this hurt?", which is the right
+  /// question for a backup file. It is NOT the same question as "does another
+  /// device need this?", and these keys are where the two answers diverge: the
+  /// speech and music credentials are consumed only by the AI-companion voice
+  /// link and the music player, both phone-only features. The read-only web
+  /// client never calls either, so uploading them buys nothing and widens the
+  /// blast radius of a cracked admin password.
+  ///
+  /// They rode along until now purely because the payload was defined as
+  /// `scrubber-set ∪ locators` — an inheritance, not a decision.
+  ///
+  /// The companion locators (`sttBaseUrl`, `ttsEngine`, `ttsVoice`,
+  /// `volcTtsAppId`, `musicApiBase`, …) are absent from [locatorKeys] for the
+  /// same reason, which is why roaming the keys alone was useless anyway: a
+  /// second device got a key with no endpoint, model, or voice to use it
+  /// against. If multi-device voice is ever wanted, both halves move together.
+  static const deviceOnlySecretKeys = <String>{
+    'sttApiKey',
+    'ttsApiKey',
+    'volcTtsToken',
+    'musicCredentials',
+  };
+
   /// Config keys whose [AppSettings] field is a `Map`, not a `String`.
   ///
   /// Every other key in [kConfigPayloadKeys] is string-typed — [applyTo] uses
@@ -48,7 +76,12 @@ class ConfigPayload {
   /// `AppSettings.fromJson` hard-casts it. A test walks the whole key set with
   /// deliberately wrong types, so adding a non-string key without listing it
   /// here fails the suite rather than shipping a crash.
-  static const mapKeys = <String>{'musicCredentials'};
+  ///
+  /// Empty today: `musicCredentials` was the only Map-typed roaming key and it
+  /// now stays on the device (see [deviceOnlySecretKeys]). The mechanism stays
+  /// because the failure it prevents is a hard crash on the receiving device,
+  /// and the next Map-typed field to roam must not have to rediscover that.
+  static const mapKeys = <String>{};
 
   /// Non-secret config without which the secrets are unusable.
   static const locatorKeys = <String>{
@@ -75,10 +108,11 @@ class ConfigPayload {
   };
 
   /// The single authoritative set of [AppSettings] keys the config carries.
-  /// `secrets ∪ locators`. Producers and consumers import THIS — never their
-  /// own copy.
+  /// `(secrets − device-only) ∪ locators`. Producers and consumers import
+  /// THIS — never their own copy.
   static Set<String> get kConfigPayloadKeys =>
-      {...kVaultSecretKeys, ...locatorKeys};
+      {...kVaultSecretKeys, ...locatorKeys}
+          .difference(deviceOnlySecretKeys);
 
   /// The raw payload map. Always carries `_schema`.
   final Map<String, dynamic> fields;

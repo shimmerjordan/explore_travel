@@ -20,9 +20,40 @@ const _secureToSettings = <String, String>{
 
 void main() {
   group('kConfigPayloadKeys — single source of truth', () {
-    test('is a superset of the backup scrubber secret set', () {
-      expect(ConfigPayload.kConfigPayloadKeys.containsAll(kVaultSecretKeys), isTrue,
-          reason: 'every scrubbed secret must also travel in the config');
+    test('carries every scrubbed secret except the named device-only ones', () {
+      // The payload used to be a plain superset of the scrubber set. It no
+      // longer is, on purpose — but the ONLY licensed difference is the
+      // explicit exclusion list, so a credential added to the scrubber still
+      // can't quietly skip roaming.
+      final missing =
+          kVaultSecretKeys.difference(ConfigPayload.kConfigPayloadKeys);
+      expect(missing, ConfigPayload.deviceOnlySecretKeys,
+          reason: 'a scrubbed secret may only be absent from the config if it '
+              'is listed in deviceOnlySecretKeys with a reason');
+    });
+
+    test('every device-only exclusion is really a scrubber key', () {
+      // Guards the typo case: an entry that matches nothing subtracts nothing,
+      // so the key would keep roaming while the list claims it does not.
+      for (final k in ConfigPayload.deviceOnlySecretKeys) {
+        expect(kVaultSecretKeys.contains(k), isTrue,
+            reason: '$k is not in kVaultSecretKeys — excluding it is a no-op');
+      }
+    });
+
+    test('the phone-only voice and music credentials do not roam', () {
+      for (final k in ['sttApiKey', 'ttsApiKey', 'volcTtsToken',
+        'musicCredentials']) {
+        expect(ConfigPayload.kConfigPayloadKeys.contains(k), isFalse,
+            reason: '$k is consumed only by phone-only features');
+      }
+    });
+
+    test('mapKeys stays inside the payload key set', () {
+      // Empty today. If a Map-typed key is added to mapKeys but never actually
+      // roams, applyTo's type split is guarding nothing.
+      expect(ConfigPayload.kConfigPayloadKeys
+          .containsAll(ConfigPayload.mapKeys), isTrue);
     });
 
     test('covers every SecureCredentials keystore key (camelCase mapped)', () {
@@ -91,14 +122,17 @@ void main() {
       // i.e. correct credentials, permanent lockout, and no client-side way to
       // repair the stored config. `PUT /api/config` only checks that the body
       // is a JSON object, so any of these can genuinely be stored.
+      // Fixtures must use keys that are actually IN the payload. A key that no
+      // longer roams (musicCredentials, say) is skipped as unknown long before
+      // the type filter is consulted, so it would assert nothing here.
       const cur = AppSettings(webdavUrl: 'https://local', webdavPass: 'keepme');
       for (final bad in <Map<String, dynamic>>[
-        {'_schema': 1, 'musicCredentials': 'oops-a-string'},
         {'_schema': 1, 'oneDriveAccount': 42},
         {'_schema': 1, 'webdavUrl': 7},
         {'_schema': 1, 'webdavPass': true},
-        {'_schema': 1, 'musicCredentials': <String, dynamic>{'ok': 1}, },
+        {'_schema': 1, 'githubPat': <String, dynamic>{'ok': 1}},
         {'_schema': 1, 'syncBackend': <String>['webdav']},
+        {'_schema': 1, 'aiBaseUrl': 1.5},
       ]) {
         final applied = ConfigPayload(bad).applyTo(cur);
         expect(applied.webdavPass, 'keepme',
@@ -114,13 +148,14 @@ void main() {
       const cur = AppSettings();
       final applied = ConfigPayload({
         '_schema': 1,
-        'musicCredentials': 'oops-a-string', // bad
+        'oneDriveAccount': 42, // bad: a roaming key with the wrong type
         'webdavUrl': 'https://dav.example.com', // good
         'webdavUser': 'u', // good
       }).applyTo(cur);
       expect(applied.webdavUrl, 'https://dav.example.com');
       expect(applied.webdavUser, 'u');
-      expect(applied.musicCredentials, isEmpty);
+      expect(applied.oneDriveAccount, isNull,
+          reason: 'the malformed one is dropped, not coerced');
     });
 
     test('EVERY config key tolerates a wrong-typed value (no key left behind)',
