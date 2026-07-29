@@ -21,13 +21,26 @@ pub fn verify_password(phc: &str, pw: &[u8]) -> bool {
     }
 }
 
-/// Derive the 32-byte config encryption key. Uses a salt that is DELIBERATELY
-/// different from the login hash's salt (domain separation): leaking the
-/// password hash must not reveal this key.
+/// Domain-separation label mixed into `derive_config_key`'s input before it
+/// ever reaches Argon2. This is a STRUCTURAL guarantee, not just a convention
+/// of "pass a different salt": even if a caller accidentally reuses the login
+/// PHC's own salt as `key_salt` (e.g. by extracting it from a stored
+/// `admin.json`), the resulting key still cannot equal the login hash's
+/// output, because the login hash never had this label prepended to its
+/// input. Bump the version suffix if this label ever needs to change.
+const CONFIG_KEY_DOMAIN: &[u8] = b"ej-config-key-v1\0";
+
+/// Derive the 32-byte config encryption key. Domain-separated from the login
+/// password hash via `CONFIG_KEY_DOMAIN` (see its doc comment) in addition to
+/// deliberately using a different salt: leaking the password hash must not
+/// reveal this key.
 pub fn derive_config_key(pw: &[u8], key_salt: &[u8]) -> Result<[u8; 32], String> {
+    let mut input = Vec::with_capacity(CONFIG_KEY_DOMAIN.len() + pw.len());
+    input.extend_from_slice(CONFIG_KEY_DOMAIN);
+    input.extend_from_slice(pw);
     let mut out = [0u8; 32];
     Argon2::default()
-        .hash_password_into(pw, key_salt, &mut out)
+        .hash_password_into(&input, key_salt, &mut out)
         .map_err(|e| e.to_string())?;
     Ok(out)
 }
@@ -66,19 +79,40 @@ mod tests {
         let k1 = derive_config_key(b"admin", s1).unwrap();
         let k1_again = derive_config_key(b"admin", s1).unwrap();
         let k2 = derive_config_key(b"admin", s2).unwrap();
-        assert_eq!(k1, k1_again, "同密码同 salt 必须得到同密钥");
-        assert_ne!(k1, k2, "换 salt 必须换密钥");
+        assert_eq!(k1, k1_again, "same password + same salt must yield the same key");
+        assert_ne!(k1, k2, "changing the salt must change the key");
         assert_ne!(derive_config_key(b"other", s1).unwrap(), k1);
     }
 
     #[test]
-    fn password_hash_does_not_leak_config_key() {
-        // 域分离：PHC 串里不得出现配置密钥的任何字节片段
-        let salt = b"salt-one-16bytes";
-        let key = derive_config_key(b"admin", salt).unwrap();
-        let phc = hash_password(b"admin").unwrap();
-        let hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
-        assert!(!phc.contains(&hex[..16]));
+    fn config_key_domain_separated_from_leaked_login_phc() {
+        // Attack model: the stored login PHC (e.g. from a leaked admin.json)
+        // is fully known to the attacker. They parse it, pull out its
+        // embedded salt, and reuse that exact salt as `key_salt` -- betting
+        // that domain separation is missing so the derived config key
+        // collides with the login PHC's own hash bytes. This is the scenario
+        // CONFIG_KEY_DOMAIN exists to defeat, and it must fail even though
+        // password and salt are identical to what produced the PHC.
+        let phc_str = hash_password(b"admin").unwrap();
+        let phc = PasswordHash::new(&phc_str).unwrap();
+        let mut salt_buf = [0u8; 64];
+        let login_salt_raw = phc.salt.unwrap().decode_b64(&mut salt_buf).unwrap().to_vec();
+        let login_hash_bytes = phc.hash.unwrap().as_bytes().to_vec();
+
+        let key = derive_config_key(b"admin", &login_salt_raw).unwrap();
+        assert_ne!(
+            key.to_vec(),
+            login_hash_bytes,
+            "config key must not equal the login PHC's hash bytes, even when its own salt is reused as key_salt"
+        );
+
+        // A freshly generated key salt must also not coincide, byte-for-byte,
+        // with the login PHC's own embedded salt.
+        let key_salt_raw = STANDARD.decode(new_salt_b64()).unwrap();
+        assert_ne!(
+            key_salt_raw, login_salt_raw,
+            "new_salt_b64 output must not collide with the login PHC's embedded salt"
+        );
     }
 
     #[test]
