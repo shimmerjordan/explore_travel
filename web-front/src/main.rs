@@ -246,7 +246,7 @@ fn route(state: &AppState, req: &Request, method: &str, path: &str, query: &str,
         ("GET", "/healthz") => Out::json(200, json!({"status":"ok"})),
         ("POST", "/api/session") => handle_login(state, body),
         ("DELETE", "/api/session") => handle_logout(state, req),
-        ("PUT", "/api/password") => handle_change_password(state, body),
+        ("PUT", "/api/password") => handle_change_password(state, req, body),
         ("GET", p) if p.starts_with("/proxy/gh/") => {
             guard_proxy(state, req, || handle_proxy_gh(state, req, &p["/proxy/gh/".len()..]))
         }
@@ -340,6 +340,16 @@ struct PasswordBody {
 
 /// `PUT /api/password`: rotate the admin password.
 ///
+/// Requires BOTH a valid session AND the correct `old` password -- knowing
+/// `old` is capability-equivalent to being able to log in (see `POST
+/// /api/session`), so this session check doesn't raise the bar on what an
+/// attacker needs to know. It exists for defense in depth: without it, a
+/// future logic bug in `verify_password`/`admin_file::save` would be
+/// directly reachable by ANY unauthenticated network client, rather than
+/// only by a client that already holds a session. The session check runs
+/// FIRST, before touching `old` at all, so an unauthenticated caller never
+/// even reaches the password-verification path.
+///
 /// SIMPLIFIED for Task 5: config storage doesn't exist yet, so this only
 /// verifies `old`, writes the new PHC, clears `is_default`, and revokes every
 /// existing session (every previously issued session key was derived from
@@ -348,7 +358,11 @@ struct PasswordBody {
 /// under the OLD derived key and re-encrypt it under the NEW one before
 /// persisting -- otherwise existing config ciphertext becomes permanently
 /// unreadable the moment the password changes.
-fn handle_change_password(state: &AppState, body: &[u8]) -> Out {
+fn handle_change_password(state: &AppState, req: &Request, body: &[u8]) -> Out {
+    if !has_valid_session(state, req) {
+        return Out::json(401, json!({"error":"unauthorized"}));
+    }
+
     let req_body: PasswordBody = match serde_json::from_slice(body) {
         Ok(b) => b,
         Err(_) => return Out::json(400, json!({"error":"bad request"})),

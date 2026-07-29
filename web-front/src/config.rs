@@ -29,11 +29,16 @@ impl Default for Config {
             listen: "0.0.0.0:48080".into(), // high port; avoids low-port clashes on a NAS
             proxy_enabled: false,
             proxy_allow_hosts: Vec::new(),
-            // Long-lived by design: the web client persists its session and
-            // the user expects to stay logged in until they log OUT, not
-            // until a timer fires. Personal/self-hosted threat model; tune
-            // with EJ_TOKEN_TTL_SECS if you want shorter sessions.
-            token_ttl_secs: 365 * 24 * 3600,
+            // One hour by default. The old JWT-based design (stateless,
+            // no server-side session table) leaned toward a long-lived
+            // token because revoking a single session wasn't possible at
+            // all -- that premise is gone now that `Sessions` holds a real
+            // server-side table with sliding renewal on every use (see
+            // session.rs::get_key), so a short TTL costs the admin nothing
+            // in practice (any activity keeps the session alive) while
+            // capping how long a leaked cookie/token stays valid. Tune with
+            // EJ_TOKEN_TTL_SECS if you want it shorter or longer.
+            token_ttl_secs: 3600,
             trust_proxy_header: false,
             workers: 8,
         }
@@ -86,7 +91,7 @@ impl Config {
         }
 
         if cfg.token_ttl_secs == 0 {
-            cfg.token_ttl_secs = 365 * 24 * 3600;
+            cfg.token_ttl_secs = 3600;
         }
         if cfg.workers == 0 {
             cfg.workers = 8;
