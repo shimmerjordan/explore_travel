@@ -39,24 +39,29 @@ impl AdminFile {
 
 /// Load `dir/admin.json`.
 ///
-/// If the file is missing, OR present but fails to parse as `AdminFile`, a
-/// fresh default account (username "admin", password "admin", freshly
-/// generated `key_salt_b64`, `is_default: true`) is created, written
-/// atomically via `save`, and returned.
-///
-/// Trade-off (deliberate, see task report): treating a corrupt file the same
-/// as a missing one means a damaged `admin.json` silently resets the
-/// password to the factory default rather than making the service refuse to
-/// start. That is a security trade-off (a corrupted-on-disk file becomes a
-/// free password reset for anyone with filesystem access) accepted in favor
-/// of availability (a bit-rotted file must not permanently lock the operator
-/// out). This mirrors the brief's explicit wording ("解析失败或不存在则造一份默认的").
+/// - Missing file (`ErrorKind::NotFound`): this is a genuine first run. A
+///   fresh default account (username "admin", password "admin", freshly
+///   generated `key_salt_b64`, `is_default: true`) is created, written
+///   atomically via `save`, and returned.
+/// - File present but fails to parse as `AdminFile`: this is NOT treated as
+///   "missing". Auto-resetting credentials here would turn any disk
+///   corruption, truncated write, or bad backup restore into a silent full
+///   credential reset -- and since `key_salt_b64` lives in the same file,
+///   it would also permanently strand any config ciphertext encrypted under
+///   the old key. Instead the corrupt file is quarantined (renamed, never
+///   overwritten or deleted) and `load_or_init` returns `Err` so the service
+///   refuses to start with clear, actionable log output. See
+///   `default_flag_is_persisted_not_inferred` and the corrupt-file tests for
+///   the behavior this guards.
+/// - Any other I/O error (e.g. `PermissionDenied`) is propagated as `Err`
+///   too -- it must never be folded into the "missing" case, or a
+///   permissions problem would masquerade as a first run.
 pub fn load_or_init(dir: &Path) -> Result<AdminFile, String> {
     let path = dir.join(FILE_NAME);
     match fs::read_to_string(&path) {
         Ok(text) => match serde_json::from_str::<AdminFile>(&text) {
             Ok(a) => Ok(a),
-            Err(_) => init_default(dir),
+            Err(parse_err) => quarantine_corrupt(dir, &path, &parse_err.to_string()),
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => init_default(dir),
         Err(e) => Err(format!("read {}: {e}", path.display())),
@@ -75,6 +80,35 @@ fn init_default(dir: &Path) -> Result<AdminFile, String> {
     Ok(a)
 }
 
+/// Move an unparsable `admin.json` out of the way (never delete, never
+/// overwrite) so it survives for forensics, log a message that explains what
+/// happened and how to recover, and return `Err` so startup fails loudly
+/// instead of silently resetting credentials.
+fn quarantine_corrupt(dir: &Path, path: &Path, parse_err: &str) -> Result<AdminFile, String> {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let quarantine_path = dir.join(format!("{FILE_NAME}.corrupt-{secs}"));
+
+    let msg = match fs::rename(path, &quarantine_path) {
+        Ok(()) => format!(
+            "admin.json failed to parse ({parse_err}); refusing to auto-reset credentials. \
+             The original file was preserved as {} for forensics. To reinitialize with a \
+             fresh admin/admin account, delete that file (or admin.json) and restart.",
+            quarantine_path.display()
+        ),
+        Err(rename_err) => format!(
+            "admin.json failed to parse ({parse_err}); additionally failed to quarantine it \
+             to {} ({rename_err}). Refusing to auto-reset credentials -- manual intervention \
+             required.",
+            quarantine_path.display()
+        ),
+    };
+    eprintln!("ERROR: {msg}");
+    Err(msg)
+}
+
 /// Write `admin.json` atomically: serialize to a sibling `admin.json.tmp`
 /// and `rename` it over the real path. `rename` within the same directory is
 /// atomic on POSIX filesystems, so a process killed mid-write can never
@@ -84,8 +118,14 @@ pub fn save(dir: &Path, a: &AdminFile) -> Result<(), String> {
     let path = dir.join(FILE_NAME);
     let tmp_path = dir.join(format!("{FILE_NAME}.tmp"));
     let text = serde_json::to_string_pretty(a).map_err(|e| e.to_string())?;
-    fs::write(&tmp_path, text).map_err(|e| format!("write {}: {e}", tmp_path.display()))?;
-    fs::rename(&tmp_path, &path).map_err(|e| format!("rename {}: {e}", tmp_path.display()))?;
+    if let Err(e) = fs::write(&tmp_path, text) {
+        let _ = fs::remove_file(&tmp_path); // best-effort; don't mask the write error
+        return Err(format!("write {}: {e}", tmp_path.display()));
+    }
+    if let Err(e) = fs::rename(&tmp_path, &path) {
+        let _ = fs::remove_file(&tmp_path); // best-effort; don't mask the rename error
+        return Err(format!("rename {}: {e}", tmp_path.display()));
+    }
     Ok(())
 }
 
@@ -106,7 +146,7 @@ mod tests {
         let d = tmpdir("init");
         let a = load_or_init(&d).unwrap();
         assert_eq!(a.username, "admin");
-        assert!(a.is_default, "首次初始化必须标记为默认密码");
+        assert!(a.is_default, "first run must be flagged as still using the default password");
         assert!(crate::auth::verify_password(&a.password_phc, b"admin"));
         assert!(d.join("admin.json").exists());
     }
@@ -138,5 +178,62 @@ mod tests {
         let d = tmpdir("salt");
         let a = load_or_init(&d).unwrap();
         assert_eq!(a.key_salt().unwrap().len(), 16);
+    }
+
+    /// Guards against a `load_or_init` that DERIVES `is_default` at read time
+    /// (e.g. `verify_password(&a.password_phc, b"admin")`) instead of trusting
+    /// the persisted field. We hand-craft an `admin.json` where `is_default`
+    /// is `true` but the password is deliberately NOT "admin". A field-based
+    /// implementation must read `is_default` back as `true` regardless of the
+    /// password; an inferring implementation would compute `false` here
+    /// (since the password doesn't verify against "admin") and fail this
+    /// assertion. See the task report for the self-check that proves this
+    /// test actually catches the inferring implementation.
+    #[test]
+    fn default_flag_is_persisted_not_inferred() {
+        let d = tmpdir("persisted-flag");
+        let phc = crate::auth::hash_password(b"not-the-default-password").unwrap();
+        let manual = AdminFile {
+            v: 1,
+            username: "admin".into(),
+            password_phc: phc,
+            key_salt_b64: crate::auth::new_salt_b64(),
+            is_default: true,
+        };
+        save(&d, &manual).unwrap();
+
+        let reloaded = load_or_init(&d).unwrap();
+        assert!(
+            reloaded.is_default,
+            "is_default must be read back from the stored field, not re-derived from the password"
+        );
+    }
+
+    /// A corrupt `admin.json` must never be silently reset to admin/admin.
+    /// `load_or_init` should quarantine the unparsable file (move it aside,
+    /// never delete or overwrite it) and return `Err` so startup fails
+    /// loudly instead of handing out a fresh default credential.
+    #[test]
+    fn corrupt_file_is_quarantined_not_reset() {
+        let d = tmpdir("corrupt");
+        std::fs::write(d.join("admin.json"), b"{ this is not valid json").unwrap();
+
+        let result = load_or_init(&d);
+        assert!(
+            result.is_err(),
+            "a corrupt admin.json must cause load_or_init to return Err, not silently reset"
+        );
+        assert!(
+            !d.join("admin.json").exists(),
+            "the corrupt file must be moved aside, not left in place"
+        );
+
+        let quarantined: Vec<_> = std::fs::read_dir(&d)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("admin.json.corrupt-"))
+            .collect();
+        assert_eq!(quarantined.len(), 1, "expected exactly one quarantined copy of the corrupt file");
     }
 }
