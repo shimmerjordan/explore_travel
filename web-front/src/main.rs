@@ -5,6 +5,7 @@ mod config;
 mod config_store;
 mod proxy;
 mod session;
+mod static_files;
 
 use admin_file::AdminFile;
 use config::Config;
@@ -239,8 +240,8 @@ fn client_ip(state: &AppState, req: &Request) -> String {
 
 /// Which rate-limit bucket (and per-minute cap) a request counts against.
 ///
-/// The split is by *what an attacker gains from repeating the request*, not by
-/// URL prefix:
+/// The split is by *what an attacker gains from repeating the request*
+/// crossed with *how the route is actually used*, not by URL prefix alone:
 ///
 /// - `"auth"` (10/min) -- the two routes that check a credential and can be
 ///   attacked without already holding a session: login and password change.
@@ -252,37 +253,89 @@ fn client_ip(state: &AppState, req: &Request) -> String {
 ///   fetches `/api/config` on load, writes it back on every settings change,
 ///   and the console polls its own endpoints. A 10/min cap here would throttle
 ///   ordinary use.
-/// - `"other"` (60/min) -- everything that is neither of the above. Today that
-///   is only `/healthz` and the two read-proxy routes. This number has NOT
-///   been validated against the traffic shapes still to come: serving the
-///   static web build means a cold page load spends tens of requests at once
-///   (doubled by a hard refresh), and proxying map tiles or photos means one
-///   pan across the map can spend a hundred. The cap for static and proxied
-///   traffic must be re-evaluated -- most likely by splitting them into their
-///   own bucket -- when static hosting is added, rather than assumed to fit.
+/// - `"healthz"` (120/min) -- the liveness probe, in its own bucket separate
+///   from every kind of user traffic. A monitor polls at a fixed interval
+///   regardless of how busy the console is, so sharing a budget with
+///   static/proxy traffic would let a page-load storm starve the health
+///   check -- making the container look unhealthy purely because someone
+///   else is using it. 120/min is generous for any sane probe interval (a
+///   1-second interval is 60/min).
+/// - `"proxy"` (600/min) -- `/proxy/gh/*` and `/proxy/url`. These already
+///   require a valid admin session (`guard_proxy`), so the cap here isn't a
+///   brute-force defence -- it bounds how hard one browser tab can hammer an
+///   upstream host (GitHub, a WebDAV server, ...) through this process,
+///   since paging through photos or dragging a map across fog tiles can fire
+///   a request per tile. 600/min (10/sec) covers that comfortably without
+///   leaving the upstream connection effectively uncapped.
+/// - `"static"` (1200/min) -- everything else, i.e. the web build served at
+///   the bottom of `route`. This traffic is a local disk read with no
+///   credential and no upstream dependency, so it's the one bucket that can
+///   be sized for the *shape* of the traffic instead of for abuse
+///   resistance: a cold Flutter web load is 20-30 requests, a hard refresh
+///   doubles that, and a few concurrent tabs behind the same NAT'd IP stack
+///   on top of it -- 1200/min (20/sec) leaves headroom over all of that at
+///   once.
 ///
-/// Keeping `"auth"` in its own bucket is the load-bearing part: config reads
-/// and writes must not be able to spend the login budget, or a client that
-/// polls its config would lock the admin out of the login form -- which is
-/// exactly what a single shared `/api/*` bucket did before this split.
+/// Keeping `"auth"` in its own bucket remains the load-bearing part: config
+/// reads and writes must not be able to spend the login budget, or a client
+/// that polls its config would lock the admin out of the login form -- which
+/// is exactly what a single shared `/api/*` bucket did before that split.
 fn bucket_for(method: &str, path: &str) -> (&'static str, u32) {
     match (method, path) {
         ("POST", "/api/session") | ("PUT", "/api/password") => ("auth", 10),
         (_, p) if p.starts_with("/api/") => ("api", 120),
-        _ => ("other", 60),
+        ("GET", "/healthz") => ("healthz", 120),
+        (_, p) if p.starts_with("/proxy/") => ("proxy", 600),
+        _ => ("static", 1200),
     }
+}
+
+/// Rolling window for the rate limiter, and the staleness threshold used by
+/// `sweep_expired` -- an entry whose window has fully elapsed carries no
+/// information worth keeping.
+const LIMITER_WINDOW: Duration = Duration::from_secs(60);
+
+/// Once the limiter table holds more than this many tracked `(ip, bucket)`
+/// keys, `allow` pays for a sweep before inserting another one. A flat size
+/// threshold (rather than "sweep every Nth call") means a slow trickle of
+/// distinct keys gets swept just as reliably as a burst, and it keeps the
+/// common case -- well under this many active keys -- from paying an O(n)
+/// scan on every single request.
+const LIMITER_SWEEP_THRESHOLD: usize = 512;
+
+/// Remove every `(ip, bucket)` counter whose window has fully elapsed as of
+/// `now`. Pulled out as a pure function over an explicit `now` so a test can
+/// simulate "long after" without waiting on the wall clock: `Instant`
+/// supports plain `Duration` arithmetic, so a later point can be constructed
+/// directly (`now + Duration::from_secs(...)`) instead of introducing a
+/// mockable clock abstraction just for this.
+fn sweep_expired(m: &mut HashMap<String, (Instant, u32)>, now: Instant, window: Duration) {
+    m.retain(|_, (seen, _)| now.duration_since(*seen) <= window);
 }
 
 /// Rate limit `ip` within `bucket`: at most `limit` requests per rolling
 /// 60-second window. Counters are per-(ip, bucket) and never share a budget,
 /// so exhausting one can't spill over into another -- see `bucket_for` for
 /// which routes land where, and why that isolation is what makes this safe.
+///
+/// With `EJ_TRUST_PROXY=1` (the frp/Cloudflare deployment default) the key is
+/// derived from `X-Forwarded-For`, a header the client fully controls -- a
+/// caller that varies it on every request mints a fresh table entry each
+/// time. Without eviction those entries were never removed, only reset in
+/// place once their window passed, so the table grew for as long as the
+/// process ran. `sweep_expired`, triggered once the table is big enough to
+/// matter, is what bounds it.
 fn allow(state: &AppState, ip: &str, bucket: &str, limit: u32) -> bool {
     let mut m = state.limiter.lock().unwrap();
     let now = Instant::now();
+
+    if m.len() > LIMITER_SWEEP_THRESHOLD {
+        sweep_expired(&mut m, now, LIMITER_WINDOW);
+    }
+
     let key = format!("{ip}|{bucket}");
     let e = m.entry(key).or_insert((now, 0));
-    if now.duration_since(e.0) > Duration::from_secs(60) {
+    if now.duration_since(e.0) > LIMITER_WINDOW {
         *e = (now, 1);
         return true;
     }
@@ -383,7 +436,55 @@ fn route(state: &AppState, req: &Request, method: &str, path: &str, query: &str,
         ("GET", "/proxy/url") => {
             guard_proxy(state, req, || handle_proxy_url(state, req, query))
         }
+        ("GET", p) => handle_static(state, p),
         _ => Out::json(404, json!({"error":"not found"})),
+    }
+}
+
+/// Fall back to the static web build for any `GET` that didn't match a route
+/// above. This has to sit at the very bottom of `route`'s match, after every
+/// `/api/*`, `/proxy/*` and `/healthz` arm, so none of those can be shadowed
+/// by a same-named static asset.
+fn handle_static(state: &AppState, path: &str) -> Out {
+    let root = Path::new(&state.cfg.web_root);
+    match static_files::serve(root, path) {
+        static_files::Served::File { bytes, mime } => {
+            Out::bytes(200, mime, bytes)
+                .with("Cache-Control", static_cache_control(path, mime))
+                .with("X-Content-Type-Options", "nosniff")
+        }
+        static_files::Served::NotConfigured => Out::bytes(
+            200,
+            "text/html; charset=utf-8",
+            static_files::SETUP_HTML.as_bytes().to_vec(),
+        )
+        .with("X-Content-Type-Options", "nosniff"),
+        static_files::Served::NotFound => {
+            Out::json(404, json!({"error":"not found"})).with("X-Content-Type-Options", "nosniff")
+        }
+    }
+}
+
+/// Which `Cache-Control` a served static asset gets.
+///
+/// `index.html` is the SPA shell -- every route in the app, including one
+/// this server only reached by falling back to it (see
+/// `static_files::serve`), ends up serving those exact bytes -- so it's
+/// identified by MIME (`text/html`) rather than by the literal request path:
+/// a deep link like `/some/route` serves the same shell and must get the
+/// same treatment, or a stale shell would keep pointing at assets from the
+/// previous deploy. `flutter_service_worker.js` is the other file that must
+/// never be cached -- it's how the app discovers a new deploy at all -- and
+/// it's matched by name since its own MIME type doesn't distinguish it from
+/// any other script. Every other asset in a Flutter web build is
+/// content-hashed, so a long `max-age` is safe: a new deploy gets new
+/// filenames rather than overwriting bytes an old cache entry already points
+/// at.
+fn static_cache_control(path: &str, mime: &str) -> &'static str {
+    if mime == "text/html; charset=utf-8" || path.ends_with("/flutter_service_worker.js") {
+        "no-cache"
+    } else {
+        "public, max-age=3600"
     }
 }
 
@@ -876,37 +977,8 @@ fn url_decode(s: &str) -> String {
 mod tests {
     use super::*;
 
-    /// The property that matters: the two credential-checking routes are the
-    /// ONLY ones in the tight bucket, and session-gated `/api/*` routes are in
-    /// a separate, looser one. If someone widens `"auth"` back to all of
-    /// `/api/*`, the config assertions below fail.
-    #[test]
-    fn credential_routes_are_the_only_tightly_capped_ones() {
-        assert_eq!(bucket_for("POST", "/api/session"), ("auth", 10));
-        assert_eq!(bucket_for("PUT", "/api/password"), ("auth", 10));
-
-        for (m, p) in [
-            ("GET", "/api/config"),
-            ("PUT", "/api/config"),
-            ("DELETE", "/api/session"), // logout checks a session, not a password
-            ("GET", "/api/metrics"),    // an unrouted /api/* path lands here too
-        ] {
-            let (bucket, limit) = bucket_for(m, p);
-            assert_eq!(bucket, "api", "{m} {p} must not share the login budget");
-            assert!(limit > 10, "{m} {p} cap {limit} is too tight for normal use");
-        }
-
-        assert_eq!(bucket_for("GET", "/healthz").0, "other");
-        assert_eq!(bucket_for("GET", "/proxy/gh/a/b/c/d").0, "other");
-        assert_eq!(bucket_for("GET", "/index.html").0, "other");
-    }
-
-    /// Buckets must not share a counter: spending one to exhaustion has to
-    /// leave the others untouched. This is what keeps a config-polling client
-    /// from locking the admin out of the login form.
-    #[test]
-    fn exhausting_one_bucket_leaves_the_others_alone() {
-        let state = AppState {
+    fn test_state() -> AppState {
+        AppState {
             cfg: config::Config::default(),
             limiter: Mutex::new(HashMap::new()),
             agent: proxy::safe_agent(),
@@ -919,7 +991,53 @@ mod tests {
                 is_default: true,
             }),
             config_write: Mutex::new(()),
-        };
+        }
+    }
+
+    /// The property that matters: the two credential-checking routes are the
+    /// ONLY ones in the tight bucket, and every other route -- session-gated
+    /// `/api/*`, the health probe, the proxy, and the static build -- is in
+    /// one of the separate, looser buckets. If someone widens `"auth"` back
+    /// to all of `/api/*`, or folds another route back into it, the
+    /// assertions below fail.
+    #[test]
+    fn credential_routes_are_the_only_tightly_capped_ones() {
+        assert_eq!(bucket_for("POST", "/api/session"), ("auth", 10));
+        assert_eq!(bucket_for("PUT", "/api/password"), ("auth", 10));
+
+        for (m, p) in [
+            ("GET", "/api/config"),
+            ("PUT", "/api/config"),
+            ("DELETE", "/api/session"), // logout checks a session, not a password
+            ("GET", "/api/metrics"),    // an unrouted /api/* path lands here too
+            ("GET", "/healthz"),
+            ("GET", "/proxy/gh/a/b/c/d"),
+            ("GET", "/proxy/url"),
+            ("GET", "/index.html"),
+            ("GET", "/"),
+        ] {
+            let (bucket, limit) = bucket_for(m, p);
+            assert_ne!(bucket, "auth", "{m} {p} must not share the login/password budget");
+            assert!(limit > 10, "{m} {p} cap {limit} is too tight for normal use");
+        }
+
+        // Each of those lands in its own bucket, not lumped together --
+        // otherwise a page-load storm could starve the health probe, or
+        // static traffic could starve the proxy.
+        assert_eq!(bucket_for("GET", "/healthz").0, "healthz");
+        assert_eq!(bucket_for("GET", "/proxy/gh/a/b/c/d").0, "proxy");
+        assert_eq!(bucket_for("GET", "/proxy/url").0, "proxy");
+        assert_eq!(bucket_for("GET", "/index.html").0, "static");
+        assert_eq!(bucket_for("GET", "/").0, "static");
+        assert_eq!(bucket_for("GET", "/api/config").0, "api");
+    }
+
+    /// Buckets must not share a counter: spending one to exhaustion has to
+    /// leave the others untouched. This is what keeps a config-polling client
+    /// from locking the admin out of the login form.
+    #[test]
+    fn exhausting_one_bucket_leaves_the_others_alone() {
+        let state = test_state();
 
         // Drain "api" completely.
         for _ in 0..120 {
@@ -931,5 +1049,47 @@ mod tests {
         assert!(allow(&state, "1.2.3.4", "auth", 10), "auth budget must be independent");
         // ...and a different IP is unaffected in the drained bucket.
         assert!(allow(&state, "5.6.7.8", "api", 120), "buckets must be per-IP");
+    }
+
+    /// A cold Flutter web load alone is 20-30 requests; this pins the
+    /// concrete number the static bucket must absorb without a 429. Against
+    /// the old shared `("other", 60)` bucket this passes too in isolation
+    /// (40 < 60) -- what actually catches a regression back to a shared
+    /// bucket is the end-to-end script, which runs this alongside the other
+    /// static-serving checks on the same IP; see its own notes on why.
+    #[test]
+    fn forty_consecutive_static_requests_are_not_rate_limited() {
+        let state = test_state();
+        let (bucket, limit) = bucket_for("GET", "/index.html");
+        assert_eq!(bucket, "static");
+        for i in 0..40 {
+            assert!(allow(&state, "9.9.9.9", bucket, limit), "request {i} should not be limited");
+        }
+    }
+
+    /// Without eviction, a table entry is only ever reset in place once its
+    /// window passes -- never removed -- so distinct keys accumulate for as
+    /// long as the process runs (see `allow`'s doc comment on
+    /// `X-Forwarded-For` under `EJ_TRUST_PROXY=1`). This drives `sweep_expired`
+    /// directly rather than through `allow`, so it can simulate "long after"
+    /// by constructing a later `Instant` instead of waiting on the real clock.
+    #[test]
+    fn limiter_table_is_swept_once_windows_elapse() {
+        let mut m: HashMap<String, (Instant, u32)> = HashMap::new();
+        let base = Instant::now();
+        for i in 0..500 {
+            m.insert(format!("ip-{i}|static"), (base, 1));
+        }
+        assert_eq!(m.len(), 500);
+
+        // Sweeping before the window has elapsed must not touch anything --
+        // otherwise this test would pass even with a sweep that just clears
+        // the whole table unconditionally.
+        sweep_expired(&mut m, base, LIMITER_WINDOW);
+        assert_eq!(m.len(), 500, "entries still inside their window must survive a sweep");
+
+        let later = base + LIMITER_WINDOW + Duration::from_secs(1);
+        sweep_expired(&mut m, later, LIMITER_WINDOW);
+        assert_eq!(m.len(), 0, "entries whose window fully elapsed must be swept");
     }
 }
