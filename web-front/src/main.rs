@@ -1,3 +1,4 @@
+mod admin_file;
 mod auth;
 mod config;
 mod proxy;
