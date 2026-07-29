@@ -264,7 +264,7 @@ jobs:
 
           数据存哪由 \`EJ_BACKEND_DATA_PATH\` 决定：留空是 Docker 命名卷（零配置），填绝对路径就是 bind mount（备份方便，NAS 推荐）。别指向 NFS/SMB。
 
-          GHCR 容器包**首次推送后默认是 private**（公开仓库也不继承），所以 NAS 上第一次 \`pull\` 基本都会报 \`denied\`/\`unauthorized\`。二选一：① 在 NAS 上 \`docker login ghcr.io -u <你的用户名>\` + 带 \`read:packages\` 的 PAT，一次即可，包保持私有；② 改成公开 —— 包页 → 右侧齿轮 **Package settings** → **滚到最底部 Danger Zone** → **Change visibility**（公开后不可逆）。
+          本仓库是公开的，经 Actions 用 \`GITHUB_TOKEN\` 推送的包会关联到仓库并随之公开 —— 实测 \`ej-backend\` 与 \`ejnas\` 都能**匿名** \`docker pull\`，NAS 上**不需要** \`docker login\`。万一 \`pull\` 报 \`denied\`/\`unauthorized\`，说明包是 private：① NAS 上 \`docker login ghcr.io -u <你的用户名>\` + 带 \`read:packages\` 的 PAT；或 ② 包页 → 右侧齿轮 **Package settings** → **滚到最底部 Danger Zone** → **Change visibility**（公开后不可逆）。
 
           HOWTO2
 
