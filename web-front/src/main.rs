@@ -17,10 +17,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tiny_http::{Header, Method, Request, Response, Server};
 
-// Only /api/* routes carry a request body today (POST /api/session, PUT
-// /api/password), and both payloads are small JSON objects -- proxy routes
-// are GET-only. Task 8's config storage may introduce its own, larger cap
-// when it adds a body-carrying config endpoint.
+// POST /api/session and PUT /api/password bodies are small, fixed-shape JSON
+// objects and share this tight cap. PUT /api/config carries the user's actual
+// config (WebDAV credentials, tokens, etc.), which can be larger, so it uses
+// `config_store::MAX_CONFIG_BYTES` instead -- see `body_cap` below.
 const MAX_API_BODY: u64 = 8 << 10; // 8 KiB
 
 struct AppState {
@@ -29,6 +29,17 @@ struct AppState {
     agent: ureq::Agent,
     sessions: session::Sessions,
     admin: Mutex<AdminFile>,
+    /// Serializes writers of `config.json`: `PUT /api/config`'s `save` and
+    /// password-change's `reencrypt` both go through `config_store`, which
+    /// writes via a shared, fixed `config.json.tmp` path with no locking of
+    /// its own (see config_store.rs). Without this, two concurrent writers
+    /// (e.g. two overlapping `PUT /api/config` calls, or one racing a
+    /// password change) could interleave writes to that shared tmp path and
+    /// have one of them silently lose its update. Readers (`GET
+    /// /api/config`) don't need to take this lock: `config_store::save`'s
+    /// write-tmp-then-rename is atomic, so a concurrent read always
+    /// observes a complete file, old or new, never a torn one.
+    config_write: Mutex<()>,
 }
 
 /// A fully-formed response.
@@ -95,6 +106,7 @@ fn main() {
         cfg,
         limiter: Mutex::new(HashMap::new()),
         agent: proxy::safe_agent(),
+        config_write: Mutex::new(()),
     });
 
     let server = match Server::http(&listen) {
@@ -170,11 +182,39 @@ fn client_ip(state: &AppState, req: &Request) -> String {
         .unwrap_or_default()
 }
 
-/// Rate limit `ip` within `bucket`. `bucket` keeps the counter for `/api/*`
-/// (tight cap, brute-force resistance on the credential checks) separate
-/// from the counter for everything else (looser cap) -- sharing one counter
-/// across both would let a burst of ordinary requests exhaust the `/api/*`
-/// budget and lock the admin out of logging in.
+/// Which rate-limit bucket (and per-minute cap) a request counts against.
+///
+/// The split is by *what an attacker gains from repeating the request*, not by
+/// URL prefix:
+///
+/// - `"auth"` (10/min) -- the two routes that check a credential and can be
+///   attacked without already holding a session: login and password change.
+///   The tight cap is the brute-force defence, and it's the only place a tight
+///   cap buys anything.
+/// - `"api"` (120/min) -- every other `/api/*` route. These all require a
+///   valid session before they do anything, so hammering them is pointless
+///   for an attacker but entirely normal for the real admin: the web client
+///   fetches `/api/config` on load, writes it back on every settings change,
+///   and the console polls its own endpoints. A 10/min cap here would throttle
+///   ordinary use.
+/// - `"other"` (60/min) -- everything else (health, proxy, static files).
+///
+/// Keeping `"auth"` in its own bucket is the load-bearing part: config reads
+/// and writes must not be able to spend the login budget, or a client that
+/// polls its config would lock the admin out of the login form -- which is
+/// exactly what a single shared `/api/*` bucket did before this split.
+fn bucket_for(method: &str, path: &str) -> (&'static str, u32) {
+    match (method, path) {
+        ("POST", "/api/session") | ("PUT", "/api/password") => ("auth", 10),
+        (_, p) if p.starts_with("/api/") => ("api", 120),
+        _ => ("other", 60),
+    }
+}
+
+/// Rate limit `ip` within `bucket`: at most `limit` requests per rolling
+/// 60-second window. Counters are per-(ip, bucket) and never share a budget,
+/// so exhausting one can't spill over into another -- see `bucket_for` for
+/// which routes land where, and why that isolation is what makes this safe.
 fn allow(state: &AppState, ip: &str, bucket: &str, limit: u32) -> bool {
     let mut m = state.limiter.lock().unwrap();
     let now = Instant::now();
@@ -208,10 +248,7 @@ fn serve(state: &AppState, mut req: Request) {
     };
     let ip = client_ip(state, &req);
 
-    // /api/* (login, logout, password change) gets its own, tighter-capped
-    // counter -- brute-force resistance on the credential checks -- kept
-    // separate from the general-route counter (see `allow`'s doc comment).
-    let (bucket, limit) = if path.starts_with("/api/") { ("api", 10) } else { ("other", 60) };
+    let (bucket, limit) = bucket_for(&method, &path);
     if !allow(state, &ip, bucket, limit) {
         log_access(&ip, &method, &path, 429);
         let out = Out::json(429, json!({"error":"rate limited"})).with("Retry-After", "60");
@@ -219,13 +256,29 @@ fn serve(state: &AppState, mut req: Request) {
         return;
     }
 
-    // Read the body (capped) for methods that carry one. Today that's only
-    // POST /api/session and PUT /api/password; both fit comfortably under
-    // MAX_API_BODY.
+    // Read the body (capped) for methods that carry one. POST /api/session
+    // and PUT /api/password use the small MAX_API_BODY cap; PUT /api/config
+    // uses config_store::MAX_CONFIG_BYTES instead (see `body_cap`).
     let mut body = Vec::new();
     if method == "POST" || method == "PUT" {
-        let _ = req.as_reader().take(MAX_API_BODY + 1).read_to_end(&mut body);
-        if body.len() as u64 > MAX_API_BODY {
+        // PUT /api/config's cap is far larger than the others, so before
+        // paying for that read, reject a missing/invalid session up front --
+        // this check only needs the Authorization/Cookie header, not the
+        // body. This both avoids reading a large payload that would be
+        // rejected anyway, and makes 401 win over 413 when both would
+        // apply, matching the task brief's required check order for this
+        // route (session before size).
+        if method == "PUT" && path == "/api/config" && !has_valid_session(state, &req) {
+            log_access(&ip, &method, &path, 401);
+            respond(req, Out::json(401, json!({"error":"unauthorized"})));
+            return;
+        }
+        let cap = body_cap(&method, &path);
+        // `take(cap + 1)` bounds how many bytes are ever pulled off the
+        // socket -- an oversized body is never fully materialized in memory
+        // just to be thrown away by the length check below.
+        let _ = req.as_reader().take(cap + 1).read_to_end(&mut body);
+        if body.len() as u64 > cap {
             log_access(&ip, &method, &path, 413);
             respond(req, Out::json(413, json!({"error":"body too large"})));
             return;
@@ -235,6 +288,18 @@ fn serve(state: &AppState, mut req: Request) {
     let out = route(state, &req, &method, &path, &query, &body);
     log_access(&ip, &method, &path, out.status);
     respond(req, out);
+}
+
+/// Per-route cap on the request body `serve` reads before dispatch. Every
+/// body-carrying route besides `PUT /api/config` shares the small,
+/// fixed-shape `MAX_API_BODY` cap; `PUT /api/config` carries the user's
+/// actual config JSON and gets the larger `config_store::MAX_CONFIG_BYTES`.
+fn body_cap(method: &str, path: &str) -> u64 {
+    if method == "PUT" && path == "/api/config" {
+        config_store::MAX_CONFIG_BYTES as u64
+    } else {
+        MAX_API_BODY
+    }
 }
 
 /// One access-log line per request → visible in `docker logs web-front`.
@@ -248,6 +313,8 @@ fn route(state: &AppState, req: &Request, method: &str, path: &str, query: &str,
         ("POST", "/api/session") => handle_login(state, body),
         ("DELETE", "/api/session") => handle_logout(state, req),
         ("PUT", "/api/password") => handle_change_password(state, req, body),
+        ("GET", "/api/config") => handle_get_config(state, req),
+        ("PUT", "/api/config") => handle_put_config(state, req, body),
         ("GET", p) if p.starts_with("/proxy/gh/") => {
             guard_proxy(state, req, || handle_proxy_gh(state, req, &p["/proxy/gh/".len()..]))
         }
@@ -351,14 +418,30 @@ struct PasswordBody {
 /// FIRST, before touching `old` at all, so an unauthenticated caller never
 /// even reaches the password-verification path.
 ///
-/// SIMPLIFIED for Task 5: config storage doesn't exist yet, so this only
-/// verifies `old`, writes the new PHC, clears `is_default`, and revokes every
-/// existing session (every previously issued session key was derived from
-/// the now-stale password, so keeping them alive would leak a key nothing
-/// can use safely). Task 8 MUST extend this to decrypt the stored config
-/// under the OLD derived key and re-encrypt it under the NEW one before
-/// persisting -- otherwise existing config ciphertext becomes permanently
-/// unreadable the moment the password changes.
+/// The config-encryption key is derived from the admin password (see
+/// `auth::derive_config_key`), so changing the password means the stored
+/// config -- if any -- must be re-encrypted from the old key to the new one.
+/// The step order below is deliberate and MUST NOT be reordered:
+///
+///   1. validate the session (401)
+///   2. validate `old` against the stored PHC (401)
+///   3. validate `new`'s length (400)
+///   4. derive `old_key` and `new_key` from the (now-verified) passwords
+///   5. `config_store::reencrypt(dir, &old_key, &new_key)` -- if this fails,
+///      abort the ENTIRE request with 500 and do NOT write anything below
+///   6. only once step 5 has succeeded, persist the new PHC to admin.json
+///   7. revoke every existing session
+///
+/// Step 5 must run, and must succeed, before step 6 writes the new PHC.
+/// Once the new PHC is on disk, the OLD key is gone for good -- nothing
+/// keeps it around. If the new PHC were written first and `reencrypt` then
+/// failed (or were skipped), the stored config -- still ciphertext under the
+/// old key -- would become permanently unreadable: the old password no
+/// longer verifies (so it can't be used to re-derive the old key via
+/// login), and the new password derives a different key that can't decrypt
+/// data encrypted under the old one. That's unrecoverable data loss, not
+/// just a failed request, so `reencrypt` failing must leave the password
+/// completely unchanged.
 fn handle_change_password(state: &AppState, req: &Request, body: &[u8]) -> Out {
     if !has_valid_session(state, req) {
         return Out::json(401, json!({"error":"unauthorized"}));
@@ -368,13 +451,39 @@ fn handle_change_password(state: &AppState, req: &Request, body: &[u8]) -> Out {
         Ok(b) => b,
         Err(_) => return Out::json(400, json!({"error":"bad request"})),
     };
+
+    let mut admin = state.admin.lock().unwrap();
+    // Undifferentiated 401 -- same rationale as `handle_login`: never lets a
+    // caller distinguish "wrong old password" from any other failure mode.
+    if !auth::verify_password(&admin.password_phc, req_body.old.as_bytes()) {
+        return Out::json(401, json!({"error":"unauthorized"}));
+    }
     if req_body.new.len() < 8 {
         return Out::json(400, json!({"error":"new password too short"}));
     }
 
-    let mut admin = state.admin.lock().unwrap();
-    if !auth::verify_password(&admin.password_phc, req_body.old.as_bytes()) {
-        return Out::json(401, json!({"error":"unauthorized"}));
+    let key_salt = match admin.key_salt() {
+        Ok(k) => k,
+        Err(e) => return Out::json(500, json!({"error": e})),
+    };
+    let old_key = match auth::derive_config_key(req_body.old.as_bytes(), &key_salt) {
+        Ok(k) => k,
+        Err(e) => return Out::json(500, json!({"error": e})),
+    };
+    let new_key = match auth::derive_config_key(req_body.new.as_bytes(), &key_salt) {
+        Ok(k) => k,
+        Err(e) => return Out::json(500, json!({"error": e})),
+    };
+
+    let dir = Path::new(&state.cfg.data_dir);
+
+    // See the step-order comment above the function: this MUST happen, and
+    // MUST succeed, before the new PHC is written below.
+    {
+        let _config_guard = state.config_write.lock().unwrap();
+        if let Err(e) = config_store::reencrypt(dir, &old_key, &new_key) {
+            return Out::json(500, json!({"error": e}));
+        }
     }
 
     let new_phc = match auth::hash_password(req_body.new.as_bytes()) {
@@ -383,13 +492,63 @@ fn handle_change_password(state: &AppState, req: &Request, body: &[u8]) -> Out {
     };
     admin.password_phc = new_phc;
     admin.is_default = false;
-    if let Err(e) = admin_file::save(Path::new(&state.cfg.data_dir), &admin) {
+    if let Err(e) = admin_file::save(dir, &admin) {
         return Out::json(500, json!({"error": e}));
     }
     drop(admin);
 
     state.sessions.revoke_all();
     Out::json(200, json!({"ok": true}))
+}
+
+/// `GET /api/config`: return the caller's decrypted config JSON verbatim.
+///
+/// `config_store::load` returning `Ok(None)` means no config has ever been
+/// pushed -- a normal, common first-run state, not an error -- so the
+/// response is `200 {}`, not a 404 or 500. `Err` is `config_store`'s single,
+/// deliberately undifferentiated "config decrypt failed" (see that module's
+/// `DECRYPT_ERR` doc comment for why) and is passed through unchanged, not
+/// rewrapped or elaborated on here.
+fn handle_get_config(state: &AppState, req: &Request) -> Out {
+    let key = match session_token(req).and_then(|t| state.sessions.get_key(&t)) {
+        Some(k) => k,
+        None => return Out::json(401, json!({"error":"unauthorized"})),
+    };
+    let dir = Path::new(&state.cfg.data_dir);
+    match config_store::load(dir, &key) {
+        Ok(None) => Out::json(200, json!({})),
+        Ok(Some(plaintext)) => Out::bytes(200, "application/json", plaintext),
+        Err(e) => Out::json(500, json!({"error": e})),
+    }
+}
+
+/// `PUT /api/config`: encrypt and persist the caller's config JSON verbatim.
+///
+/// By the time this runs, `serve` has already: rejected a missing/invalid
+/// session (401) and enforced the `config_store::MAX_CONFIG_BYTES` size cap
+/// (413) via a bounded read, in that order. What's left here is checking
+/// that the body actually parses as a JSON *object* (not an array, string,
+/// number, bool, or null) before it's handed to `config_store::save` --
+/// `config_store` stores opaque bytes and has no opinion on their shape, so
+/// this is the only place that would ever catch a malformed payload.
+fn handle_put_config(state: &AppState, req: &Request, body: &[u8]) -> Out {
+    let key = match session_token(req).and_then(|t| state.sessions.get_key(&t)) {
+        Some(k) => k,
+        None => return Out::json(401, json!({"error":"unauthorized"})),
+    };
+    match serde_json::from_slice::<Value>(body) {
+        Ok(Value::Object(_)) => {}
+        _ => return Out::json(400, json!({"error":"config must be a JSON object"})),
+    }
+
+    let dir = Path::new(&state.cfg.data_dir);
+    // Serialize against `PUT /api/config` calls and against password-change's
+    // `reencrypt` -- see the doc comment on `AppState::config_write`.
+    let _guard = state.config_write.lock().unwrap();
+    match config_store::save(dir, &key, body) {
+        Ok(()) => Out::json(200, json!({"ok": true})),
+        Err(e) => Out::json(500, json!({"error": e})),
+    }
 }
 
 fn handle_proxy_gh(state: &AppState, req: &Request, rest: &str) -> Out {
@@ -519,4 +678,66 @@ fn url_decode(s: &str) -> String {
         }
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The property that matters: the two credential-checking routes are the
+    /// ONLY ones in the tight bucket, and session-gated `/api/*` routes are in
+    /// a separate, looser one. If someone widens `"auth"` back to all of
+    /// `/api/*`, the config assertions below fail.
+    #[test]
+    fn credential_routes_are_the_only_tightly_capped_ones() {
+        assert_eq!(bucket_for("POST", "/api/session"), ("auth", 10));
+        assert_eq!(bucket_for("PUT", "/api/password"), ("auth", 10));
+
+        for (m, p) in [
+            ("GET", "/api/config"),
+            ("PUT", "/api/config"),
+            ("DELETE", "/api/session"), // logout checks a session, not a password
+            ("GET", "/api/metrics"),    // future console routes land here too
+        ] {
+            let (bucket, limit) = bucket_for(m, p);
+            assert_eq!(bucket, "api", "{m} {p} must not share the login budget");
+            assert!(limit > 10, "{m} {p} cap {limit} is too tight for normal use");
+        }
+
+        assert_eq!(bucket_for("GET", "/healthz").0, "other");
+        assert_eq!(bucket_for("GET", "/proxy/gh/a/b/c/d").0, "other");
+        assert_eq!(bucket_for("GET", "/index.html").0, "other");
+    }
+
+    /// Buckets must not share a counter: spending one to exhaustion has to
+    /// leave the others untouched. This is what keeps a config-polling client
+    /// from locking the admin out of the login form.
+    #[test]
+    fn exhausting_one_bucket_leaves_the_others_alone() {
+        let state = AppState {
+            cfg: config::Config::default(),
+            limiter: Mutex::new(HashMap::new()),
+            agent: proxy::safe_agent(),
+            sessions: session::Sessions::new(60),
+            admin: Mutex::new(AdminFile {
+                v: 1,
+                username: "admin".into(),
+                password_phc: String::new(),
+                key_salt_b64: String::new(),
+                is_default: true,
+            }),
+            config_write: Mutex::new(()),
+        };
+
+        // Drain "api" completely.
+        for _ in 0..120 {
+            assert!(allow(&state, "1.2.3.4", "api", 120));
+        }
+        assert!(!allow(&state, "1.2.3.4", "api", 120), "api bucket should be spent");
+
+        // Login still works for that same IP...
+        assert!(allow(&state, "1.2.3.4", "auth", 10), "auth budget must be independent");
+        // ...and a different IP is unaffected in the drained bucket.
+        assert!(allow(&state, "5.6.7.8", "api", 120), "buckets must be per-IP");
+    }
 }
