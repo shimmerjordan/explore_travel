@@ -1,6 +1,7 @@
 mod admin_file;
 mod auth;
 mod config;
+mod config_store;
 mod proxy;
 mod session;
 
