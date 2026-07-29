@@ -1,4 +1,4 @@
-# ejnas — deploy from the prebuilt GHCR image (no source checkout, no build).
+# web-front — deploy from the prebuilt GHCR image (no source checkout, no build).
 #
 # This is the file the CI run summary hands you for a NAS deployment. It is
 # deliberately self-contained: `docker compose up -d` next to a .env is all it
@@ -6,16 +6,16 @@
 #
 # .env next to this file (the summary generates it for you):
 #   EJ_JWT_SECRET=<openssl rand -base64 48>      REQUIRED, >= 32 bytes
-#   EJ_DATA_PATH=/volume1/docker/ejnas/data      where ej.db lives (see below)
+#   EJ_DATA_PATH=/volume1/docker/web-front/data      where ej.db lives (see below)
 #   EJ_CORS_ORIGINS=https://ej.example.com       exact origin of your web build
 
 services:
-  ejnas:
+  web-front:
     # Multi-arch manifest (amd64 + arm64) — docker picks the right one.
     # Pin to a commit sha instead of `latest` if you want reproducible rollouts:
-    #   image: ghcr.io/shimmerjordan/explore_travel/ejnas:sha-1a2b3c4
-    image: ${EJ_IMAGE:-ghcr.io/shimmerjordan/explore_travel/ejnas:latest}
-    container_name: ejnas
+    #   image: ghcr.io/shimmerjordan/explore_travel/web-front:sha-1a2b3c4
+    image: ${EJ_WEB_FRONT_IMAGE:-ghcr.io/shimmerjordan/explore_travel/web-front:latest}
+    container_name: web-front
     restart: unless-stopped
     # High host port. NEVER use 80 / 443 / 8080: consumer ISPs block inbound
     # traffic on those, which makes a home/NAS deployment unreachable from the

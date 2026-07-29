@@ -140,7 +140,7 @@ App 不依赖任何中心服务器，发现 / 连接同伴有四条独立通道�
 
 ### 可选 NAS 后端（Rust + Docker）
 
-登录与多用户隔离由一个极小的自建后端 [`nas-backend/`](nas-backend/) 提供
+登录与多用户隔离由一个极小的自建后端 [`web-front/`](web-front/) 提供
 （tiny_http + rusqlite + argon2 + JWT）。它**唯一**的职责是把每个用户的*设置*
 （同步地址、各家密钥）记在**零知识加密保险箱**里：
 
@@ -152,7 +152,7 @@ App 不依赖任何中心服务器，发现 / 连接同伴有四条独立通道�
   同时不会被拿来探测你的内网。
 
 ```bash
-cd nas-backend
+cd web-front
 cp .env.example .env          # 设置 EJ_JWT_SECRET（≥32 字节）和端口
 docker compose up -d          # 默认监听 :48080
 ```
@@ -446,7 +446,7 @@ lib/
     group_setup · imghost · backup · settings · permissions · debug · about ·
     auth（Web 登录/注册）
 
-nas-backend/                      可选 Rust + Docker 后端（登录 + 保险箱 + WebDAV 代理）
+web-front/                        可选 Rust + Docker 后端（登录 + 保险箱 + WebDAV 代理）
 ```
 
 单一功能模块单一目录。

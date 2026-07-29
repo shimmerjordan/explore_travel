@@ -165,22 +165,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ejnas"
-version = "0.1.0"
-dependencies = [
- "argon2",
- "base64",
- "jsonwebtoken",
- "rand",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "tiny_http",
- "ureq",
-]
-
-[[package]]
 name = "fallible-iterator"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -997,6 +981,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc1b4cb0cc549fcf58d7dfc081778139b3d283a081644e833e84682ad71cea24"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "web-front"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "base64",
+ "jsonwebtoken",
+ "rand",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tiny_http",
+ "ureq",
 ]
 
 [[package]]

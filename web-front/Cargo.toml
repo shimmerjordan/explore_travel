@@ -1,11 +1,11 @@
 [package]
-name = "ejnas"
+name = "web-front"
 version = "0.1.0"
 edition = "2021"
 description = "explore_journal NAS backend: zero-knowledge settings vault + read proxy"
 
 [[bin]]
-name = "ejnas"
+name = "web-front"
 path = "src/main.rs"
 
 [dependencies]

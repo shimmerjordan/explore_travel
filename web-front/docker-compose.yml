@@ -1,8 +1,8 @@
 services:
-  ejnas:
+  web-front:
     build: .
-    image: ejnas:latest
-    container_name: ejnas
+    image: web-front:latest
+    container_name: web-front
     restart: unless-stopped
     # High host port (left side) — change it freely if 48080 is taken on your NAS,
     # but NEVER to 80 / 443 / 8080: consumer ISPs block inbound traffic on those,
@@ -23,12 +23,12 @@ services:
       #     (the usual choice on a NAS, so it lands on the big disk and gets
       #     picked up by the NAS's own backup jobs):
       #
-      #       EJ_DATA_PATH=/volume1/docker/ejnas/data
+      #       EJ_DATA_PATH=/volume1/docker/web-front/data
       #
       #     A bind mount does NOT inherit image ownership, so grant the
       #     container's nonroot UID access ONCE before the first start:
-      #       sudo mkdir -p /volume1/docker/ejnas/data
-      #       sudo chown -R 65532:65532 /volume1/docker/ejnas/data
+      #       sudo mkdir -p /volume1/docker/web-front/data
+      #       sudo chown -R 65532:65532 /volume1/docker/web-front/data
       #
       # Local filesystem only — never point this at NFS/SMB: SQLite's WAL and
       # POSIX locks are unreliable on network mounts and will corrupt the DB.
@@ -50,7 +50,7 @@ services:
 volumes:
   # Only used in the default (named-volume) mode; ignored when EJ_DATA_PATH
   # points at a host directory. Its real name is prefixed with the compose
-  # project — `nas-backend_ejdata` when you run from this directory. Back it up:
-  #   docker run --rm -v nas-backend_ejdata:/data -v "$PWD":/backup busybox \
+  # project — `web-front_ejdata` when you run from this directory. Back it up:
+  #   docker run --rm -v web-front_ejdata:/data -v "$PWD":/backup busybox \
   #     tar czf /backup/ejdata.tgz -C /data .
   ejdata:

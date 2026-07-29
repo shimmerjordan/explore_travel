@@ -15,7 +15,7 @@ name: Docker 后端编译
 #
 # 验证用的是原生 amd64 镜像（跑真容器打完整 E2E）；arm64 只参与最后的
 # manifest 构建——镜像里没有编译步骤，只有 COPY 和一次 mkdir/chown，跨架构
-# 没有可失败的余地。需要在 arm64 上跑真容器验证的是 nas-backend（Rust 交叉
+# 没有可失败的余地。需要在 arm64 上跑真容器验证的是 web-front（Rust 交叉
 # 编译），那条流水线里做了。
 #
 # PR 只验证不推送；只有 main 上的 push 才会发布 latest。
@@ -264,7 +264,7 @@ jobs:
 
           数据存哪由 \`EJ_BACKEND_DATA_PATH\` 决定：留空是 Docker 命名卷（零配置），填绝对路径就是 bind mount（备份方便，NAS 推荐）。别指向 NFS/SMB。
 
-          本仓库是公开的，经 Actions 用 \`GITHUB_TOKEN\` 推送的包会关联到仓库并随之公开 —— 实测 \`ej-backend\` 与 \`ejnas\` 都能**匿名** \`docker pull\`，NAS 上**不需要** \`docker login\`。万一 \`pull\` 报 \`denied\`/\`unauthorized\`，说明包是 private：① NAS 上 \`docker login ghcr.io -u <你的用户名>\` + 带 \`read:packages\` 的 PAT；或 ② 包页 → 右侧齿轮 **Package settings** → **滚到最底部 Danger Zone** → **Change visibility**（公开后不可逆）。
+          本仓库是公开的，经 Actions 用 \`GITHUB_TOKEN\` 推送的包会关联到仓库并随之公开 —— 实测 \`ej-backend\` 与 \`web-front\` 都能**匿名** \`docker pull\`，NAS 上**不需要** \`docker login\`。万一 \`pull\` 报 \`denied\`/\`unauthorized\`，说明包是 private：① NAS 上 \`docker login ghcr.io -u <你的用户名>\` + 带 \`read:packages\` 的 PAT；或 ② 包页 → 右侧齿轮 **Package settings** → **滚到最底部 Danger Zone** → **Change visibility**（公开后不可逆）。
 
           HOWTO2
 

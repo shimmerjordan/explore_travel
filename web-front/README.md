@@ -1,4 +1,4 @@
-# explore_journal — NAS backend (Rust)
+# explore_journal — web-front (Rust)
 
 Thin **Rust** service for the web-display feature (plan §3.2 / §3.7). It does
 three things and **stores no user content**:
@@ -31,14 +31,14 @@ CI publishes a multi-arch (amd64 + arm64) image to GHCR on every push to
 compiler needed on the NAS:
 
 ```bash
-sudo mkdir -p /volume1/docker/ejnas/data && cd /volume1/docker/ejnas
+sudo mkdir -p /volume1/docker/web-front/data && cd /volume1/docker/web-front
 # grab docker-compose.ghcr.yml from this directory, then:
 cat > .env <<EOF
 EJ_JWT_SECRET=$(openssl rand -base64 48)
-EJ_DATA_PATH=/volume1/docker/ejnas/data
+EJ_DATA_PATH=/volume1/docker/web-front/data
 EJ_CORS_ORIGINS=http://localhost:48082
 EOF
-sudo chown -R 65532:65532 /volume1/docker/ejnas/data   # container runs as UID 65532
+sudo chown -R 65532:65532 /volume1/docker/web-front/data   # container runs as UID 65532
 sudo docker compose up -d
 curl localhost:48080/healthz    # {"status":"ok"}
 ```
@@ -50,14 +50,14 @@ copy-paste from there and it is a genuine one-shot deploy.
 ## Build from source instead
 
 ```bash
-cd nas-backend
+cd web-front
 echo "EJ_JWT_SECRET=$(openssl rand -base64 48)" > .env
 echo "EJ_CORS_ORIGINS=https://your-web-host.example" >> .env
 docker compose up -d            # builds the image, listens on :48080
 
 # ...or without Docker
 cargo build --release           # needs a C compiler for the bundled SQLite
-EJ_JWT_SECRET=$(openssl rand -base64 48) ./target/release/ejnas
+EJ_JWT_SECRET=$(openssl rand -base64 48) ./target/release/web-front
 ```
 
 ## Where the data lives

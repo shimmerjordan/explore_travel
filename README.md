@@ -199,7 +199,7 @@ import → display.
 
 ### Optional NAS backend (Rust + Docker)
 
-Login & per-user isolation are served by a tiny self-hosted backend in [`nas-backend/`](nas-backend/)
+Login & per-user isolation are served by a tiny self-hosted backend in [`web-front/`](web-front/)
 (tiny_http + rusqlite + argon2 + JWT). Its **only** job is to remember each user's *settings*
 — sync URLs, provider keys — inside a **zero-knowledge encrypted vault**:
 
@@ -211,7 +211,7 @@ Login & per-user isolation are served by a tiny self-hosted backend in [`nas-bac
   lacks CORS, without the server being usable to probe your LAN.
 
 ```bash
-cd nas-backend
+cd web-front
 cp .env.example .env          # set EJ_JWT_SECRET (≥32 bytes) and a port
 docker compose up -d          # listens on :48080 by default
 ```
@@ -479,7 +479,7 @@ lib/
 
 services/sync/      SyncStorage abstraction: WebDAV · GitHub · OneDrive · NAS
 services/vault/     Zero-knowledge settings vault (PBKDF2 → HKDF → AES-GCM)
-nas-backend/        Optional Rust + Docker backend (auth + vault + WebDAV proxy)
+web-front/          Optional Rust + Docker backend (auth + vault + WebDAV proxy)
 ```
 
 Organised so a single feature lives in one folder.

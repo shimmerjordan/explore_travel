@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Container-level smoke test for the ejnas image.
+# Container-level smoke test for the web-front image.
 #
 # Runs the image exactly as a NAS deployment would (nonroot, /data volume) and
 # drives the real API over HTTP: register → session → vault round-trip →
 # optimistic concurrency → restart persistence → registration lockout.
 #
 #   ./scripts/docker-smoke.sh                        # build locally, full run
-#   IMAGE=ghcr.io/o/r/ejnas:latest ./scripts/docker-smoke.sh
+#   IMAGE=ghcr.io/o/r/web-front:latest ./scripts/docker-smoke.sh
 #   LEVEL=boot PLATFORM=linux/arm64 ./scripts/docker-smoke.sh   # foreign arch
 #
 # LEVEL=full (default) exercises the whole API, and that is what CI runs for
@@ -21,11 +21,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-IMAGE=${IMAGE:-ejnas:smoke}
+IMAGE=${IMAGE:-web-front:smoke}
 PORT=${PORT:-18991}
 LEVEL=${LEVEL:-full}
 PLATFORM=${PLATFORM:-}
-NAME="ejnas-smoke-$$"
+NAME="web-front-smoke-$$"
 VOL="${NAME}-data"
 SECRET=$(openssl rand -base64 48)
 # One verifier reused across register and login, so the login assertion is

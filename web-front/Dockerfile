@@ -49,7 +49,7 @@ COPY src ./src
 RUN set -eux; \
     TRIPLE="$(cat /triple)"; \
     cargo build --release --locked --target "$TRIPLE"; \
-    cp "target/$TRIPLE/release/ejnas" /ejnas
+    cp "target/$TRIPLE/release/web-front" /web-front
 
 # Pre-make an empty /data so we can stamp nonroot ownership onto it in the
 # final image (distroless has no shell, so we can't mkdir/chown there).
@@ -60,7 +60,7 @@ RUN mkdir -p /data
 # against glibc). nonroot user, no shell, tiny attack surface. buildx resolves
 # this to the TARGET arch automatically.
 FROM gcr.io/distroless/cc-debian12:nonroot
-COPY --from=build /ejnas /ejnas
+COPY --from=build /web-front /web-front
 # /data owned by the nonroot user (UID 65532). A Docker NAMED volume inherits
 # this ownership on first use, so the DB is writable with zero host setup. (A
 # bind mount does NOT inherit it — see docker-compose.yml for that case.)
@@ -68,4 +68,4 @@ COPY --from=build --chown=65532:65532 /data /data
 EXPOSE 48080
 VOLUME ["/data"]
 USER nonroot:nonroot
-ENTRYPOINT ["/ejnas"]
+ENTRYPOINT ["/web-front"]

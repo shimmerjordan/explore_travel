@@ -222,7 +222,7 @@ fn serve(state: &AppState, mut req: Request) {
     respond(req, out, &cors);
 }
 
-/// One access-log line per request → visible in `docker logs ejnas`. Includes
+/// One access-log line per request → visible in `docker logs web-front`. Includes
 /// the request Origin and whether it matched the CORS allowlist (corsOk), the
 /// #1 thing to check when a browser request "fails" with no server error.
 fn log_access(ip: &str, method: &str, path: &str, status: u16, origin: &Option<String>, cors_ok: bool) {
