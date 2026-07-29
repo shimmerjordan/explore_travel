@@ -43,7 +43,7 @@ sudo docker compose up -d
 curl localhost:48080/healthz    # {"status":"ok"}
 ```
 
-The **run summary** of the「NAS 后端镜像（GHCR）」workflow prints this same
+The **run summary** of the「web-front 镜像（GHCR）」workflow prints this same
 sequence with the compose file inlined and the exact image tag for that commit —
 copy-paste from there and it is a genuine one-shot deploy.
 
