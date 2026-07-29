@@ -1,4 +1,4 @@
-# ejnas 去账号化 + 管理看板 + CI 整理 — 设计
+# web-front 去账号化 + 管理看板 + 双镜像与 CI 整理 — 设计
 
 日期：2026-07-29
 状态：已确认，待实施
@@ -35,7 +35,7 @@ web 产物没有投递到 NAS 的链路。
 
 ## 非目标
 
-- **服务端不实现云端同步逻辑**。ejnas 不解析 FOW 瓦片、不读日志库、不做数据聚合。
+- **服务端不实现云端同步逻辑**。web-front 不解析 FOW 瓦片、不读日志库、不做数据聚合。
   看板只展示服务自身的运行指标。云端数据的读取与渲染仍由 Flutter 侧完成。
 - **不做多用户**。单 admin，无注册、无角色、无权限分级。
 - **不把排行榜/组队物理拆成两个镜像**。用模块开关表达边界，不复制 CI 与部署资产。
@@ -48,15 +48,27 @@ web 产物没有投递到 NAS 的链路。
 | 1 | 配置存服务端一份，web 端登录后拉取（写入见「谁能写配置」） | 备选是 localStorage（凭据落浏览器，XSS 风险）或每次重填（日常查看太繁琐） |
 | 2 | web 端也过 admin 登录，与看板共用一份 session | 那份配置含凭据，无鉴权读取等于公开云凭据 |
 | 3 | 看板 = 服务运行状况 + 配置备份导出 | 服务端不碰云端数据，避免在 Rust 里重写 Dart 的 SyncEngine |
-| 4 | 一个端口全包，web 产物挂 volume | 同源 → `EJ_CORS_ORIGINS` 整体删除；产物不进镜像 → 不拖累镜像体积与 CI 时长 |
+| 4 | 一个端口全包，**web 产物打进镜像** | 同源 → `EJ_CORS_ORIGINS` 整体删除；`docker compose up` 即可用，不必往 NAS 拷产物。代价见「风险与权衡」 |
 | 5 | OneDrive 与 WebDAV 都支持 | WebDAV 必须经代理，见下节 |
 | 6 | 凭据用 admin 密码派生密钥加密 | 落盘即密文；卷备份外流不直接泄露 WebDAV 密码 / OneDrive token / GitHub token / AI key |
-| 7 | web 由 ejnas 托管，不放 Vercel | 见「为什么 web 不放 Vercel」 |
+| 7 | web 由 web-front 托管，不放 Vercel | 见「为什么 web 不放 Vercel」 |
 | 8 | 排行榜/组队同镜像 + 模块开关 | 逻辑边界已清晰，物理拆分对单人规模是纯负担 |
+| 9 | **最终只有两个镜像**：`web-front`（web 静态 + admin + 配置 + 看板 + 代理）与 `ej-backend`（排行榜 + 组队） | 使用者视角的心智模型就是两件事：「看数据的地方」和「联机/榜单的地方」 |
+| 10 | **`nas-backend/` 更名为 `web-front/`**，镜像 `ejnas` → `web-front` | 职责已本质变化：它不再只是 NAS 上的后端，而是 web 前端的宿主与管理面。GHCR 包建立仅一天、3 个标签，改名代价现在最小 |
+| 11 | **删除 `deploy-web.yml`**，web 构建并入 `web-front` 镜像流水线 | docker 就是部署方式，web-build 分支随之冗余；同时消掉一处 Flutter 重复构建 |
+
+### 两个镜像的职责
+
+| 镜像 | 内容 | 端口 | 数据 |
+|---|---|---|---|
+| `web-front` | Flutter web 产物（打进镜像）+ admin 认证 + 配置存储 + 看板 + WebDAV/图片代理 | 48080 | `config.json`、`admin.json`、`metrics.json` |
+| `ej-backend` | 排行榜（公开协议）+ 组队 WS 中继，可各自开关 | 48081 | 排行榜 JSON |
+
+两者互不依赖，可单独部署。只想联机/看榜单的人只需 `ej-backend`；只想看自己数据的人只需 `web-front`。
 
 ### 为什么 web 不放 Vercel
 
-web 端并非纯静态：按决策 1 与 5，它需要 ① 从 ejnas 拉那份加密配置；② 经 ejnas
+web 端并非纯静态：按决策 1 与 5，它需要 ① 从 web-front 拉那份加密配置；② 经 web-front
 代理读 WebDAV。因此**无论 web 托管在哪，NAS 都必须公网可达**，放 Vercel 省不掉这一点，
 只会把 `EJ_CORS_ORIGINS` 请回来（历史上最容易配错的一项），净收益仅剩静态资源走 CDN。
 
@@ -65,7 +77,7 @@ web 端并非纯静态：按决策 1 与 5，它需要 ① 从 ejnas 拉那份�
 
 ### 为什么 WebDAV 必须经代理
 
-同源只解决 web ↔ ejnas，不解决 web ↔ WebDAV。群晖/坚果云一类的 WebDAV 服务通常
+同源只解决 web ↔ web-front，不解决 web ↔ WebDAV。群晖/坚果云一类的 WebDAV 服务通常
 不发 CORS 头，浏览器直连会被拦。而 Microsoft Graph 支持 CORS，所以 OneDrive 可直连。
 
 现有代理只有 `GET /proxy/url` 与 `GET /proxy/gh/*`，**没有 PROPFIND**，无法列目录。
@@ -190,7 +202,8 @@ salt**（`admin.json` 里的 `password_salt` 与 `key_salt`）。因此拿到密
 
 ### 5. 静态托管
 
-- `EJ_WEB_ROOT`（默认 `/web`），从 volume 挂载 Flutter `build/web` 产物。
+- Flutter `build/web` 产物在镜像构建时 `COPY` 到 `/web`；`EJ_WEB_ROOT` 保留为覆盖项
+  （默认 `/web`），供本地开发挂载自己的构建产物、免于每次重建镜像。
 - MIME 表覆盖 `html/js/css/wasm/json/png/svg/woff2/map` 等；`.wasm` 必须正确
   （`application/wasm`），否则 `sqlite3.wasm` 加载失败。
 - 未命中路径回退 `index.html`（Flutter web 用 hash 路由，但直接访问子路径需要兜底）。
@@ -217,11 +230,20 @@ QEMU/buildx 初始化、GHCR 登录、`metadata-action` 标签计算、双架构
 转义更难维护——这类文本已经因转义出过问题。各自保留完整摘要。
 
 **不用 matrix 合并**：matrix 无法按分支做 `paths` 过滤，会导致改 `backends/` 也触发
-ejnas 构建，且失败归属变模糊。
+web-front 构建，且失败归属变模糊。
 
-**补 web 产物投递链路**：`deploy-web.yml` 除现有的 web-build 分支外，额外产出
-`web-dist.tar.gz`，NAS 上一条 `curl` 即可取用（仓库公开，无需鉴权）。看板/README
-给出对应命令。
+**workflow 最终形态**（从四条变三条）：
+
+| 文件 | 变化 | 职责 |
+|---|---|---|
+| `web-front.yml` | 由 `nas-backend.yml` 更名而来，并吸收 `deploy-web.yml` | Flutter web 构建 → Rust 交叉编译 → 双架构镜像 → smoke → 推 GHCR |
+| `backend.yml` | 文件名不变（避免断掉历史运行链接与分支保护引用） | npm test → 容器 E2E → 双架构镜像 → 推 GHCR |
+| `deploy-web.yml` | **删除** | 职责并入 `web-front.yml` |
+| `release.yml` | 不动 | 手动 APK 发布 |
+
+`web-front.yml` 的构建顺序：先 `flutter build web`（带 pub 缓存），产物交给
+`docker build` 的 context，再走双架构交叉编译。Flutter 构建只跑一次，两个架构共用
+同一份 web 产物（纯静态资源，与架构无关）。
 
 **`release.yml` 不动。**
 
@@ -268,6 +290,40 @@ ejnas 构建，且失败归属变模糊。
 | 保留改名 | `vault_payload.dart` → `config_payload.dart`（字段集合的单一权威定义） |
 
 `test/vault/` 下 4 个测试文件相应重写。
+
+## 更名涉及的引用点
+
+`nas-backend/` → `web-front/`，镜像 `ejnas` → `web-front`，容器名同步。用 `git mv`
+保留历史。必须一并更新的引用：
+
+- `docker-compose.yml`、`docker-compose.ghcr.yml`（服务名、镜像名、容器名、卷名）
+- `.github/workflows/nas-backend.yml` → `web-front.yml`（含 `paths` 过滤、`IMAGE` 环境变量、concurrency group）
+- `scripts/docker-smoke.sh`（默认镜像名、容器名前缀）
+- `nas-backend/README.md` → `web-front/README.md`
+- 根 `README.md` / `README.zh.md` 的服务清单
+- `docs/web-display-deploy.md`（整篇重写，见下）
+- 旧 GHCR 包 `ejnas`：保留为归档，README 注明已废弃；不再推送新标签
+
+## 文档同步范围
+
+用户可见的说明必须与实现同时更新，否则「一键部署」会在文档这一环断掉。
+
+| 文档 | 处理 |
+|---|---|
+| `README.md` / `README.zh.md` | 顶层架构图与服务清单改为「两个镜像」；快速开始给出两条 `docker compose` |
+| `web-front/README.md` | 由 `nas-backend/README.md` 重写：单 admin、配置存储、看板、代理、静态托管 |
+| `backends/README.md` | 补模块开关 `EJ_MODULE_*` 与分开部署示例 |
+| `docs/web-display-deploy.md` | **整篇重写**：删掉注册/口令/CORS 全部内容，改为「拉镜像 → compose up → admin 登录 → 手机推配置」 |
+| `docs/self-host-server-deploy.md` | 补 `web-front` 的部署；排行榜/组队部分补模块开关 |
+| `docs/self-host-client-config.md` | 客户端侧从「注册账号」改为「admin 登录 + 推送配置」 |
+| `docs/onedrive_setup.md` | 重定向 URI 端口 48082 → 48080 |
+| `docs/leaderboard-server-api.md` | 不动（公开协议契约，未变） |
+| 两条 workflow 的运行摘要 | 各自给出对应镜像的完整部署步骤（沿用现有「复制粘贴即可」的风格，内联 compose 文件） |
+
+**APP 内文档不需要单独写**：`lib/ui/about/about_screen.dart` 的 `_kDocs` 表通过
+asset bundle 直接读 `docs/*.md`，更新 docs 即等于更新 APP 内指南。但**新增文档时必须
+同时**在 `_kDocs` 追加一行并在 `pubspec.yaml -> assets` 声明，否则 APP 里打不开
+（该文件注释已明确这一约定）。本次若新增 `docs/web-front-deploy.md`，需照此处理。
 
 ## 测试策略
 
@@ -329,12 +385,16 @@ ejnas 构建，且失败归属变模糊。
 
 | 阶段 | 内容 | 验收 |
 |---|---|---|
-| ① 主干 | 删账号系统、单 admin、配置存储与加密、静态托管、客户端改造 | web 端登录后能用 OneDrive 看数据 |
-| ② 看板 | 指标采集与落盘、看板页面、导出 | `/admin` 可看状态、可导出配置与指标 |
-| ③ WebDAV 代理 | `dav.rs`、凭据注入、前缀限制 | web 端能用 WebDAV 读数据 |
-| ④ CI 与模块开关 | composite action、web 产物投递、`EJ_MODULE_*` | 两条镜像 CI 复用骨架且各自触发正确；模块可单独部署 |
+| ① 更名与骨架 | `git mv nas-backend web-front`、删 `store.rs` 与 7 个 handler、去掉 `rusqlite`/`jsonwebtoken`、单 admin + session | `cargo test` 过；容器起得来，默认密码可登录 |
+| ② 配置与静态托管 | `config_store.rs` 加密读写、`/api/config`、静态文件服务、web 产物打进镜像、客户端改造 | 手机推配置 → 浏览器打开 48080 登录后能用 OneDrive 看数据 |
+| ③ 看板与导出 | 指标采集与落盘、看板页面、`/api/export` | `/admin` 可看状态、可导出配置与指标 |
+| ④ WebDAV 代理 | `dav.rs`、凭据注入、目标前缀限制 | web 端能用 WebDAV 读数据 |
+| ⑤ CI 与模块开关 | composite action、`web-front.yml`（含 Flutter 构建）、删 `deploy-web.yml`、`EJ_MODULE_*` | 两条镜像 CI 各自触发正确、双架构推送成功；模块可单独部署 |
+| ⑥ 文档 | 上表全部文档 + 两条 workflow 摘要 | 照文档从零走一遍能部署成功 |
 
-阶段 ④ 与 ①–③ 无依赖，可并行或提前做。每阶段自身可测、可验收，不留半成品状态。
+阶段 ⑤ 的模块开关部分与 ①–④ 无依赖，可提前。阶段 ⑥ 必须在 ①–⑤ 之后（否则文档
+描述的是尚不存在的行为），但每个阶段完成时应同步更新对应文档片段，避免最后堆积。
+每阶段自身可测、可验收，不留半成品状态。
 
 ## 风险与权衡
 
@@ -343,6 +403,8 @@ ejnas 构建，且失败归属变模糊。
 | 忘记 admin 密码 → 配置无法解密 | 配置可从手机端重推；云端数据本身不受影响。看板导出（`secrets=1`）作为备份手段 |
 | session 存内存 → 重启需重新登录 | 单人使用可接受；换来无需持久化密钥 |
 | 服务端持有凭据明文（运行时内存） | 相比零知识是安全性下降，属决策 1 的既定代价；静态落盘仍是密文 |
-| web 与 ejnas 版本耦合 | 产物挂载而非打进镜像，可各自升级；契约由 `config_payload` 键集合测试守住 |
+| web 与后端版本绑定（产物打进镜像） | 决策 4 的既定代价。缓解：`EJ_WEB_ROOT` 保留覆盖能力，开发时可挂载本地产物；契约由 `config_payload` 键集合测试守住 |
+| `web-front` 镜像体积上升（27MB → 60MB+） | 单次拉取代价，NAS 上可接受；换来无需拷产物 |
+| `web-front` CI 时长上升（多一次 Flutter web 构建，约 +5~10 分钟） | 只跑一次、两架构共用产物；pub 依赖走缓存 |
 | `ring` 仍需交叉工具链 | 已明确不承诺消除；仅 SQLite 那块 C 编译消失 |
 | 单端口承载全部 → 单点 | 与「家宽端口越少越好」的取舍一致；`/healthz` 保留供外部探活 |
