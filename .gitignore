@@ -86,3 +86,11 @@ desktop.ini
 /backup_dumps/
 *.tmp
 /dist/
+
+# `flutter build web` output gets copied into web-front/web-dist/ before
+# `docker build` — several MB of generated JS/wasm/assets, not source. The
+# directory itself stays tracked via .gitkeep so `docker build` always has
+# something to COPY: Docker has no optional COPY, and an absent web build
+# must not break the image build (the server serves a setup page instead).
+/web-front/web-dist/*
+!/web-front/web-dist/.gitkeep

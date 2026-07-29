@@ -1,5 +1,13 @@
 target/
 data/
 .env
+
+# web-dist/ must NOT be excluded here, even though it holds the (gitignored)
+# Flutter web build output. The Dockerfile's `COPY web-dist/ /web/` needs
+# this directory to reach the build context; excluding it would either fail
+# the build outright (COPY of a nonexistent path) or silently copy an empty
+# directory, producing an image with no web build in it and no error to say
+# why. web-dist/.gitkeep keeps the directory present (and buildable) even
+# when nothing has been copied into it yet.
 # Cargo.lock is deliberately NOT ignored: the published image builds with
 # --locked so a given commit always produces the same dependency set.
