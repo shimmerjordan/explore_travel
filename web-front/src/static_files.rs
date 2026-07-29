@@ -14,31 +14,56 @@
 //!      traversal (`..%2f`) is caught too, not smuggled past the filter.
 //!   2. Every segment is appended with `PathBuf::push` (never string
 //!      concatenation, which can blur a sibling directory into looking like
-//!      a child of `root` -- see the tests), then the whole path is
-//!      `canonicalize`d and checked against `root`'s own canonical form with
-//!      `Path::strip_prefix`, which compares path *components*, not
-//!      characters. That second check is what catches a symlink under
+//!      a child of `root` -- see the tests), the candidate is then *opened*,
+//!      and containment is decided against the inode that was actually
+//!      opened rather than against the path that was requested (see
+//!      `open_within`). That second check is what catches a symlink under
 //!      `root` that points outside of it: dropping `..` segments doesn't
 //!      help there, because the escape happens during symlink resolution,
 //!      not in the URL text.
+//!
+//! Check 2 deliberately works on an open file descriptor, not on a path.
+//! Canonicalizing a path and then reading that path is two separate lookups
+//! with a window in between, and the window is exploitable: an attacker who
+//! can rename inside `root` (the same capability the symlink attack needs)
+//! can flip a name between a regular file and a symlink-to-outside, so a
+//! path that passed the check is not the file that gets read. Holding the
+//! descriptor collapses check and read onto one inode -- the file cannot be
+//! swapped after it has been opened, only unlinked -- which is why the
+//! containment comparison uses `/proc/self/fd/<n>` and the bytes are read
+//! from the same `File` that was checked. If procfs is unavailable the
+//! module fails closed (serves nothing) rather than falling back to the
+//! raceable path comparison; see `open_within`.
 //!
 //! The tradeoff of check 2: a *legitimate* symlink under `root` that
 //! happens to point outside of it is refused right along with a malicious
 //! one -- this module has no way to tell the two apart, and the deliberate
 //! choice here is to refuse rather than trust the symlink's target.
 
+use std::fs::{File, Metadata};
+use std::io::Read as _;
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::UNIX_EPOCH;
 
 /// Result of resolving one request against the web root.
 pub enum Served {
-    File { bytes: Vec<u8>, mime: &'static str },
+    File {
+        bytes: Vec<u8>,
+        mime: &'static str,
+        etag: String,
+    },
+    /// The caller's `If-None-Match` already matches what's on disk, so the
+    /// bytes are not read and not sent. See `etag_for`.
+    NotModified { etag: String, mime: &'static str },
     NotConfigured,
     NotFound,
 }
 
-/// Shown at `/` (and any other path, via the same SPA fallback machinery)
-/// when `EJ_WEB_ROOT` is missing or empty, so an operator who starts the
-/// container without a web build gets an explanation instead of a bare 404.
+/// Shown at `/` (and other paths that expect a page, see `main.rs`) when
+/// `EJ_WEB_ROOT` is missing or empty, so an operator who starts the container
+/// without a web build gets an explanation instead of a bare 404.
 pub const SETUP_HTML: &str = r#"<!doctype html>
 <html>
 <head><meta charset="utf-8"><title>explore_journal</title></head>
@@ -59,44 +84,164 @@ serve here yet. Either:</p>
 /// query string stripped by the caller (see `main.rs`'s `serve`), but this
 /// function strips one defensively too -- it's `pub` and must not assume
 /// every caller got that right.
-pub fn serve(root: &Path, url_path: &str) -> Served {
+///
+/// `if_none_match` is the request's `If-None-Match` header, if any: when it
+/// matches the current validator the result is `NotModified` and the file is
+/// never read, which is the whole point of having a validator (the SPA shell
+/// is served with `no-cache`, i.e. revalidated on *every* navigation).
+pub fn serve(root: &Path, url_path: &str, if_none_match: Option<&str>) -> Served {
     let canonical_root = match root.canonicalize() {
         Ok(p) => p,
         Err(_) => return Served::NotConfigured,
     };
-    if is_empty_or_placeholder_only(&canonical_root) {
-        return Served::NotConfigured;
+    match is_empty_or_placeholder_only(&canonical_root) {
+        Ok(true) => return Served::NotConfigured,
+        Ok(false) => {}
+        // A root that exists but can't be listed (wrong owner, mode 000, a
+        // bind mount that didn't come back after a reboot) is NOT "empty":
+        // reporting it as `NotConfigured` would show the operator a page
+        // saying the directory has no web build in it, sending them off to
+        // fix a mount that is already mounted. The real errno goes to the
+        // log only, per this crate's convention of never putting filesystem
+        // detail in a response body.
+        Err(e) => {
+            eprintln!(
+                "ERROR: static: cannot list web root {}: {e}",
+                canonical_root.display()
+            );
+            return Served::NotFound;
+        }
     }
 
-    match resolve(&canonical_root, url_path) {
-        Some(path) if path.is_file() => match std::fs::read(&path) {
-            Ok(bytes) => {
-                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                Served::File { bytes, mime: mime_for(name) }
+    let candidate = resolve(&canonical_root, url_path);
+    match serve_file(&canonical_root, &candidate, if_none_match) {
+        Some(served) => served,
+        // Either nothing matched, or it matched a directory, or containment
+        // refused it -- all of them are "this path had no asset", so they all
+        // fall back to the SPA shell. The shell goes through the exact same
+        // containment check: `root/index.html` being a symlink out of the
+        // root is no more trustworthy than any other escape.
+        None => serve_file(&canonical_root, &canonical_root.join("index.html"), if_none_match)
+            .unwrap_or(Served::NotFound),
+    }
+}
+
+/// Open `path`, confirm it is contained and is a regular file, and either
+/// report `NotModified` or read it. `None` means "treat this as a miss".
+fn serve_file(canonical_root: &Path, path: &Path, if_none_match: Option<&str>) -> Option<Served> {
+    let mut f = open_within(canonical_root, path)?;
+    // Stat the *descriptor*, not the path, for the same reason containment is
+    // checked on the descriptor: this is the file that will be read.
+    let meta = f.metadata().ok()?;
+    // A directory (or a fifo/socket someone dropped in the web root) is never
+    // read directly -- reading it would surface an I/O error for what is
+    // really just a miss.
+    if !meta.is_file() {
+        return None;
+    }
+
+    // MIME comes from the *requested* name, not from the opened inode's name:
+    // a symlink `foo.js -> bar.txt` inside the root is legitimate, and the
+    // client asked for a script.
+    let mime = mime_for(path.file_name().and_then(|n| n.to_str()).unwrap_or(""));
+    let etag = etag_for(&meta);
+    if if_none_match.is_some_and(|h| etag_matches(h, &etag)) {
+        return Some(Served::NotModified { etag, mime });
+    }
+
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    f.read_to_end(&mut bytes).ok()?;
+    Some(Served::File { bytes, mime, etag })
+}
+
+/// Set once the procfs lookup in `open_within` has failed, so a platform
+/// without `/proc/self/fd` logs the explanation a single time instead of once
+/// per request.
+static PROCFS_WARNED: AtomicBool = AtomicBool::new(false);
+
+/// Open `path` and return the handle only if the inode that was actually
+/// opened lies inside `canonical_root`.
+///
+/// The containment comparison is done on `/proc/self/fd/<n>`, the kernel's
+/// name for the open descriptor, rather than on `path` or on
+/// `path.canonicalize()`. Checking a path and then reading it are two
+/// lookups, and between them the name can be re-pointed at a symlink
+/// leading out of the root; the descriptor cannot be re-pointed once opened,
+/// so checking it and reading it is one atomic decision about one inode.
+///
+/// `strip_prefix` compares path *components*, not characters -- `/x/webother`
+/// is not inside `/x/web` even though one string is a prefix of the other
+/// (see the sibling-directory tests).
+///
+/// If the procfs lookup fails, this refuses to serve rather than falling
+/// back to comparing paths: the fallback is exactly the raceable check this
+/// exists to remove, and a static file server that serves nothing is a much
+/// smaller problem than one that can be raced into reading `/data`.
+fn open_within(canonical_root: &Path, path: &Path) -> Option<File> {
+    let f = File::open(path).ok()?;
+    let opened = match std::fs::read_link(format!("/proc/self/fd/{}", f.as_raw_fd())) {
+        Ok(p) => p,
+        Err(e) => {
+            if !PROCFS_WARNED.swap(true, Ordering::Relaxed) {
+                eprintln!(
+                    "ERROR: static: cannot resolve /proc/self/fd ({e}); refusing to serve \
+                     any static file. Containment against the web root is checked on the \
+                     open descriptor and there is no non-raceable substitute for it, so \
+                     this fails closed. Mount procfs into the container, or put the web \
+                     build behind a separate static file server."
+                );
             }
-            // Existed a moment ago (`is_file` above) but became unreadable
-            // before the read -- fall back rather than surface an I/O error
-            // to the client for what's still just "this path had no asset".
-            Err(_) => fallback_index(&canonical_root),
-        },
-        // Either nothing matched, or it matched a directory (which is never
-        // read directly -- doing so would either error or, worse on some
-        // platforms, panic) -- both cases fall back to the SPA shell.
-        _ => fallback_index(&canonical_root),
+            return None;
+        }
+    };
+    if opened.strip_prefix(canonical_root).is_ok() {
+        Some(f)
+    } else {
+        None
     }
 }
 
-fn fallback_index(canonical_root: &Path) -> Served {
-    match std::fs::read(canonical_root.join("index.html")) {
-        Ok(bytes) => Served::File { bytes, mime: mime_for("index.html") },
-        Err(_) => Served::NotFound,
-    }
+/// Cache validator for a served file: length plus mtime, which together
+/// change on every real redeploy of a Flutter build.
+///
+/// This exists because `Cache-Control` alone can't avoid a transfer.
+/// `no-cache` means "cacheable, but revalidate every time", and revalidation
+/// with no validator to send degrades into re-downloading the whole body; the
+/// same applies to `max-age` assets once the hour is up. `main.dart.js` is
+/// several MB and this server does no compression, so a validator is the
+/// difference between a 304 and a multi-megabyte retransfer.
+///
+/// The mtime's sub-second part is included on purpose: two consecutive
+/// deploys can land inside the same wall-clock second, and a validator that
+/// can't tell them apart would serve the previous build's bytes.
+fn etag_for(meta: &Metadata) -> String {
+    let (secs, nanos) = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| (d.as_secs(), d.subsec_nanos()))
+        .unwrap_or((0, 0));
+    format!("\"{:x}-{:x}.{:x}\"", meta.len(), secs, nanos)
 }
 
-/// Resolve `url_path` to a real, existing path inside `canonical_root`, or
-/// `None` if it doesn't exist or would escape -- see the module doc for why
-/// both the segment filtering and the final `strip_prefix` are needed.
-fn resolve(canonical_root: &Path, url_path: &str) -> Option<PathBuf> {
+/// Whether an `If-None-Match` header matches `etag`. The header is a
+/// comma-separated list, `*` matches any existing representation, and a
+/// `W/` prefix marks a weak comparison -- which is the only kind defined for
+/// `If-None-Match` anyway, so the prefix is accepted and ignored.
+fn etag_matches(if_none_match: &str, etag: &str) -> bool {
+    if_none_match.split(',').any(|candidate| {
+        let candidate = candidate.trim();
+        candidate == "*"
+            || candidate == etag
+            || candidate.strip_prefix("W/").is_some_and(|inner| inner == etag)
+    })
+}
+
+/// Map `url_path` onto a candidate path under `canonical_root` -- see the
+/// module doc for why segments are filtered rather than string-replaced. The
+/// result is only a *candidate*: whether it is contained is decided by
+/// `open_within` on the opened descriptor, not here.
+fn resolve(canonical_root: &Path, url_path: &str) -> PathBuf {
     let path_only = url_path.split('?').next().unwrap_or("");
     let decoded = percent_decode(path_only);
 
@@ -107,25 +252,18 @@ fn resolve(canonical_root: &Path, url_path: &str) -> Option<PathBuf> {
             s => joined.push(s),
         }
     }
-
-    let canonical = joined.canonicalize().ok()?;
-    if canonical.strip_prefix(canonical_root).is_ok() {
-        Some(canonical)
-    } else {
-        None
-    }
+    joined
 }
 
 /// A directory that holds nothing but the git placeholder counts as "not
 /// configured" -- the same as a missing directory -- rather than serving an
-/// empty tree with no `index.html`.
-fn is_empty_or_placeholder_only(dir: &Path) -> bool {
-    match std::fs::read_dir(dir) {
-        Ok(entries) => entries
-            .filter_map(|e| e.ok())
-            .all(|e| e.file_name() == ".gitkeep"),
-        Err(_) => true,
-    }
+/// empty tree with no `index.html`. An unreadable directory is neither, and
+/// the error is propagated so the caller can say so; see `serve`.
+fn is_empty_or_placeholder_only(dir: &Path) -> std::io::Result<bool> {
+    let entries = std::fs::read_dir(dir)?;
+    Ok(entries
+        .filter_map(|e| e.ok())
+        .all(|e| e.file_name() == ".gitkeep"))
 }
 
 /// Percent-decode a URL path. Unlike query-string decoding, `+` is left
@@ -163,7 +301,13 @@ pub fn mime_for(name: &str) -> &'static str {
         "html" => "text/html; charset=utf-8",
         "js" => "text/javascript; charset=utf-8",
         "css" => "text/css; charset=utf-8",
-        "json" | "map" => "application/json",
+        // `charset=utf-8` matches what the JSON API routes send. JSON is
+        // UTF-8 by definition, so the parameter is redundant per RFC 8259 --
+        // but having two different Content-Types for the same media type in
+        // one server invites someone to "fix" the mismatch by dropping the
+        // charset from the API instead, where it is not redundant to the
+        // browsers that still sniff.
+        "json" | "map" => "application/json; charset=utf-8",
         "wasm" => "application/wasm",
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
@@ -183,6 +327,14 @@ pub fn mime_for(name: &str) -> &'static str {
 mod tests {
     use super::*;
 
+    /// Most of these tests predate conditional GET and have nothing to say
+    /// about it, so they call through this two-argument shim rather than
+    /// repeating `None` at every call site. The cases that DO care about
+    /// `If-None-Match` call `super::serve` directly.
+    fn serve(root: &Path, url_path: &str) -> Served {
+        super::serve(root, url_path, None)
+    }
+
     fn tmproot(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("wf-web-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
@@ -196,7 +348,8 @@ mod tests {
         assert_eq!(mime_for("main.dart.js"), "text/javascript; charset=utf-8");
         assert_eq!(mime_for("sqlite3.wasm"), "application/wasm");
         assert_eq!(mime_for("style.css"), "text/css; charset=utf-8");
-        assert_eq!(mime_for("manifest.json"), "application/json");
+        assert_eq!(mime_for("manifest.json"), "application/json; charset=utf-8");
+        assert_eq!(mime_for("main.dart.js.map"), "application/json; charset=utf-8");
         assert_eq!(mime_for("icon.png"), "image/png");
         assert_eq!(mime_for("f.woff2"), "font/woff2");
         assert_eq!(mime_for("unknown.xyz"), "application/octet-stream");
@@ -209,12 +362,42 @@ mod tests {
         assert!(matches!(serve(&d.join("nope"), "/"), Served::NotConfigured));
     }
 
+    /// A root that exists but cannot be listed is a broken mount or a
+    /// permissions mistake, NOT an empty directory -- reporting
+    /// `NotConfigured` would show the operator a setup page telling them the
+    /// directory is empty while the file they need is sitting right there,
+    /// unreadable.
+    #[test]
+    fn unreadable_root_is_not_reported_as_unconfigured() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tmproot("unreadable");
+        std::fs::write(d.join("index.html"), "hi").unwrap();
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        // Running as root defeats the whole premise (mode 000 is still
+        // readable), so verify the setup actually denies access first rather
+        // than passing vacuously.
+        let denied = std::fs::read_dir(&d).is_err();
+        let got = serve(&d, "/");
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        if !denied {
+            eprintln!("SKIP unreadable_root_is_not_reported_as_unconfigured: this user can \
+                       still list a mode-000 directory (running as root?)");
+            return;
+        }
+        assert!(
+            matches!(got, Served::NotFound),
+            "an unreadable root must not be reported as an empty one"
+        );
+    }
+
     #[test]
     fn serves_index_at_root() {
         let d = tmproot("index");
         std::fs::write(d.join("index.html"), "<h1>hi</h1>").unwrap();
         match serve(&d, "/") {
-            Served::File { bytes, mime } => {
+            Served::File { bytes, mime, .. } => {
                 assert_eq!(bytes, b"<h1>hi</h1>");
                 assert_eq!(mime, "text/html; charset=utf-8");
             }
@@ -263,6 +446,7 @@ mod tests {
                     assert_eq!(bytes, b"ok", "穿越路径只能落到 index.html 回退: {attack}");
                 }
                 Served::NotFound => {}
+                Served::NotModified { .. } => panic!("no validator was sent: {attack}"),
                 Served::NotConfigured => panic!("root 已配置，不应是 NotConfigured: {attack}"),
             }
         }
@@ -279,6 +463,10 @@ mod tests {
     /// `format!("{root}{url_path}")`) can't produce this confusion: `push`
     /// always inserts its own separator, so there is no URL path that joins
     /// onto `root` and lands on `root`'s sibling.
+    ///
+    /// This test therefore only falsifies the *join*, not the containment
+    /// check -- `symlink_into_prefix_sharing_sibling_is_refused` below is the
+    /// one that falsifies the containment check.
     #[test]
     fn sibling_directory_sharing_a_path_prefix_is_not_reachable() {
         let root = tmproot("prefix");
@@ -294,18 +482,86 @@ mod tests {
         // naive `format!("{}{}", root.display(), url_path)` join would
         // concatenate directly onto root's string form with no separator in
         // between, landing on the sibling.
-        if let Served::File { bytes, .. } = serve(&root, "other/secret.txt") {
-            assert_ne!(bytes, b"TOPSECRET", "must not reach the sibling directory");
+        match serve(&root, "other/secret.txt") {
+            Served::File { bytes, .. } => {
+                assert_ne!(bytes, b"TOPSECRET", "must not reach the sibling directory");
+                // Positive assertion, mirroring `path_traversal_is_refused`:
+                // without it, NotFound/NotConfigured/some third file all
+                // count as a pass and the test proves almost nothing.
+                assert_eq!(bytes, b"root-index", "must land on the SPA shell, nothing else");
+            }
+            other => panic!(
+                "expected the SPA shell, got {}",
+                match other {
+                    Served::NotFound => "NotFound",
+                    Served::NotConfigured => "NotConfigured",
+                    Served::NotModified { .. } => "NotModified",
+                    Served::File { .. } => unreachable!(),
+                }
+            ),
         }
 
         let _ = std::fs::remove_dir_all(&sibling);
     }
 
+    /// The case that actually falsifies *how* containment is judged.
+    ///
+    /// `sibling_directory_sharing_a_path_prefix_is_not_reachable` can't:
+    /// there is no URL that makes the join land on the sibling, so the
+    /// containment check never even sees an out-of-root path. And
+    /// `symlink_escaping_root_is_refused` can't either: its target
+    /// (`/tmp/wf-outside-*.txt`) doesn't share a string prefix with the root,
+    /// so a `to_string_lossy().starts_with()` check rejects it correctly by
+    /// accident.
+    ///
+    /// Both weaknesses are needed at once to expose a string-prefix check: a
+    /// symlink *inside* the root pointing at a sibling directory whose name
+    /// merely starts with the root's name. Then the resolved target is
+    /// genuinely outside the root while its string form still starts with the
+    /// root's string form -- `strip_prefix` refuses it, `starts_with` lets it
+    /// through.
+    #[test]
+    fn symlink_into_prefix_sharing_sibling_is_refused() {
+        let root = tmproot("pfxlink");
+        std::fs::write(root.join("index.html"), "root-index").unwrap();
+
+        let sibling_name = format!("{}other", root.file_name().unwrap().to_str().unwrap());
+        let sibling = root.parent().unwrap().join(&sibling_name);
+        let _ = std::fs::remove_dir_all(&sibling);
+        std::fs::create_dir_all(&sibling).unwrap();
+        std::fs::write(sibling.join("secret.txt"), "TOPSECRET-SIBLING").unwrap();
+
+        let _ = std::fs::remove_file(root.join("link"));
+        std::os::unix::fs::symlink(&sibling, root.join("link")).unwrap();
+
+        // Guard against the test passing because the setup silently failed.
+        assert!(
+            sibling.to_string_lossy().starts_with(&*root.to_string_lossy()),
+            "test premise: the sibling's path must share a string prefix with the root"
+        );
+
+        let got = serve(&root, "/link/secret.txt");
+        let _ = std::fs::remove_dir_all(&sibling);
+
+        match got {
+            Served::File { bytes, .. } => {
+                assert_ne!(
+                    bytes, b"TOPSECRET-SIBLING",
+                    "containment must be judged on path components, not on string prefixes"
+                );
+                assert_eq!(bytes, b"root-index", "must land on the SPA shell, nothing else");
+            }
+            Served::NotFound => {}
+            Served::NotConfigured => panic!("root is populated, must not be NotConfigured"),
+            Served::NotModified { .. } => panic!("no validator was sent"),
+        }
+    }
+
     /// A symlink under `root` pointing at a file outside of it must not be
     /// followed out. This is the case the segment-based `..`/`.` filtering
-    /// does NOT catch -- the escape happens when `canonicalize` resolves the
-    /// symlink, not in the URL text -- so it's the final `strip_prefix`
-    /// check in `resolve` that has to catch it instead.
+    /// does NOT catch -- the escape happens when the symlink is resolved, not
+    /// in the URL text -- so it's `open_within`'s containment check on the
+    /// opened descriptor that has to catch it instead.
     #[test]
     fn symlink_escaping_root_is_refused() {
         let d = tmproot("symlink");
@@ -323,6 +579,26 @@ mod tests {
         let _ = std::fs::remove_file(&outside);
     }
 
+    /// A symlink that stays *inside* the root is fine, and must keep working
+    /// -- otherwise "refuse escapes" could be implemented as "refuse every
+    /// symlink" and every test above would still pass.
+    #[test]
+    fn symlink_inside_root_is_followed() {
+        let d = tmproot("inlink");
+        std::fs::write(d.join("index.html"), "spa-index").unwrap();
+        std::fs::write(d.join("real.txt"), "INSIDE").unwrap();
+        let _ = std::fs::remove_file(d.join("alias.txt"));
+        std::os::unix::fs::symlink(d.join("real.txt"), d.join("alias.txt")).unwrap();
+
+        match serve(&d, "/alias.txt") {
+            Served::File { bytes, mime, .. } => {
+                assert_eq!(bytes, b"INSIDE");
+                assert_eq!(mime, "text/plain; charset=utf-8");
+            }
+            _ => panic!("a symlink that stays inside the root must still be served"),
+        }
+    }
+
     /// `serve` must not panic or return a read error when a request path
     /// resolves to a directory rather than a file -- it should behave
     /// exactly like a miss and fall back to the SPA shell.
@@ -335,6 +611,7 @@ mod tests {
             Served::File { bytes, .. } => assert_eq!(bytes, b"spa-index"),
             Served::NotFound => {}
             Served::NotConfigured => panic!("root is populated, must not be NotConfigured"),
+            Served::NotModified { .. } => panic!("no validator was sent"),
         }
     }
 
@@ -347,7 +624,7 @@ mod tests {
         let d = tmproot("query");
         std::fs::write(d.join("index.html"), "spa-index").unwrap();
         match serve(&d, "/index.html?v=1") {
-            Served::File { bytes, mime } => {
+            Served::File { bytes, mime, .. } => {
                 assert_eq!(bytes, b"spa-index");
                 assert_eq!(mime, "text/html; charset=utf-8");
             }
@@ -366,5 +643,60 @@ mod tests {
             Served::File { bytes, .. } => assert_eq!(bytes, b"hi"),
             _ => panic!(".gitkeep alongside index.html must not count as empty"),
         }
+    }
+
+    /// A matching validator must short-circuit to `NotModified`, and a
+    /// stale one must not -- the second half is what stops "always 304"
+    /// from passing.
+    #[test]
+    fn matching_validator_yields_not_modified() {
+        let d = tmproot("etag");
+        std::fs::write(d.join("index.html"), "shell").unwrap();
+        std::fs::write(d.join("app.js"), "console.log(1)").unwrap();
+
+        let etag = match super::serve(&d, "/app.js", None) {
+            Served::File { etag, .. } => etag,
+            _ => panic!("app.js should be served"),
+        };
+        match super::serve(&d, "/app.js", Some(&etag)) {
+            Served::NotModified { etag: back, mime } => {
+                assert_eq!(back, etag);
+                assert_eq!(mime, "text/javascript; charset=utf-8");
+            }
+            _ => panic!("a matching If-None-Match must produce NotModified"),
+        }
+        match super::serve(&d, "/app.js", Some("\"stale-0.0\"")) {
+            Served::File { bytes, .. } => assert_eq!(bytes, b"console.log(1)"),
+            _ => panic!("a stale If-None-Match must still send the body"),
+        }
+    }
+
+    /// Different content must produce a different validator, or a redeploy
+    /// would keep serving the previous build out of the browser cache.
+    #[test]
+    fn validator_changes_when_the_file_changes() {
+        let d = tmproot("etagchange");
+        std::fs::write(d.join("index.html"), "shell").unwrap();
+        std::fs::write(d.join("app.js"), "v1").unwrap();
+        let first = match super::serve(&d, "/app.js", None) {
+            Served::File { etag, .. } => etag,
+            _ => panic!("app.js should be served"),
+        };
+        std::fs::write(d.join("app.js"), "version-two").unwrap();
+        let second = match super::serve(&d, "/app.js", None) {
+            Served::File { etag, .. } => etag,
+            _ => panic!("app.js should be served"),
+        };
+        assert_ne!(first, second, "a changed file must get a new validator");
+    }
+
+    #[test]
+    fn validator_comparison_handles_lists_weak_tags_and_star() {
+        assert!(etag_matches("\"a\"", "\"a\""));
+        assert!(etag_matches("W/\"a\"", "\"a\""));
+        assert!(etag_matches("\"b\", \"a\"", "\"a\""));
+        assert!(etag_matches("*", "\"a\""));
+        assert!(!etag_matches("\"b\"", "\"a\""));
+        assert!(!etag_matches("", "\"a\""));
     }
 }

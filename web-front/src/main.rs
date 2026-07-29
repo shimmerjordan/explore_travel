@@ -53,7 +53,7 @@ const MAX_API_BODY: u64 = 8 << 10; // 8 KiB
 /// a panic mid-way through a password change is strictly worse than dying.
 struct AppState {
     cfg: Config,
-    limiter: Mutex<HashMap<String, (Instant, u32)>>,
+    limiter: Mutex<Limiter>,
     agent: ureq::Agent,
     sessions: session::Sessions,
     admin: Mutex<AdminFile>,
@@ -160,7 +160,7 @@ fn main() {
         sessions,
         admin: Mutex::new(admin),
         cfg,
-        limiter: Mutex::new(HashMap::new()),
+        limiter: Mutex::new(Limiter::new()),
         agent: proxy::safe_agent(),
         config_write: Mutex::new(()),
     });
@@ -267,7 +267,7 @@ fn client_ip(state: &AppState, req: &Request) -> String {
 ///   since paging through photos or dragging a map across fog tiles can fire
 ///   a request per tile. 600/min (10/sec) covers that comfortably without
 ///   leaving the upstream connection effectively uncapped.
-/// - `"static"` (1200/min) -- everything else, i.e. the web build served at
+/// - `"static"` (1200/min) -- every other `GET`, i.e. the web build served at
 ///   the bottom of `route`. This traffic is a local disk read with no
 ///   credential and no upstream dependency, so it's the one bucket that can
 ///   be sized for the *shape* of the traffic instead of for abuse
@@ -275,18 +275,33 @@ fn client_ip(state: &AppState, req: &Request) -> String {
 ///   doubles that, and a few concurrent tabs behind the same NAT'd IP stack
 ///   on top of it -- 1200/min (20/sec) leaves headroom over all of that at
 ///   once.
+/// - `"other"` (60/min) -- everything that matched none of the above, which
+///   after the `GET` arm above means non-`GET` methods on unrouted paths
+///   (`POST /foo`, `DELETE /foo`, `OPTIONS /anything`). `route` answers all
+///   of them with a 404, but `serve` reads a capped body off the socket for
+///   `POST`/`PUT` before it gets there, so these are NOT free to repeat. They
+///   must not inherit the static bucket's 1200/min: nothing legitimate sends
+///   them at all, so the tight cap costs a real client nothing. Restricting
+///   the wide bucket to `GET` is what keeps this arm from being dead code --
+///   with a bare `_ =>` catch-all for static, an unauthenticated `POST` flood
+///   was landing in the 1200/min bucket.
 ///
 /// Keeping `"auth"` in its own bucket remains the load-bearing part: config
 /// reads and writes must not be able to spend the login budget, or a client
 /// that polls its config would lock the admin out of the login form -- which
 /// is exactly what a single shared `/api/*` bucket did before that split.
+///
+/// `HEAD` never reaches here as itself: `serve` maps it onto `GET` before
+/// calling this, so a `HEAD` for a static asset is billed to `"static"` like
+/// the `GET` it mirrors.
 fn bucket_for(method: &str, path: &str) -> (&'static str, u32) {
     match (method, path) {
         ("POST", "/api/session") | ("PUT", "/api/password") => ("auth", 10),
         (_, p) if p.starts_with("/api/") => ("api", 120),
         ("GET", "/healthz") => ("healthz", 120),
         (_, p) if p.starts_with("/proxy/") => ("proxy", 600),
-        _ => ("static", 1200),
+        ("GET", _) => ("static", 1200),
+        _ => ("other", 60),
     }
 }
 
@@ -295,13 +310,61 @@ fn bucket_for(method: &str, path: &str) -> (&'static str, u32) {
 /// information worth keeping.
 const LIMITER_WINDOW: Duration = Duration::from_secs(60);
 
-/// Once the limiter table holds more than this many tracked `(ip, bucket)`
-/// keys, `allow` pays for a sweep before inserting another one. A flat size
-/// threshold (rather than "sweep every Nth call") means a slow trickle of
-/// distinct keys gets swept just as reliably as a burst, and it keeps the
-/// common case -- well under this many active keys -- from paying an O(n)
-/// scan on every single request.
+/// A sweep is only considered once the limiter table holds more than this
+/// many tracked `(ip, bucket)` keys. A flat size threshold (rather than
+/// "sweep every Nth call") means a slow trickle of distinct keys gets swept
+/// just as reliably as a burst, and it keeps the common case -- well under
+/// this many active keys -- from ever paying an O(n) scan.
+///
+/// Note the check runs *before* the insert, so the steady state parks at
+/// THRESHOLD+1 resident entries even if every one of them has expired: at
+/// 512 the sweep doesn't run, and the 513th key is inserted without one.
+/// That is deliberate, not an oversight -- 513 entries is roughly 50 KB and
+/// not worth a scan. This is a size ceiling on when scanning *starts*, not a
+/// promise that an expired entry is removed promptly.
 const LIMITER_SWEEP_THRESHOLD: usize = 512;
+
+/// Minimum time between two sweeps, whatever the table size.
+///
+/// The size threshold alone is not a bound on sweep *frequency*, only on
+/// table size, and the difference is remotely exploitable. `retain` can only
+/// drop entries whose window has fully elapsed, so a caller that mints N
+/// distinct keys inside one window leaves the table holding N entries that
+/// are all still live: every subsequent request then re-scans all N of them
+/// under the global mutex and frees nothing, turning an O(1) `allow` into
+/// O(n) for every worker at once. That is reachable without a session --
+/// with `EJ_TRUST_PROXY=1` the key comes from `X-Forwarded-For`, which the
+/// client picks (see `allow`) -- and it measurably collapses throughput
+/// (~24k req/s at 10k keys, ~280 req/s at 500k).
+///
+/// Gating on elapsed time caps the cost at one scan per interval no matter
+/// how the table got big. Half the window is the natural value: anything
+/// worth reclaiming has to have sat idle for a full `LIMITER_WINDOW`, so
+/// sweeping more often than twice per window cannot free more memory, and
+/// sweeping less often would let the table carry more than a window's worth
+/// of dead keys. The cost is that the table can grow for up to half a window
+/// between scans, i.e. the resident bound is ~1.5 windows of distinct keys
+/// instead of ~1 -- a constant factor, paid to make the scan itself
+/// unreachable as an amplification lever.
+const LIMITER_MIN_SWEEP_INTERVAL: Duration = Duration::from_secs(LIMITER_WINDOW.as_secs() / 2);
+
+/// The rate limiter's whole state, behind one mutex: the per-`(ip, bucket)`
+/// counters plus when they were last swept. `last_sweep` has to live next to
+/// the map rather than in a separate lock -- the decision to sweep reads both
+/// the size and the timestamp, and they must be consistent with each other.
+struct Limiter {
+    counters: HashMap<String, (Instant, u32)>,
+    last_sweep: Instant,
+}
+
+impl Limiter {
+    fn new() -> Limiter {
+        Limiter {
+            counters: HashMap::new(),
+            last_sweep: Instant::now(),
+        }
+    }
+}
 
 /// Remove every `(ip, bucket)` counter whose window has fully elapsed as of
 /// `now`. Pulled out as a pure function over an explicit `now` so a test can
@@ -324,17 +387,24 @@ fn sweep_expired(m: &mut HashMap<String, (Instant, u32)>, now: Instant, window: 
 /// time. Without eviction those entries were never removed, only reset in
 /// place once their window passed, so the table grew for as long as the
 /// process ran. `sweep_expired`, triggered once the table is big enough to
-/// matter, is what bounds it.
+/// matter AND not more often than `LIMITER_MIN_SWEEP_INTERVAL`, is what
+/// bounds it -- both conditions are load-bearing, see each constant's doc.
 fn allow(state: &AppState, ip: &str, bucket: &str, limit: u32) -> bool {
-    let mut m = state.limiter.lock().unwrap();
+    let mut l = state.limiter.lock().unwrap();
     let now = Instant::now();
 
-    if m.len() > LIMITER_SWEEP_THRESHOLD {
-        sweep_expired(&mut m, now, LIMITER_WINDOW);
+    if l.counters.len() > LIMITER_SWEEP_THRESHOLD
+        && now.duration_since(l.last_sweep) >= LIMITER_MIN_SWEEP_INTERVAL
+    {
+        sweep_expired(&mut l.counters, now, LIMITER_WINDOW);
+        // Stamped even when the sweep freed nothing. That is the point: a
+        // table full of live keys must not re-scan on the next request just
+        // because it is still over the size threshold.
+        l.last_sweep = now;
     }
 
     let key = format!("{ip}|{bucket}");
-    let e = m.entry(key).or_insert((now, 0));
+    let e = l.counters.entry(key).or_insert((now, 0));
     if now.duration_since(e.0) > LIMITER_WINDOW {
         *e = (now, 1);
         return true;
@@ -349,6 +419,7 @@ fn allow(state: &AppState, ip: &str, bucket: &str, limit: u32) -> bool {
 fn serve(state: &AppState, mut req: Request) {
     let method = match req.method() {
         Method::Get => "GET",
+        Method::Head => "HEAD",
         Method::Post => "POST",
         Method::Put => "PUT",
         Method::Delete => "DELETE",
@@ -363,7 +434,23 @@ fn serve(state: &AppState, mut req: Request) {
     };
     let ip = client_ip(state, &req);
 
-    let (bucket, limit) = bucket_for(&method, &path);
+    // A `HEAD` is a `GET` whose body is discarded, so it is routed and rate
+    // limited as one -- anything this server answers with a `GET` must answer
+    // the same headers to a `HEAD`, which is what uptime probes and reverse
+    // proxies send by default. Falling into the unrouted arm instead produced
+    // `HEAD / -> 404` next to `GET / -> 200`.
+    //
+    // The body is deliberately still built and NOT cleared here: tiny_http
+    // suppresses it on the wire for `HEAD` (`Request::respond` passes
+    // `do_not_send_body = method == Head`) while still emitting the
+    // `Content-Length`/`Transfer-Encoding` the `GET` would have used, which
+    // is exactly the required behaviour. Emptying `out.body` ourselves would
+    // instead advertise `Content-Length: 0` and lie about the resource. The
+    // cost is that a `HEAD` reads the file it will not send; the alternative
+    // is a second response path that can drift from the `GET` one.
+    let routed_method = if method == "HEAD" { "GET" } else { method.as_str() };
+
+    let (bucket, limit) = bucket_for(routed_method, &path);
     if !allow(state, &ip, bucket, limit) {
         log_access(&ip, &method, &path, 429);
         let out = Out::json(429, json!({"error":"rate limited"})).with("Retry-After", "60");
@@ -400,7 +487,9 @@ fn serve(state: &AppState, mut req: Request) {
         }
     }
 
-    let out = route(state, &req, &method, &path, &query, &body);
+    let out = route(state, &req, routed_method, &path, &query, &body);
+    // Logged as the method the client actually sent, not the one it was
+    // routed as -- `HEAD /` and `GET /` must stay distinguishable in the log.
     log_access(&ip, &method, &path, out.status);
     respond(req, out);
 }
@@ -436,7 +525,19 @@ fn route(state: &AppState, req: &Request, method: &str, path: &str, query: &str,
         ("GET", "/proxy/url") => {
             guard_proxy(state, req, || handle_proxy_url(state, req, query))
         }
-        ("GET", p) => handle_static(state, p),
+        // Anything left under these two prefixes is a missing *endpoint*, not
+        // a missing page, and must 404 as JSON instead of falling through to
+        // the SPA shell below. Without this arm the catch-all served
+        // `text/html` with a 200 for `GET /api/anything`, so a client that
+        // called an endpoint this server doesn't implement yet (or misspelled
+        // one) got a JSON parse error pointing at `<!doctype html>` rather
+        // than a 404 -- and a "not logged in" check against such a route
+        // would read as success. No SPA deep link lives under `/api/` or
+        // `/proxy/`, so nothing legitimate is caught here.
+        ("GET", p) if p.starts_with("/api/") || p.starts_with("/proxy/") => {
+            Out::json(404, json!({"error":"not found"}))
+        }
+        ("GET", p) => handle_static(state, req, p),
         _ => Out::json(404, json!({"error":"not found"})),
     }
 }
@@ -445,24 +546,62 @@ fn route(state: &AppState, req: &Request, method: &str, path: &str, query: &str,
 /// above. This has to sit at the very bottom of `route`'s match, after every
 /// `/api/*`, `/proxy/*` and `/healthz` arm, so none of those can be shadowed
 /// by a same-named static asset.
-fn handle_static(state: &AppState, path: &str) -> Out {
+fn handle_static(state: &AppState, req: &Request, path: &str) -> Out {
     let root = Path::new(&state.cfg.web_root);
-    match static_files::serve(root, path) {
-        static_files::Served::File { bytes, mime } => {
-            Out::bytes(200, mime, bytes)
-                .with("Cache-Control", static_cache_control(path, mime))
+    let if_none_match = header(req, "If-None-Match");
+    match static_files::serve(root, path, if_none_match.as_deref()) {
+        static_files::Served::File { bytes, mime, etag } => Out::bytes(200, mime, bytes)
+            .with("Cache-Control", static_cache_control(path, mime))
+            .with("ETag", &etag)
+            .with("X-Content-Type-Options", "nosniff"),
+        // A 304 carries no body but must repeat the caching headers, or the
+        // client has nothing to refresh its cache entry's freshness with and
+        // revalidates again on the very next request.
+        static_files::Served::NotModified { etag, mime } => Out::bytes(304, mime, Vec::new())
+            .with("Cache-Control", static_cache_control(path, mime))
+            .with("ETag", &etag)
+            .with("X-Content-Type-Options", "nosniff"),
+        static_files::Served::NotConfigured => {
+            if expects_a_page(path) {
+                Out::bytes(
+                    200,
+                    "text/html; charset=utf-8",
+                    static_files::SETUP_HTML.as_bytes().to_vec(),
+                )
+                // `no-store`, not just `no-cache`: this page is a transient
+                // description of a misconfiguration, and once the operator
+                // fixes the mount the page must not be what a reload shows.
+                .with("Cache-Control", "no-store")
                 .with("X-Content-Type-Options", "nosniff")
+            } else {
+                Out::json(404, json!({"error":"not found"})).with("X-Content-Type-Options", "nosniff")
+            }
         }
-        static_files::Served::NotConfigured => Out::bytes(
-            200,
-            "text/html; charset=utf-8",
-            static_files::SETUP_HTML.as_bytes().to_vec(),
-        )
-        .with("X-Content-Type-Options", "nosniff"),
         static_files::Served::NotFound => {
             Out::json(404, json!({"error":"not found"})).with("X-Content-Type-Options", "nosniff")
         }
     }
+}
+
+/// Whether a request that found no web build at all should get the setup page
+/// instead of a 404.
+///
+/// Answering the setup page for *every* path is worse than a 404 for the
+/// paths that aren't pages. The case that bites: the build was mounted once,
+/// a browser installed `flutter_service_worker.js`, then a reboot lost the
+/// bind mount. The service worker's update check fetches `/version.json`, and
+/// handing it a 200 full of HTML fails that check with an unrelated JSON
+/// parse error -- the app keeps running from its cache and nothing anywhere
+/// says the mount is gone. A 404 is a signal the client can act on.
+///
+/// The test is "does the last segment look like a filename": a Flutter build
+/// asks for `/version.json`, `/canvaskit/canvaskit.wasm`,
+/// `/flutter_service_worker.js` -- all with extensions -- while `/` and SPA
+/// deep links like `/settings/sync` have none and are genuinely expecting a
+/// page.
+fn expects_a_page(path: &str) -> bool {
+    let last = path.rsplit('/').next().unwrap_or("");
+    last.is_empty() || !last.contains('.')
 }
 
 /// Which `Cache-Control` a served static asset gets.
@@ -480,6 +619,13 @@ fn handle_static(state: &AppState, path: &str) -> Out {
 /// content-hashed, so a long `max-age` is safe: a new deploy gets new
 /// filenames rather than overwriting bytes an old cache entry already points
 /// at.
+///
+/// Matching on MIME does mean any *other* `.html` in the build -- a hand
+/// written `about.html`, say -- also gets `no-cache`. A Flutter build has no
+/// second HTML file, and `no-cache` on a rarely-changing page costs one
+/// conditional request that the `ETag` answers with a 304, so the false
+/// positive is cheaper than the alternative failure (a cached shell pointing
+/// at a previous deploy's assets).
 fn static_cache_control(path: &str, mime: &str) -> &'static str {
     if mime == "text/html; charset=utf-8" || path.ends_with("/flutter_service_worker.js") {
         "no-cache"
@@ -980,7 +1126,7 @@ mod tests {
     fn test_state() -> AppState {
         AppState {
             cfg: config::Config::default(),
-            limiter: Mutex::new(HashMap::new()),
+            limiter: Mutex::new(Limiter::new()),
             agent: proxy::safe_agent(),
             sessions: session::Sessions::new(60),
             admin: Mutex::new(AdminFile {
@@ -1030,6 +1176,31 @@ mod tests {
         assert_eq!(bucket_for("GET", "/index.html").0, "static");
         assert_eq!(bucket_for("GET", "/").0, "static");
         assert_eq!(bucket_for("GET", "/api/config").0, "api");
+    }
+
+    /// The wide static bucket is for `GET`s only. An unrouted non-`GET`
+    /// (`POST /foo`, `DELETE /foo`, an `OPTIONS` preflight) is answered with a
+    /// 404, but `serve` still reads a capped body off the socket for
+    /// `POST`/`PUT` first, and nothing legitimate sends any of them -- so they
+    /// belong in the tight bucket, not in the 1200/min one a bare `_ =>`
+    /// catch-all was handing them.
+    #[test]
+    fn unrouted_non_get_requests_do_not_get_the_static_budget() {
+        for (m, p) in [
+            ("POST", "/foo"),
+            ("PUT", "/foo"),
+            ("DELETE", "/foo"),
+            ("OTHER", "/foo"), // OPTIONS/PATCH/... all fold into "OTHER"
+            ("OTHER", "/"),
+        ] {
+            assert_eq!(
+                bucket_for(m, p),
+                ("other", 60),
+                "{m} {p} must not inherit the static bucket"
+            );
+        }
+        // ...while the GET side of the same paths keeps the wide budget.
+        assert_eq!(bucket_for("GET", "/foo"), ("static", 1200));
     }
 
     /// Buckets must not share a counter: spending one to exhaustion has to
@@ -1091,5 +1262,100 @@ mod tests {
         let later = base + LIMITER_WINDOW + Duration::from_secs(1);
         sweep_expired(&mut m, later, LIMITER_WINDOW);
         assert_eq!(m.len(), 0, "entries whose window fully elapsed must be swept");
+    }
+
+    /// Build a limiter state that a sweep *should* act on: `n` keys whose
+    /// windows elapsed long ago, and a `last_sweep` far enough back that the
+    /// interval gate is open. Returns `false` if this platform can't construct
+    /// a past `Instant`, in which case the caller skips rather than asserting
+    /// on a state it failed to set up.
+    fn backdate_limiter(state: &AppState, n: usize, stamp_last_sweep_in_the_past: bool) -> bool {
+        let Some(long_ago) = Instant::now().checked_sub(Duration::from_secs(120)) else {
+            return false;
+        };
+        let mut l = state.limiter.lock().unwrap();
+        for i in 0..n {
+            l.counters.insert(format!("10.0.{}.{}|static", i / 250, i % 250), (long_ago, 1));
+        }
+        if stamp_last_sweep_in_the_past {
+            l.last_sweep = long_ago;
+        }
+        true
+    }
+
+    /// `limiter_table_is_swept_once_windows_elapse` drives `sweep_expired`
+    /// directly, so it proves the sweep *function* works while saying nothing
+    /// about whether anything calls it -- deleting the call in `allow`
+    /// outright leaves it green. This one goes through `allow`, which is the
+    /// only thing that ever triggers eviction in production.
+    #[test]
+    fn allow_evicts_expired_entries_when_the_table_is_large() {
+        let state = test_state();
+        if !backdate_limiter(&state, 600, true) {
+            eprintln!(
+                "SKIP allow_evicts_expired_entries_when_the_table_is_large: \
+                 Instant::checked_sub returned None on this platform, so a limiter \
+                 state with elapsed windows cannot be constructed without sleeping \
+                 for a real minute"
+            );
+            return;
+        }
+
+        assert!(allow(&state, "9.9.9.9", "static", 1200));
+
+        let n = state.limiter.lock().unwrap().counters.len();
+        assert_eq!(
+            n, 1,
+            "allow must evict the 600 elapsed entries and keep only the new one, got {n}"
+        );
+    }
+
+    /// The other half of the eviction contract: a sweep that just ran must
+    /// not run again on the next request merely because the table is still
+    /// over the size threshold. Without the interval gate, a caller who mints
+    /// enough distinct `X-Forwarded-For` values inside one window makes every
+    /// later request re-scan a table where nothing is evictable yet -- an
+    /// unauthenticated way to turn `allow` into an O(n) scan under the global
+    /// mutex. Here the entries ARE evictable and the sweep still must not
+    /// run, which is what pins the gate rather than the size check.
+    #[test]
+    fn allow_does_not_sweep_twice_within_the_interval() {
+        let state = test_state();
+        if !backdate_limiter(&state, 600, false) {
+            eprintln!(
+                "SKIP allow_does_not_sweep_twice_within_the_interval: \
+                 Instant::checked_sub returned None on this platform"
+            );
+            return;
+        }
+        // `test_state` stamped `last_sweep` at construction, i.e. just now.
+        assert!(allow(&state, "9.9.9.9", "static", 1200));
+
+        let n = state.limiter.lock().unwrap().counters.len();
+        assert_eq!(
+            n, 601,
+            "a sweep ran again inside LIMITER_MIN_SWEEP_INTERVAL; the table size \
+             threshold alone does not bound how often the O(n) scan happens (got {n})"
+        );
+    }
+
+    /// `NotConfigured` may only answer with the setup page for requests that
+    /// are asking for a page. Everything a Flutter build fetches by filename
+    /// -- above all `version.json`, which the installed service worker polls
+    /// to discover new deploys -- has to get a 404 instead of 200 HTML.
+    #[test]
+    fn only_page_requests_get_the_setup_html() {
+        for p in ["/", "/settings/sync", "/deep/link"] {
+            assert!(expects_a_page(p), "{p} is a page request");
+        }
+        for p in [
+            "/version.json",
+            "/flutter_service_worker.js",
+            "/canvaskit/canvaskit.wasm",
+            "/assets/AssetManifest.bin.json",
+            "/favicon.png",
+        ] {
+            assert!(!expects_a_page(p), "{p} is an asset, not a page");
+        }
     }
 }
