@@ -7,9 +7,9 @@ name: NAS 后端镜像（GHCR）
 # 这条流水线做什么：
 #   1. cargo test（proxy 的 SSRF 判定、auth、store 的乐观并发）
 #   2. 用与线上完全同一份 Dockerfile 交叉编译出 amd64 与 arm64 两个镜像
-#   3. 对 amd64 镜像打完整 API 冒烟（注册/会话/保险箱往返/ETag/409/
-#      重启持久化/注册关闭/代理默认关闭）；对 arm64 镜像在 QEMU 下验证
-#      二进制真能启动并服务 /healthz，且镜像架构确实是 arm64
+#   3. 对 amd64 与 arm64 两个镜像都打完整 API 冒烟（注册/会话/保险箱往返/
+#      ETag/409/重启持久化/注册关闭/代理默认关闭），arm64 在 QEMU 下跑并额外
+#      核对镜像架构确实是 arm64（防止交叉编译静默产出宿主架构产物）
 #   4. 把双架构 manifest 推到 GHCR
 #   5. 把「镜像地址 + NAS 上怎么一键部署」写进运行摘要页
 #
@@ -56,7 +56,7 @@ jobs:
         working-directory: nas-backend
         run: cargo test --locked
 
-      # QEMU 只用于「跑」arm64 容器做启动验证，不用于编译（编译走交叉）。
+      # QEMU 只用于「跑」arm64 容器做冒烟验证，不用于编译（编译走交叉）。
       - uses: docker/setup-qemu-action@v3
         with:
           platforms: arm64
@@ -105,12 +105,14 @@ jobs:
           cache-from: type=gha,scope=ejnas-arm64
           cache-to: type=gha,scope=ejnas-arm64,mode=max
 
-      # LEVEL=boot：只证明交叉编译出来的 arm64 二进制真能在 arm64 上跑起来
-      # 并服务 HTTP。不在 QEMU 下跑 Argon2（故意设计得慢的 KDF，模拟下更慢），
-      # 那不会带来额外信号。
-      - name: 冒烟验证 arm64（QEMU 启动 + 架构核对）
+      # arm64 也跑完整 API，不只是启动探测：ring 有 aarch64 专用汇编、Argon2
+      # 有架构相关实现路径、bundled SQLite 是交叉编译出来的 C 代码 —— 这些
+      # 「能链接」不等于「算得对」，只有真正打一遍 API 才能发现。
+      # 曾经这里降级成 LEVEL=boot，理由是 Argon2 在模拟下太慢；实测（qemu-aarch64
+      # 跑同一个交叉编译产物）注册 0.115 s、单次 Argon2 验证 0.096 s，理由不成立。
+      - name: 冒烟验证 arm64（QEMU 下完整 API + 架构核对）
         working-directory: nas-backend
-        run: IMAGE=ejnas:smoke-arm64 LEVEL=boot PLATFORM=linux/arm64 ./scripts/docker-smoke.sh
+        run: IMAGE=ejnas:smoke-arm64 PLATFORM=linux/arm64 ./scripts/docker-smoke.sh
 
       - name: 推送双架构 manifest
         id: push
@@ -189,8 +191,8 @@ jobs:
           ### 本次验证了什么
 
           - **单元测试** —— SSRF 判定（回环 / 私网 / 链路本地 / ULA / IPv4-mapped / 云元数据地址全拒）、Argon2 校验、保险箱版本冲突
-          - **amd64 完整 API 冒烟** —— 注册 → 会话 → 保险箱写入/读回字节一致 → ETag 304 → 过期 `If-Match` 得 409（不会丢更新）→ 同凭据登录成功、错凭据 401 → `docker restart` 后密文仍在 → 关闭注册后新账号被拒 → 读代理默认关闭
-          - **arm64 启动验证** —— 交叉编译出的 arm64 二进制在 QEMU 下真能启动并服务 `/healthz`，且镜像架构核对为 `arm64`（防止交叉编译静默产出宿主架构的产物）
+          - **完整 API 冒烟 · amd64 与 arm64 各一遍** —— 注册 → 会话 → 保险箱写入/读回字节一致 → ETag 304 → 过期 `If-Match` 得 409（不会丢更新）→ 同凭据登录成功、错凭据 401 → `docker restart` 后密文仍在 → 关闭注册后新账号被拒 → 读代理默认关闭
+          - **为什么 arm64 也要打全套** —— ring 有 aarch64 专用汇编、Argon2 有架构相关路径、bundled SQLite 是交叉编译出来的 C 代码，「能链接」不等于「算得对」；同时核对镜像架构确为 `arm64`，防止交叉编译静默产出宿主架构的产物
 
           VERIFIED
 

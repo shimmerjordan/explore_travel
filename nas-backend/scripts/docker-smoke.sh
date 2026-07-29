@@ -9,10 +9,15 @@
 #   IMAGE=ghcr.io/o/r/ejnas:latest ./scripts/docker-smoke.sh
 #   LEVEL=boot PLATFORM=linux/arm64 ./scripts/docker-smoke.sh   # foreign arch
 #
-# LEVEL=full (default) exercises the whole API. LEVEL=boot only proves the
-# binary starts and serves /healthz — that is what we run for a foreign arch
-# under QEMU, where Argon2 (deliberately slow, and ~20x slower emulated) would
-# otherwise dominate the runtime for no extra signal.
+# LEVEL=full (default) exercises the whole API, and that is what CI runs for
+# BOTH architectures: ring ships aarch64-specific assembly, Argon2 has
+# arch-dependent paths and bundled SQLite is cross-compiled C, so "it links" is
+# not "it computes correctly". Emulation is not a reason to skip it — measured on
+# the same cross-compiled binary under qemu-aarch64: register 0.115 s, one Argon2
+# verify 0.096 s.
+#
+# LEVEL=boot is kept for the rare case where you only want to prove the binary
+# starts and serves /healthz (e.g. probing a new arch before wiring it up).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
