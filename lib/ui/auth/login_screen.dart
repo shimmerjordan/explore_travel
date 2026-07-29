@@ -1,13 +1,18 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/providers.dart';
+import '../../services/vault/admin_config_client.dart';
 import '../../services/vault/auth_controller.dart';
 
-/// Web login gate. Collects the NAS server URL + account + password, derives
-/// the vault key client-side, and (on success) the router redirect moves on to
-/// the app. The password never leaves the device in the clear — only the
-/// derived `authVerifier` is sent.
+/// Console login gate. The credential is the console's single admin account;
+/// the server verifies it and hands back a session token.
+///
+/// The address field only exists on native. In the browser the console serves
+/// this very page and sends no CORS headers, so the API is reachable at exactly
+/// one place — the same origin — and offering a box to type another one would
+/// only invite a request the browser blocks.
 class LoginScreen extends ConsumerStatefulWidget {
   const LoginScreen({super.key});
 
@@ -17,30 +22,24 @@ class LoginScreen extends ConsumerStatefulWidget {
 
 class _LoginScreenState extends ConsumerState<LoginScreen> {
   final _server = TextEditingController();
-  final _email = TextEditingController();
+  final _username = TextEditingController(text: 'admin');
   final _password = TextEditingController();
-  bool _registering = false;
   bool _busy = false;
   String? _error;
 
   @override
   void initState() {
     super.initState();
-    // Prefill: last-used backend first, else the same-machine default (the
-    // docker-compose backend listens on 48080).
-    final s = ref.read(settingsProvider);
-    _server.text = (s.nasServerUrl?.isNotEmpty ?? false)
-        ? s.nasServerUrl!
-        : 'http://localhost:48080';
-    if (s.nasAccountEmail?.isNotEmpty ?? false) {
-      _email.text = s.nasAccountEmail!;
+    if (!kIsWeb) {
+      final s = ref.read(settingsProvider);
+      if (s.nasServerUrl?.isNotEmpty ?? false) _server.text = s.nasServerUrl!;
     }
   }
 
   @override
   void dispose() {
     _server.dispose();
-    _email.dispose();
+    _username.dispose();
     _password.dispose();
     super.dispose();
   }
@@ -50,21 +49,14 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       _busy = true;
       _error = null;
     });
-    final auth = ref.read(authControllerProvider);
     try {
-      final args = (
-        serverUrl: _server.text.trim(),
-        email: _email.text.trim(),
-        password: _password.text,
-      );
-      if (_registering) {
-        await auth.register(
-            serverUrl: args.serverUrl, email: args.email, password: args.password);
-      } else {
-        await auth.login(
-            serverUrl: args.serverUrl, email: args.email, password: args.password);
-      }
-      // On success the router's refreshListenable + redirect navigates away.
+      await ref.read(authControllerProvider).login(
+            serverUrl: kIsWeb ? '' : _server.text.trim(),
+            username: _username.text.trim(),
+            password: _password.text,
+          );
+      // On success the router's refreshListenable + redirect navigates away;
+      // the default-password warning (if any) is rendered by the app shell.
     } catch (e) {
       if (mounted) setState(() => _error = _humanize(e));
     } finally {
@@ -73,15 +65,12 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   }
 
   String _humanize(Object e) {
-    final s = e.toString();
-    if (s.contains('VaultDecrypt')) return '口令错误，或保险库已损坏';
-    if (s.contains('Weak')) return '口令太短（至少 8 位）';
-    if (s.contains('401') || s.contains('invalid credentials')) return '邮箱或口令错误';
-    if (s.contains('409') || s.contains('already registered')) return '该邮箱已注册，请改为登录';
-    if (s.contains('后端地址') || s.contains('NAS 地址')) {
-      return '后端地址需为 http(s):// 开头的完整 URL';
-    }
-    return '失败：$s';
+    // The server answers "no such user" and "wrong password" identically on
+    // purpose, so neither may this.
+    if (e is AdminAuthException) return '用户名或密码错误';
+    if (e is AdminConfigException) return e.message;
+    if (e is ArgumentError) return e.message?.toString() ?? '输入有误';
+    return '失败：$e';
   }
 
   @override
@@ -102,35 +91,36 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                     textAlign: TextAlign.center,
                     style: Theme.of(context).textTheme.headlineSmall),
                 const SizedBox(height: 4),
-                Text(_registering ? '创建账户' : '登录以查看你的足迹',
+                Text('登录以查看你的足迹',
                     textAlign: TextAlign.center,
                     style: Theme.of(context).textTheme.bodyMedium),
                 const SizedBox(height: 24),
-                TextField(
-                  controller: _server,
-                  decoration: const InputDecoration(
-                    labelText: '后端地址',
-                    hintText: 'http://localhost:48080（NAS 部署则填其地址）',
-                    prefixIcon: Icon(Icons.dns),
+                if (!kIsWeb) ...[
+                  TextField(
+                    controller: _server,
+                    decoration: const InputDecoration(
+                      labelText: '后端地址',
+                      hintText: 'http://<NAS>:48080',
+                      prefixIcon: Icon(Icons.dns),
+                    ),
+                    keyboardType: TextInputType.url,
+                    autocorrect: false,
                   ),
-                  keyboardType: TextInputType.url,
-                  autocorrect: false,
-                ),
-                const SizedBox(height: 12),
+                  const SizedBox(height: 12),
+                ],
                 TextField(
-                  controller: _email,
+                  controller: _username,
                   decoration: const InputDecoration(
-                    labelText: '邮箱',
-                    prefixIcon: Icon(Icons.mail_outline),
+                    labelText: '用户名',
+                    prefixIcon: Icon(Icons.person_outline),
                   ),
-                  keyboardType: TextInputType.emailAddress,
                   autocorrect: false,
                 ),
                 const SizedBox(height: 12),
                 TextField(
                   controller: _password,
                   decoration: const InputDecoration(
-                    labelText: '口令（也是保险库解密口令）',
+                    labelText: '密码',
                     prefixIcon: Icon(Icons.lock_outline),
                   ),
                   obscureText: true,
@@ -151,18 +141,12 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                             height: 20,
                             width: 20,
                             child: CircularProgressIndicator(strokeWidth: 2))
-                        : Text(_registering ? '注册并同步' : '登录'),
+                        : const Text('登录'),
                   ),
-                ),
-                TextButton(
-                  onPressed: _busy
-                      ? null
-                      : () => setState(() => _registering = !_registering),
-                  child: Text(_registering ? '已有账户？去登录' : '没有账户？去注册'),
                 ),
                 const SizedBox(height: 8),
                 Text(
-                  '口令仅用于在本机派生密钥，绝不上传；服务器只保存你无法被解密的加密配置。',
+                  '账户由部署这台服务的人管理，初始为 admin / admin。',
                   textAlign: TextAlign.center,
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
                       color: Theme.of(context).hintColor),

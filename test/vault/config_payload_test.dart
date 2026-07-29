@@ -4,7 +4,7 @@ import 'package:explore_journal/core/prefs.dart';
 import 'package:explore_journal/services/backup/backup_service.dart'
     show kVaultSecretKeys;
 import 'package:explore_journal/services/security/secure_credentials.dart';
-import 'package:explore_journal/services/vault/vault_payload.dart';
+import 'package:explore_journal/services/vault/config_payload.dart';
 
 /// snake_case keystore keys → camelCase AppSettings field names.
 const _secureToSettings = <String, String>{
@@ -19,57 +19,57 @@ const _secureToSettings = <String, String>{
 };
 
 void main() {
-  group('kVaultPayloadKeys — single source of truth', () {
+  group('kConfigPayloadKeys — single source of truth', () {
     test('is a superset of the backup scrubber secret set', () {
-      expect(VaultPayload.kVaultPayloadKeys.containsAll(kVaultSecretKeys), isTrue,
-          reason: 'every scrubbed secret must also travel in the vault');
+      expect(ConfigPayload.kConfigPayloadKeys.containsAll(kVaultSecretKeys), isTrue,
+          reason: 'every scrubbed secret must also travel in the config');
     });
 
     test('covers every SecureCredentials keystore key (camelCase mapped)', () {
       for (final k in SecureCredentials.all) {
         final mapped = _secureToSettings[k];
         expect(mapped, isNotNull, reason: 'unmapped keystore key: $k');
-        expect(VaultPayload.kVaultPayloadKeys.contains(mapped), isTrue,
-            reason: '$mapped (from $k) missing from the vault key set');
+        expect(ConfigPayload.kConfigPayloadKeys.contains(mapped), isTrue,
+            reason: '$mapped (from $k) missing from the config key set');
       }
     });
 
     test('deliberately excludes the per-device leaderboard identity', () {
-      expect(VaultPayload.kVaultPayloadKeys.contains('leaderboardPrivateKey'),
+      expect(ConfigPayload.kConfigPayloadKeys.contains('leaderboardPrivateKey'),
           isFalse);
-      expect(VaultPayload.kVaultPayloadKeys.contains('leaderboardPublicKey'),
+      expect(ConfigPayload.kConfigPayloadKeys.contains('leaderboardPublicKey'),
           isFalse);
     });
   });
 
-  group('VaultPayload.extract', () {
-    test('picks only vault keys and stamps the schema', () {
+  group('ConfigPayload.extract', () {
+    test('picks only config keys and stamps the schema', () {
       const s = AppSettings(
         webdavUrl: 'https://dav.example.com',
         webdavPass: 'secret',
         githubPat: 'ghp_x',
-        fogColor: 0xDEADBEEF, // a non-vault field
+        fogColor: 0xDEADBEEF, // a non-config field
       );
-      final p = VaultPayload.extract(s);
-      expect(p.schema, VaultPayload.schemaVersion);
+      final p = ConfigPayload.extract(s);
+      expect(p.schema, ConfigPayload.schemaVersion);
       expect(p.fields['webdavPass'], 'secret');
       expect(p.fields['githubPat'], 'ghp_x');
       expect(p.fields.containsKey('fogColor'), isFalse,
-          reason: 'non-credential prefs must not enter the vault');
+          reason: 'non-credential prefs must not enter the config');
     });
   });
 
-  group('VaultPayload.applyTo (local-first overlay)', () {
+  group('ConfigPayload.applyTo (local-first overlay)', () {
     test('overwrites with a present value', () {
       const cur = AppSettings(webdavPass: 'old');
       final applied =
-          VaultPayload({'_schema': 1, 'webdavPass': 'new'}).applyTo(cur);
+          ConfigPayload({'_schema': 1, 'webdavPass': 'new'}).applyTo(cur);
       expect(applied.webdavPass, 'new');
     });
 
-    test('does NOT clobber a local secret with an empty/absent vault value', () {
+    test('does NOT clobber a local secret with an empty/absent remote value', () {
       const cur = AppSettings(webdavPass: 'keepme', githubPat: 'localPat');
-      final applied = VaultPayload({
+      final applied = ConfigPayload({
         '_schema': 1,
         'webdavPass': '', // empty → skip
         // githubPat absent → skip
@@ -78,25 +78,46 @@ void main() {
       expect(applied.githubPat, 'localPat');
     });
 
-    test('ignores keys outside the vault set', () {
+    test('ignores keys outside the config set', () {
       const cur = AppSettings(fogColor: 0x11223344);
       final applied =
-          VaultPayload({'_schema': 1, 'fogColor': 0x99}).applyTo(cur);
+          ConfigPayload({'_schema': 1, 'fogColor': 0x99}).applyTo(cur);
       expect(applied.fogColor, 0x11223344, reason: 'unknown keys are inert');
     });
 
-    test('round-trips the vault subset onto a blank settings', () {
+    test('round-trips the config subset onto a blank settings', () {
       const s = AppSettings(
         webdavUrl: 'https://dav.example.com',
         webdavUser: 'u',
         webdavPass: 'p',
         syncBackend: 'webdav',
       );
-      final restored = VaultPayload.extract(s).applyTo(const AppSettings());
+      final restored = ConfigPayload.extract(s).applyTo(const AppSettings());
       expect(restored.webdavUrl, 'https://dav.example.com');
       expect(restored.webdavUser, 'u');
       expect(restored.webdavPass, 'p');
       expect(restored.syncBackend, 'webdav');
+    });
+  });
+
+  group('AppSettings.fromJson tolerates retired keys', () {
+    test('a pre-console prefs blob (nasAccountEmail / nasKdfSalt) still loads',
+        () {
+      // `fromJson` reads by explicit key, so fields this build dropped are
+      // simply not looked at — an install upgrading from the account-based
+      // vault must not lose its settings over them.
+      final s = AppSettings.fromJson({
+        'nasServerUrl': 'http://192.168.1.9:48080',
+        'nasAccountEmail': 'me@x.com',
+        'nasKdfSalt': 'AAAAAAAAAAAAAAAAAAAAAA==',
+        'webdavUrl': 'https://dav.example.com',
+        'fogOpacity': 0.42,
+      });
+      expect(s.nasServerUrl, 'http://192.168.1.9:48080');
+      expect(s.webdavUrl, 'https://dav.example.com');
+      expect(s.fogOpacity, 0.42);
+      expect(s.toJson().containsKey('nasAccountEmail'), isFalse,
+          reason: 'the retired key must not be written back out');
     });
   });
 }

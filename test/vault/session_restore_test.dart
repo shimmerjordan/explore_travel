@@ -1,5 +1,4 @@
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -7,86 +6,103 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:explore_journal/app/providers.dart';
 import 'package:explore_journal/services/sync/onedrive_service.dart';
-import 'package:explore_journal/services/vault/nas_session_store.dart';
-import 'package:explore_journal/services/vault/nas_token_store.dart';
-import 'package:explore_journal/services/vault/nas_vault_client.dart';
-import 'package:explore_journal/services/vault/vault_sync_controller.dart';
+import 'package:explore_journal/services/vault/admin_config_client.dart';
+import 'package:explore_journal/services/vault/admin_session_store.dart';
+import 'package:explore_journal/services/vault/config_sync_controller.dart';
 
-/// NasVaultClient stub: getVault either succeeds with "no vault yet" (null)
+/// AdminConfigClient stub: `fetch` either succeeds with "no config yet" (null)
 /// or throws like an expired token would.
-class _FakeClient implements NasVaultClient {
-  final Object? getVaultError;
-  int getVaultCalls = 0;
-  _FakeClient({this.getVaultError});
+class _FakeClient implements AdminConfigClient {
+  final Object? fetchError;
+  int fetchCalls = 0;
+  int logoutCalls = 0;
+  _FakeClient({this.fetchError});
 
   @override
-  Future<VaultFetch?> getVault(String token) async {
-    getVaultCalls++;
-    final e = getVaultError;
+  Future<Map<String, dynamic>?> fetch(String token) async {
+    fetchCalls++;
+    final e = fetchError;
     if (e != null) throw e;
-    return null; // account exists, no vault blob yet — a valid session
+    return null; // session valid, server just has no config yet
   }
 
   @override
-  Future<String> getSalt(String email) async => base64.encode(List.filled(16, 1));
-  @override
-  Future<NasSession> login(String email, List<int> authVerifier) =>
+  Future<AdminLoginResult> login(String username, String password) =>
       throw UnimplementedError();
+
   @override
-  Future<NasSession> register(
-          String email, List<int> authVerifier, List<int> salt) =>
-      throw UnimplementedError();
+  Future<void> push(String token, Map<String, dynamic> cfg) async {}
+
   @override
-  Future<int> putVault(String token, List<int> bytes,
-          {required int ifMatch}) async =>
-      1;
+  Future<void> logout(String token) async => logoutCalls++;
 }
 
-NasWebSession _session() => NasWebSession(
-      serverUrl: 'http://nas.local:48080',
-      email: 'me@x.com',
-      token: 'jwt-token',
-      saltB64: base64.encode(List.filled(16, 7)),
-      vaultKeyB64: base64.encode(Uint8List(32)),
-    );
+AdminSession _session() =>
+    const AdminSession(baseUrl: 'http://nas.local:48080', token: 'session-token');
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  group('NasWebSession / PrefsNasSessionStore', () {
+  group('AdminSession / PrefsAdminSessionStore', () {
     setUp(() => SharedPreferences.setMockInitialValues({}));
 
     test('round-trips through prefs (localStorage on web)', () async {
-      final store = PrefsNasSessionStore();
+      final store = PrefsAdminSessionStore();
       await store.write(_session());
       final back = await store.read();
       expect(back, isNotNull);
-      expect(back!.serverUrl, 'http://nas.local:48080');
-      expect(back.email, 'me@x.com');
-      expect(back.token, 'jwt-token');
-      expect(back.vaultKeyB64, base64.encode(Uint8List(32)));
+      expect(back!.baseUrl, 'http://nas.local:48080');
+      expect(back.token, 'session-token');
       await store.clear();
       expect(await store.read(), isNull);
     });
 
+    test('a same-origin session (empty baseUrl) round-trips too', () async {
+      final store = PrefsAdminSessionStore();
+      await store.write(const AdminSession(baseUrl: '', token: 't'));
+      final back = await store.read();
+      expect(back!.baseUrl, isEmpty);
+      expect(back.token, 't');
+    });
+
     test('a corrupt/incomplete record reads as null, not a crash', () {
-      expect(NasWebSession.fromJson({'serverUrl': 'x'}), isNull);
-      expect(NasWebSession.fromJson({}), isNull);
+      expect(AdminSession.fromJson({'baseUrl': 'x'}), isNull);
+      expect(AdminSession.fromJson({}), isNull);
+    });
+
+    test(
+        'a pre-console record is DELETED on read, not resumed '
+        '(it held a password-derived key)', () async {
+      SharedPreferences.setMockInitialValues({
+        'nas_web_session_v1': jsonEncode({
+          'serverUrl': 'http://nas.local:48080',
+          'email': 'me@x.com',
+          'token': 'old-jwt',
+          'salt': base64.encode(List.filled(16, 7)),
+          'vaultKey': base64.encode(List.filled(32, 9)),
+        }),
+      });
+
+      final restored = await PrefsAdminSessionStore().read();
+
+      expect(restored, isNull, reason: 'the old record is not a valid session');
+      final p = await SharedPreferences.getInstance();
+      expect(p.containsKey('nas_web_session_v1'), isFalse,
+          reason: 'the derived key must not be left in localStorage forever');
+      expect(p.getString('nas_web_session_v1'), isNull);
     });
   });
 
-  group('VaultSyncController.restoreSession（刷新后静默恢复）', () {
-    late MemoryNasSessionStore store;
+  group('ConfigSyncController.restoreSession（刷新后静默恢复）', () {
+    late MemoryAdminSessionStore store;
     late _FakeClient client;
     late ProviderContainer container;
-    late VaultSyncController ctrl;
+    late ConfigSyncController ctrl;
 
     Future<void> build() async {
-      final provider = Provider<VaultSyncController>((ref) =>
-          VaultSyncController(ref,
-              clientFactory: (_) => client,
-              tokenStore: MemoryNasTokenStore(),
-              sessionStore: store));
+      final provider = Provider<ConfigSyncController>((ref) =>
+          ConfigSyncController(ref,
+              clientFactory: (_) => client, sessionStore: store));
       container = ProviderContainer();
       ctrl = container.read(provider);
       // SettingsNotifier._load() completes asynchronously and REPLACES the
@@ -98,7 +114,7 @@ void main() {
 
     setUp(() {
       SharedPreferences.setMockInitialValues({});
-      store = MemoryNasSessionStore();
+      store = MemoryAdminSessionStore();
       client = _FakeClient();
     });
 
@@ -110,28 +126,27 @@ void main() {
     test('no stored session → false, no network call', () async {
       await build();
       expect(await ctrl.restoreSession(), isFalse);
-      expect(client.getVaultCalls, 0);
+      expect(client.fetchCalls, 0);
       expect(ctrl.isLoggedIn, isFalse);
     });
 
-    test('valid stored session resumes: logged in + NAS config applied',
+    test('valid stored session resumes: logged in + console address applied',
         () async {
       store.session = _session();
       await build();
       expect(await ctrl.restoreSession(), isTrue);
       expect(ctrl.isLoggedIn, isTrue);
-      expect(client.getVaultCalls, 1,
+      expect(client.fetchCalls, 1,
           reason: 'the token must be validated against the server');
-      final s = container.read(settingsProvider);
-      expect(s.nasServerUrl, 'http://nas.local:48080');
-      expect(s.nasAccountEmail, 'me@x.com');
+      expect(container.read(settingsProvider).nasServerUrl,
+          'http://nas.local:48080');
     });
 
     test('expired/rejected token → false AND the stored session is wiped',
         () async {
       store.session = _session();
       client = _FakeClient(
-          getVaultError: const NasAuthException(401, 'token expired'));
+          fetchError: const AdminAuthException(401, 'token expired'));
       await build();
       expect(await ctrl.restoreSession(), isFalse);
       expect(ctrl.isLoggedIn, isFalse);

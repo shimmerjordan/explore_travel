@@ -43,14 +43,9 @@ class SyncBackend {
   static const github = 'github';
 
   /// Generic WebDAV server. Native only on the direct path (most WebDAV
-  /// servers send no CORS headers, so the browser reaches them via the NAS
-  /// proxy instead).
+  /// servers send no CORS headers, so the browser reaches them via the
+  /// console's proxy instead).
   static const webdav = 'webdav';
 
-  /// The NAS-vault-backed transport: credentials come from the decrypted
-  /// zero-knowledge vault and, on web, reads route through the NAS proxy.
-  /// Lands fully in a later phase.
-  static const nas = 'nas';
-
-  static const all = <String>[onedrive, github, webdav, nas];
+  static const all = <String>[onedrive, github, webdav];
 }

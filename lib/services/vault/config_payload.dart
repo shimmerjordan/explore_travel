@@ -1,14 +1,20 @@
 import '../../core/prefs.dart';
 import '../backup/backup_service.dart' show kVaultSecretKeys;
 
-/// The plaintext content of the zero-knowledge settings vault: the subset of
-/// [AppSettings] needed to reach the user's own cloud and render their data on
-/// another device (notably the read-only web client).
+/// The roaming settings config: the subset of [AppSettings] needed to reach the
+/// user's own cloud and render their data on another device (notably the
+/// read-only web client).
+///
+/// This travels as plaintext JSON over an authenticated session. The console
+/// server keeps it encrypted at rest under a key derived from the admin
+/// password and decrypts it for any caller holding a valid session — so the
+/// server CAN read these fields. The confidentiality boundary is the admin
+/// credential, not the transport.
 ///
 /// Two halves, both drawn from a single authoritative key set:
 ///   * **secrets** — exactly [kVaultSecretKeys] (the same constant the backup
 ///     scrubber uses), so a credential field is covered by both the scrubber
-///     and the vault, never one and not the other. A unit test pins the
+///     and this payload, never one and not the other. A unit test pins the
 ///     superset relationship.
 ///   * **locators** — non-secret config (URLs, owners, repos, CDN templates)
 ///     that's useless to an attacker alone but required to *use* the secrets.
@@ -16,18 +22,17 @@ import '../backup/backup_service.dart' show kVaultSecretKeys;
 /// **Deliberately excluded**: `leaderboardPrivateKey` / `leaderboardPublicKey`
 /// — the device's Ed25519 leaderboard identity is per-device by design (each
 /// install signs as itself). Roaming the private key would let a single
-/// cracked vault password forge leaderboard entries as every one of the user's
+/// cracked password forge leaderboard entries as every one of the user's
 /// devices, and the read-only web client has no leaderboard-signing role at
-/// all. So the identity stays on the device that made it. (Plan §7 Q2.)
+/// all. So the identity stays on the device that made it.
 ///
 /// NOTE: this reads/writes the in-memory [AppSettings], which always carries
 /// the REAL secret values — PrefsStore overlays them from platform secure
 /// storage on load and moves them back on save. No keystore bridge is needed
 /// here.
-class VaultPayload {
-  /// Schema version of the *plaintext* payload (independent of the encrypted
-  /// blob frame version). Bumped when key names change so a future reader can
-  /// migrate rather than silently drop secrets.
+class ConfigPayload {
+  /// Schema version of the payload. Bumped when key names change so a future
+  /// reader can migrate rather than silently drop secrets.
   static const schemaVersion = 1;
 
   /// Non-secret config without which the secrets are unusable.
@@ -54,41 +59,42 @@ class VaultPayload {
     'syncBackend',
   };
 
-  /// The single authoritative set of [AppSettings] keys the vault carries.
+  /// The single authoritative set of [AppSettings] keys the config carries.
   /// `secrets ∪ locators`. Producers and consumers import THIS — never their
   /// own copy.
-  static Set<String> get kVaultPayloadKeys => {...kVaultSecretKeys, ...locatorKeys};
+  static Set<String> get kConfigPayloadKeys =>
+      {...kVaultSecretKeys, ...locatorKeys};
 
   /// The raw payload map. Always carries `_schema`.
   final Map<String, dynamic> fields;
-  const VaultPayload(this.fields);
+  const ConfigPayload(this.fields);
 
   int get schema => (fields['_schema'] as num?)?.toInt() ?? 0;
 
-  /// Pull the vault subset out of a full [AppSettings].
-  factory VaultPayload.extract(AppSettings s) {
+  /// Pull the roaming subset out of a full [AppSettings].
+  factory ConfigPayload.extract(AppSettings s) {
     final j = s.toJson();
     final out = <String, dynamic>{'_schema': schemaVersion};
-    for (final k in kVaultPayloadKeys) {
+    for (final k in kConfigPayloadKeys) {
       if (j.containsKey(k)) out[k] = j[k];
     }
-    return VaultPayload(out);
+    return ConfigPayload(out);
   }
 
   Map<String, dynamic> toJson() => fields;
-  factory VaultPayload.fromJson(Map<String, dynamic> j) => VaultPayload(j);
+  factory ConfigPayload.fromJson(Map<String, dynamic> j) => ConfigPayload(j);
 
   /// Overlay this payload onto [current], returning a new [AppSettings].
   ///
-  /// Skips null / empty values so a vault that lacks a field (or an empty
+  /// Skips null / empty values so a config that lacks a field (or an empty
   /// remote value) never clobbers a locally-set secret — local-first. Only the
-  /// keys in [kVaultPayloadKeys] are ever touched; everything else in
+  /// keys in [kConfigPayloadKeys] are ever touched; everything else in
   /// [current] is preserved.
   AppSettings applyTo(AppSettings current) {
     final m = current.toJson();
     fields.forEach((k, v) {
       if (k == '_schema') return;
-      if (!kVaultPayloadKeys.contains(k)) return; // ignore unknown/stale keys
+      if (!kConfigPayloadKeys.contains(k)) return; // ignore unknown/stale keys
       if (v == null) return;
       if (v is String && v.isEmpty) return;
       if (v is Map && v.isEmpty) return;

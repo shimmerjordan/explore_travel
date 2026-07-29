@@ -206,8 +206,46 @@ class _ExploreJournalAppState extends ConsumerState<ExploreJournalApp> {
             routerConfig: _router,
             localizationsDelegates: _localizationsDelegates,
             supportedLocales: _supportedLocales,
+            builder: (_, child) => _withDefaultPasswordNotice(child),
           )
         : _buildWithForegroundTask(context);
+  }
+
+  /// A console still on `admin/admin` is one open port away from being someone
+  /// else's. The warning rides above every route (not the login screen, which
+  /// the router leaves the instant login succeeds) and can't be dismissed —
+  /// changing the password is what makes it go away.
+  Widget _withDefaultPasswordNotice(Widget? child) {
+    if (!ref.watch(defaultPasswordWarningProvider)) {
+      return child ?? const SizedBox.shrink();
+    }
+    return Column(
+      children: [
+        Material(
+          color: const Color(0xFF8C1D18),
+          child: SafeArea(
+            bottom: false,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              child: Row(
+                children: [
+                  const Icon(Icons.warning_amber_rounded,
+                      size: 18, color: Colors.white),
+                  const SizedBox(width: 8),
+                  const Expanded(
+                    child: Text(
+                      '仍在使用默认密码 admin/admin，请尽快修改',
+                      style: TextStyle(color: Colors.white, fontSize: 13),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+        Expanded(child: child ?? const SizedBox.shrink()),
+      ],
+    );
   }
 
   Widget _buildWithForegroundTask(BuildContext context) {

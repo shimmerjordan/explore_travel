@@ -41,17 +41,15 @@ class AppSettings {
   final String? oneDriveRefreshToken;
   final String? oneDriveAccount;
   /// Which sync transport the incremental [SyncEngine] uses. One of
-  /// [SyncBackend.all] ('onedrive' | 'github' | 'webdav' | 'nas'). Defaults to
-  /// 'onedrive' so existing installs and mobile behave exactly as before.
+  /// [SyncBackend.all] ('onedrive' | 'github' | 'webdav'). Defaults to
+  /// 'onedrive' so existing installs and mobile behave exactly as before. An
+  /// unrecognized persisted value falls back to 'onedrive' at the provider.
   final String syncBackend;
-  /// NAS web-display backend (zero-knowledge vault host). Non-secret config:
-  /// the server base URL, the account email, and the b64 KDF salt returned by
-  /// `GET /auth/salt` (cached so re-login can derive without a round trip).
-  /// The session token is NOT here — it's bearer-equivalent and short-lived,
-  /// kept in a dedicated clearable store ([NasTokenStore]).
+  /// Where the web-display console lives, e.g. `http://192.168.1.9:48080`.
+  /// Non-secret, and only the phone needs it (the browser reaches the console
+  /// at its own origin). The session token is NOT here — it's
+  /// bearer-equivalent and short-lived, kept in a clearable session store.
   final String? nasServerUrl;
-  final String? nasAccountEmail;
-  final String? nasKdfSalt;
   final String? zerotierNetworkId;
   final String displayName;
   final String? p2pPassphrase;
@@ -271,8 +269,6 @@ class AppSettings {
     this.oneDriveAccount,
     this.syncBackend = 'onedrive',
     this.nasServerUrl,
-    this.nasAccountEmail,
-    this.nasKdfSalt,
     this.zerotierNetworkId,
     this.displayName = '旅人',
     this.p2pPassphrase,
@@ -377,8 +373,6 @@ class AppSettings {
     String? oneDriveAccount,
     String? syncBackend,
     String? nasServerUrl,
-    String? nasAccountEmail,
-    String? nasKdfSalt,
     String? zerotierNetworkId,
     String? displayName,
     String? p2pPassphrase,
@@ -481,8 +475,6 @@ class AppSettings {
         oneDriveAccount: oneDriveAccount ?? this.oneDriveAccount,
         syncBackend: syncBackend ?? this.syncBackend,
         nasServerUrl: nasServerUrl ?? this.nasServerUrl,
-        nasAccountEmail: nasAccountEmail ?? this.nasAccountEmail,
-        nasKdfSalt: nasKdfSalt ?? this.nasKdfSalt,
         zerotierNetworkId: zerotierNetworkId ?? this.zerotierNetworkId,
         displayName: displayName ?? this.displayName,
         p2pPassphrase: p2pPassphrase ?? this.p2pPassphrase,
@@ -600,8 +592,6 @@ class AppSettings {
         'oneDriveAccount': oneDriveAccount,
         'syncBackend': syncBackend,
         'nasServerUrl': nasServerUrl,
-        'nasAccountEmail': nasAccountEmail,
-        'nasKdfSalt': nasKdfSalt,
         'zerotierNetworkId': zerotierNetworkId,
         'displayName': displayName,
         'p2pPassphrase': p2pPassphrase,
@@ -705,8 +695,6 @@ class AppSettings {
         oneDriveAccount: j['oneDriveAccount'],
         syncBackend: j['syncBackend']?.toString() ?? 'onedrive',
         nasServerUrl: j['nasServerUrl']?.toString(),
-        nasAccountEmail: j['nasAccountEmail']?.toString(),
-        nasKdfSalt: j['nasKdfSalt']?.toString(),
         zerotierNetworkId: j['zerotierNetworkId'],
         displayName: j['displayName'] ?? '旅人',
         p2pPassphrase: j['p2pPassphrase'],
@@ -855,7 +843,7 @@ class PrefsStore {
 
   Future<AppSettings> load() async {
     // WEB SECRET HYGIENE: the web build is a stateless read-only viewer whose
-    // settings (incl. credentials) come from the zero-knowledge vault each
+    // settings (incl. credentials) come from the console's stored config each
     // session and live only in memory. Never read/write them to localStorage
     // (which shared_preferences uses on web) — so a shared browser can't leak
     // a previous user's PAT/WebDAV password. Native persists normally.

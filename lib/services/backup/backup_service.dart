@@ -1737,10 +1737,10 @@ class BackupService {
 /// `app_settings_v1` field names that hold weaponizable secrets (PATs,
 /// passwords, tokens, bearer-equivalents) — stripped before any backup leaves
 /// the device. Kept next to the backup logic so adding a new credential field
-/// is hard to forget. **Public** so the zero-knowledge settings vault (a
-/// separate path that, unlike backup, KEEPS these — encrypted client-side)
-/// derives its secret set from the same single source of truth: a key added
-/// here is covered by both, never one and not the other.
+/// is hard to forget. **Public** so the roaming settings config (a separate
+/// path that, unlike backup, KEEPS these — the console holds them encrypted at
+/// rest) derives its secret set from the same single source of truth: a key
+/// added here is covered by both, never one and not the other.
 const kVaultSecretKeys = <String>{
   'webdavPass',
   'p2pPassphrase',

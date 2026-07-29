@@ -25,8 +25,7 @@ import '../services/sync/sync_storage.dart';
 import '../services/sync/onedrive_service.dart';
 import '../services/sync/github_sync_storage.dart';
 import '../services/sync/webdav_sync_storage.dart';
-import '../services/sync/nas_vault_backed_storage.dart';
-import '../services/vault/vault_sync_controller.dart';
+import '../services/vault/config_sync_controller.dart';
 import '../services/imghost/upload_queue.dart';
 import '../services/backup/backup_service.dart';
 import '../services/geo/geocoding_service.dart';
@@ -199,11 +198,16 @@ final webdavServiceProvider = Provider<WebDavService>((ref) {
 /// mobile are unchanged.
 ///
 /// On web the credential (e.g. a GitHub PAT) lives only in memory — it comes
-/// from the decrypted zero-knowledge vault and is NEVER persisted (see
+/// from the config the console hands out at login and is NEVER persisted (see
 /// [PrefsStore] web hygiene). So GitHub is a valid web transport (its API sends
 /// CORS headers). Direct WebDAV from a browser is usually CORS-blocked and will
 /// fail at call time (the login flow treats sync failures as non-fatal,
-/// local-first); routing it through the NAS proxy is future work.
+/// local-first); routing it through the console's proxy is future work.
+///
+/// `default` is not decoration: [AppSettings.syncBackend] is a free-form string
+/// read straight out of persisted JSON, so an install left holding a value this
+/// build no longer knows lands here and syncs against OneDrive instead of
+/// throwing.
 final syncStorageProvider = Provider<SyncStorage>((ref) {
   final s = ref.watch(settingsProvider);
   switch (s.syncBackend) {
@@ -211,18 +215,16 @@ final syncStorageProvider = Provider<SyncStorage>((ref) {
       return GithubSyncStorage.fromSettings(s);
     case SyncBackend.webdav:
       return WebdavSyncStorage(ref.watch(webdavServiceProvider));
-    case SyncBackend.nas:
-      return NasVaultBackedStorage(ref);
     case SyncBackend.onedrive:
     default:
       return ref.watch(oneDriveServiceProvider);
   }
 });
 
-/// App-scoped controller for the NAS zero-knowledge vault (login / push /
-/// pull). Long-lived so its in-memory vaultKey + debounce survive navigation.
-final vaultSyncControllerProvider = Provider<VaultSyncController>((ref) {
-  final c = VaultSyncController(ref);
+/// App-scoped controller for the console's settings config (login / push /
+/// pull). Long-lived so its session token + debounce survive navigation.
+final configSyncControllerProvider = Provider<ConfigSyncController>((ref) {
+  final c = ConfigSyncController(ref);
   ref.onDispose(c.dispose);
   return c;
 });
