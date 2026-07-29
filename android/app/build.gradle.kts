@@ -83,20 +83,36 @@ android {
         }
     }
 
+    // ONE signature for every build type on this machine. Signing precedence:
+    //   1. android/key.properties  — your own Play Store upload key
+    //   2. committed stable key    — same signature everywhere, so 覆盖安装
+    //      works out of the box
+    //   3. debug key               — last resort (per-machine, NOT
+    //      upgrade-compatible across builds; only on a checkout that somehow
+    //      lacks the committed keystore)
+    val sharedSigningConfig = when {
+        hasUploadKey -> signingConfigs.getByName("upload")
+        hasStableKey -> signingConfigs.getByName("stable")
+        else -> signingConfigs.getByName("debug")
+    }
+
     buildTypes {
-        release {
-            // Signing precedence for in-place-upgradeable APKs:
-            //   1. android/key.properties  — your own Play Store upload key
-            //   2. committed stable key    — same signature everywhere, so
-            //      覆盖安装 works out of the box
-            //   3. debug key               — last resort (per-machine, NOT
-            //      upgrade-compatible across builds; only on a checkout that
-            //      somehow lacks the committed keystore)
-            signingConfig = when {
-                hasUploadKey -> signingConfigs.getByName("upload")
-                hasStableKey -> signingConfigs.getByName("stable")
-                else -> signingConfigs.getByName("debug")
-            }
+        // EVERY build type signs with the same key on purpose — debug, release,
+        // and the `profile` type the Flutter plugin adds. Android refuses to
+        // replace an installed APK whose signature differs, so `flutter run`
+        // used to uninstall the release build first, taking the journal, fog
+        // tiles, vault and every setting with it. Same key + same applicationId
+        // + same versionCode (0.1.0+1) = a plain in-place upgrade in either
+        // direction, data untouched.
+        //
+        // configureEach (lazy) rather than naming build types: `profile` is
+        // registered by the Flutter plugin, and this way any build type added
+        // later is covered too instead of silently falling back to the
+        // per-machine debug key. Verify with:
+        //   cd android && ./gradlew :app:signingReport
+        // Every variant must report the same SHA1.
+        configureEach {
+            signingConfig = sharedSigningConfig
         }
     }
 }
