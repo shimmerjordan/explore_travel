@@ -2,7 +2,7 @@ use crate::auth;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const FILE_NAME: &str = "admin.json";
 
@@ -109,24 +109,47 @@ fn quarantine_corrupt(dir: &Path, path: &Path, parse_err: &str) -> Result<AdminF
     Err(msg)
 }
 
-/// Write `admin.json` atomically: serialize to a sibling `admin.json.tmp`
-/// and `rename` it over the real path. `rename` within the same directory is
-/// atomic on POSIX filesystems, so a process killed mid-write can never
-/// leave a half-written `admin.json` behind -- readers see either the old
-/// file or the new one, never a torn one.
-pub fn save(dir: &Path, a: &AdminFile) -> Result<(), String> {
-    let path = dir.join(FILE_NAME);
-    let tmp_path = dir.join(format!("{FILE_NAME}.tmp"));
+/// Path of the staging file `write_tmp` produces and `commit_tmp` consumes.
+pub fn tmp_path(dir: &Path) -> PathBuf {
+    dir.join(format!("{FILE_NAME}.tmp"))
+}
+
+/// Stage `a` into `dir/admin.json.tmp`, fully written and fsync'd, WITHOUT
+/// touching the real `admin.json` yet.
+///
+/// This half exists separately from `commit_tmp` for callers that must fail
+/// before the point of no return. `PUT /api/password` is the one that needs
+/// it: it also has to re-encrypt `config.json` under the new key, and the two
+/// files must agree or the config becomes permanently undecryptable. By
+/// staging the new `admin.json` first, everything that can plausibly fail
+/// (serialization, ENOSPC, EACCES, a `admin.json.tmp` that is somehow a
+/// directory) happens while the on-disk state is still entirely untouched and
+/// the request can be aborted with no side effects at all. See the step-order
+/// comment on `main.rs`'s `handle_change_password`.
+pub fn write_tmp(dir: &Path, a: &AdminFile) -> Result<(), String> {
     let text = serde_json::to_string_pretty(a).map_err(|e| e.to_string())?;
-    if let Err(e) = fs::write(&tmp_path, text) {
-        let _ = fs::remove_file(&tmp_path); // best-effort; don't mask the write error
-        return Err(format!("write {}: {e}", tmp_path.display()));
-    }
-    if let Err(e) = fs::rename(&tmp_path, &path) {
-        let _ = fs::remove_file(&tmp_path); // best-effort; don't mask the rename error
-        return Err(format!("rename {}: {e}", tmp_path.display()));
-    }
-    Ok(())
+    crate::atomic_file::write_tmp(&tmp_path(dir), text.as_bytes())
+}
+
+/// Commit a previously staged `admin.json.tmp` over the real `admin.json`.
+///
+/// This is the point of no return, and it is deliberately reduced to a single
+/// same-directory `rename`: the bytes are already on disk and fsync'd, so
+/// there is nothing left here that can fail for a mundane reason like a full
+/// disk. `rename` within one directory is atomic on POSIX filesystems, so a
+/// reader concurrent with this call sees either the whole old file or the
+/// whole new one.
+pub fn commit_tmp(dir: &Path) -> Result<(), String> {
+    crate::atomic_file::commit(&tmp_path(dir), &dir.join(FILE_NAME))
+}
+
+/// Write `admin.json` atomically: stage it, then commit it. Callers that have
+/// nothing else to keep in sync with this file (first-run initialization, the
+/// tests) want exactly this; `handle_change_password` uses the two halves
+/// separately so it can interleave `config_store::reencrypt` between them.
+pub fn save(dir: &Path, a: &AdminFile) -> Result<(), String> {
+    write_tmp(dir, a)?;
+    commit_tmp(dir)
 }
 
 #[cfg(test)]
@@ -187,8 +210,7 @@ mod tests {
     /// implementation must read `is_default` back as `true` regardless of the
     /// password; an inferring implementation would compute `false` here
     /// (since the password doesn't verify against "admin") and fail this
-    /// assertion. See the task report for the self-check that proves this
-    /// test actually catches the inferring implementation.
+    /// assertion.
     #[test]
     fn default_flag_is_persisted_not_inferred() {
         let d = tmpdir("persisted-flag");
@@ -207,6 +229,34 @@ mod tests {
             reloaded.is_default,
             "is_default must be read back from the stored field, not re-derived from the password"
         );
+    }
+
+    /// The staging half must be exactly that: after `write_tmp`, the real
+    /// `admin.json` still holds the OLD content, and only `commit_tmp` makes
+    /// the new one visible. This is the property `handle_change_password`
+    /// relies on to be able to abort a password change, after staging, with
+    /// zero on-disk side effects.
+    #[test]
+    fn write_tmp_stages_without_touching_the_live_file() {
+        let d = tmpdir("stage");
+        let original = load_or_init(&d).unwrap();
+
+        let mut next = original.clone();
+        next.password_phc = crate::auth::hash_password(b"staged-password").unwrap();
+        next.is_default = false;
+        write_tmp(&d, &next).unwrap();
+
+        assert!(tmp_path(&d).exists(), "staging must produce admin.json.tmp");
+        let live = load_or_init(&d).unwrap();
+        assert_eq!(
+            live.password_phc, original.password_phc,
+            "write_tmp must not change the live admin.json"
+        );
+
+        commit_tmp(&d).unwrap();
+        let committed = load_or_init(&d).unwrap();
+        assert!(crate::auth::verify_password(&committed.password_phc, b"staged-password"));
+        assert!(!tmp_path(&d).exists(), "commit must consume the tmp file");
     }
 
     /// A corrupt `admin.json` must never be silently reset to admin/admin.

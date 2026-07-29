@@ -8,10 +8,10 @@ use std::fs;
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// Directory holding `admin.json` (and, from Task 8 onward, the encrypted
-    /// config blob). Single flat data directory — no more SQLite file.
+    /// Directory holding `admin.json` and the encrypted config blob
+    /// `config.json`. Single flat data directory — no SQLite file.
     pub data_dir: String,
-    /// Directory the static web build is served from (Task 6+).
+    /// Directory the static web build is served from.
     pub web_root: String,
     pub listen: String,
     pub proxy_enabled: bool,

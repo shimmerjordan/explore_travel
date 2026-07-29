@@ -1,9 +1,3 @@
-// This module is storage-layer-only for now (see the task brief): nothing in
-// `main.rs` calls `save`/`load`/`reencrypt` yet, so a plain `cargo build`
-// would otherwise flag this entire module as dead code. A later task wires
-// it up behind `/api/config`; drop this allow once that lands.
-#![allow(dead_code)]
-
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chacha20poly1305::{
     aead::{Aead, KeyInit},
@@ -21,11 +15,11 @@ const NONCE_LEN: usize = 12;
 /// persist (the user's cloud credentials + locators: WebDAV password,
 /// OneDrive token, GitHub image-host token, AI key, etc. -- all small
 /// strings). Not enforced inside `save`/`load` themselves: the HTTP layer
-/// that will own the request body (a later task) is the natural place to
-/// reject an oversized request before it ever reaches this module, the same
-/// way `main.rs`'s `MAX_API_BODY` caps today's `/api/*` bodies. This constant
-/// exists so that future layer, and any other caller, checks against one
-/// shared number instead of inventing its own.
+/// owns the request body and rejects an oversized one before it ever reaches
+/// this module (see `main.rs`'s `body_cap`, which caps `PUT /api/config`
+/// against this constant the same way `MAX_API_BODY` caps the other `/api/*`
+/// bodies). The constant lives here so that layer, and any other caller,
+/// checks against one shared number instead of inventing its own.
 pub const MAX_CONFIG_BYTES: usize = 256 * 1024;
 
 /// Single, undifferentiated error returned by `load` for every failure that
@@ -33,13 +27,27 @@ pub const MAX_CONFIG_BYTES: usize = 256 * 1024;
 /// that doesn't decode to exactly `NONCE_LEN` bytes, or an AEAD
 /// authentication failure -- whether the root cause is a wrong key or a
 /// tampered ciphertext. This is deliberate, not an oversight: `load` is
-/// reachable (via a future HTTP endpoint) from a network client supplying a
-/// guessed admin password, and if "wrong key" produced a different error
-/// than "corrupted file", that difference would be a decryption oracle an
-/// attacker could use to tell how close a guess is. See `decrypt` below,
-/// which returns `Result<_, ()>` specifically so there is no message left to
-/// leak by the time it reaches here.
-const DECRYPT_ERR: &str = "config decrypt failed";
+/// reachable, via `GET /api/config` and `PUT /api/password`, from a network
+/// client supplying a guessed admin password, and if "wrong key" produced a
+/// different error than "corrupted file", that difference would be a
+/// decryption oracle an attacker could use to tell how close a guess is. See
+/// `decrypt` below, which returns `Result<_, ()>` specifically so there is no
+/// message left to leak by the time it reaches here.
+///
+/// The text is fixed and identical for every cause -- which is what keeps it
+/// oracle-free -- so it is safe to hand back to the client verbatim, and it
+/// says what the operator can actually DO about it. That matters because this
+/// error is self-sustaining once it happens: a config whose ciphertext no
+/// longer matches the current password also blocks `PUT /api/password` (it
+/// can't re-encrypt what it can't decrypt), so an operator who reads only
+/// "config decrypt failed" has no way to tell that the way out is to
+/// overwrite the blob rather than to keep retrying. `main.rs` distinguishes
+/// this constant from an I/O failure precisely so this one can be surfaced
+/// while path-bearing I/O detail stays in the log.
+pub const DECRYPT_ERR: &str = "stored config could not be decrypted with the current password; \
+     it is not recoverable, but the service is not stuck: overwrite it with a fresh \
+     PUT /api/config (push settings again from the app or the console) and both reads and \
+     password changes will work again";
 
 /// On-disk envelope for the encrypted config blob. `v` is a format version
 /// reserved for future migrations. `nonce_b64` / `ct_b64` use standard
@@ -53,10 +61,12 @@ struct Envelope {
 }
 
 /// Encrypt `plaintext` under `key` with a fresh random nonce and atomically
-/// write the envelope to `dir/config.json` (sibling `.tmp` + `rename`, same
-/// pattern `admin_file::save` uses -- `rename` within one directory is
-/// atomic on POSIX filesystems, so a process killed mid-write can never
-/// leave a torn `config.json` behind).
+/// write the envelope to `dir/config.json` via `atomic_file` (fsync'd sibling
+/// `.tmp` + `rename` + directory fsync, the same path `admin_file::save`
+/// takes). See `atomic_file`'s module comment for why the fsyncs are
+/// load-bearing rather than belt-and-braces: this file and `admin.json` must
+/// agree about which key the ciphertext is under, so a crash that makes one
+/// rename durable and loses the other is exactly the failure mode to avoid.
 ///
 /// The nonce is drawn fresh from the OS RNG on every call, never derived
 /// from the key or the plaintext: reusing a ChaCha20-Poly1305 nonce under
@@ -82,15 +92,8 @@ pub fn save(dir: &Path, key: &[u8; 32], plaintext: &[u8]) -> Result<(), String> 
 
     let path = dir.join(FILE_NAME);
     let tmp_path = dir.join(format!("{FILE_NAME}.tmp"));
-    if let Err(e) = fs::write(&tmp_path, text) {
-        let _ = fs::remove_file(&tmp_path); // best-effort; don't mask the write error
-        return Err(format!("write {}: {e}", tmp_path.display()));
-    }
-    if let Err(e) = fs::rename(&tmp_path, &path) {
-        let _ = fs::remove_file(&tmp_path); // best-effort; don't mask the rename error
-        return Err(format!("rename {}: {e}", tmp_path.display()));
-    }
-    Ok(())
+    crate::atomic_file::write_tmp(&tmp_path, text.as_bytes())?;
+    crate::atomic_file::commit(&tmp_path, &path)
 }
 
 /// Read and decrypt `dir/config.json`.
@@ -220,10 +223,10 @@ mod tests {
         assert_eq!(load(&d, &[2u8; 32]).unwrap(), None);
     }
 
-    /// Supplementary test, NOT part of the brief's 7 -- added after a
-    /// self-check (see task report) found that the 7 above do not prove
-    /// `reencrypt` tells "missing file" apart from "file exists but `old` is
-    /// wrong". A buggy `reencrypt` that swallows every `load(old)` error
+    /// The tests above do not, on their own, prove that `reencrypt` tells
+    /// "missing file" apart from "file exists but `old` is wrong" -- which is
+    /// the distinction a password change depends on. A buggy `reencrypt` that
+    /// swallows every `load(old)` error
     /// (not just the specific `None` case) into `Ok(())` -- e.g. `match
     /// load(dir, old) { Ok(Some(pt)) => save(..), _ => Ok(()) }` -- would
     /// pass all 7 original tests unchanged, because none of them ever calls

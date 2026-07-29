@@ -14,8 +14,9 @@ pub struct Sessions {
 }
 
 fn now_secs() -> u64 {
-    // auth.rs deliberately has no `now_secs` helper (see task brief) — inlined
-    // here per that note.
+    // Deliberately local to this module: expiry is the only thing in the
+    // service that needs wall-clock time, so `auth` has no such helper to
+    // share.
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -71,10 +72,11 @@ impl Sessions {
         self.inner.lock().unwrap().clear();
     }
 
-    // Not called from production code yet (only from the tests below) --
-    // part of the Sessions contract for a future admin "active sessions"
-    // view. Silences the dead_code warning that would otherwise fire in a
-    // non-test build.
+    // Only the tests below call this; it is part of the `Sessions` contract
+    // (an "active sessions" count is the natural thing for an admin view to
+    // ask for) and is what `revoke_all_drops_every_session` checks emptiness
+    // with. `allow` silences the dead_code warning a non-test build would
+    // otherwise raise.
     #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.inner.lock().unwrap().len()
