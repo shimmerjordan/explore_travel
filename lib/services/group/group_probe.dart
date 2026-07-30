@@ -186,6 +186,22 @@ class ProbeDeps {
   final Future<void> Function(String host, int port, Duration timeout)?
       tcpConnect;
 
+  /// Defaults to `NetworkInterface.list` in the io impl. Just enumerates
+  /// local IPv4 addresses — informational, never fails the probe on its own.
+  final Future<List<ProbeIface>> Function()? listInterfaces;
+
+  /// Defaults to trying `ServerSocket.bind` across the mesh port range in the
+  /// io impl. Returns the bound port; throws [MeshPortUnavailable] if every
+  /// port in the range is taken. Injected so tests don't need a real socket
+  /// and don't fight over ports with whatever's running on the machine.
+  final Future<int> Function(int base, int count)? bindMesh;
+
+  /// Defaults to a `RawDatagramSocket` bound to port 0 (an ephemeral port) in
+  /// the io impl — deliberately NOT the discovery port, since that one may
+  /// already be held by a running LAN group service and stealing it would
+  /// break real peer discovery mid-session.
+  final Future<ProbeDatagram> Function()? openDatagram;
+
   const ProbeDeps({
     this.timeouts = const ProbeTimeouts(),
     this.httpGet,
@@ -193,7 +209,35 @@ class ProbeDeps {
     this.davClient,
     this.frpEngine,
     this.tcpConnect,
+    this.listInterfaces,
+    this.bindMesh,
+    this.openDatagram,
   });
+}
+
+/// One local network interface address, as reported by the LAN probe's
+/// "network interfaces" step.
+class ProbeIface {
+  final String name;
+  final String address;
+  const ProbeIface({required this.name, required this.address});
+}
+
+/// Minimal UDP multicast surface the LAN probe needs. Real impl wraps
+/// `dart:io`'s `RawDatagramSocket`; tests supply a fake.
+abstract class ProbeDatagram {
+  bool joinMulticast();
+  int send(List<int> data);
+  Future<int> countAnswers(Duration window);
+  Future<void> close();
+}
+
+/// Every port in the mesh port range was already taken. Not necessarily a
+/// problem — see [ProbeConfig.groupRunning].
+class MeshPortUnavailable implements Exception {
+  const MeshPortUnavailable();
+  @override
+  String toString() => 'MeshPortUnavailable';
 }
 
 abstract class GroupProbe {

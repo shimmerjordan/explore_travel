@@ -14,6 +14,7 @@ import 'frp_config.dart';
 import 'frp_engine.dart';
 import 'group_probe.dart';
 import 'group_wire.dart';
+import 'multicast_lock_io.dart';
 
 GroupProbe createProbe(
     GroupTransport transport, ProbeConfig config, ProbeDeps deps) {
@@ -753,8 +754,213 @@ Future<void> _defaultTcpConnect(String host, int port, Duration timeout) async {
   s.destroy();
 }
 
+/// LAN has no server to shake hands with — only the other member. Whether a
+/// peer is online is not a configuration problem on THIS device, so the
+/// judgment is deliberately split in two:
+///   - the first four steps (interfaces / MulticastLock / mesh port bind /
+///     send multicast) check whether this device is READY, and produce
+///     pass/fail/skip;
+///   - the last step ("peer replies") only reports a count and is always
+///     `info` — zero peers is not a failure, just a nudge to check the other
+///     side.
 class LanProbe extends _BaseProbe {
   LanProbe(super.cfg, super.deps);
+
+  ProbeDatagram? _dg;
+  bool _lockHeld = false;
+
   @override
-  List<Future<ProbeStep> Function()> steps() => [];
+  List<Future<ProbeStep> Function()> steps() => [
+        _ifaces,
+        _mcastLock,
+        _meshPort,
+        _sendMulticast,
+        _countPeers,
+      ];
+
+  @override
+  Future<void> cleanUp() async {
+    try {
+      await _dg?.close();
+    } catch (_) {}
+    if (_lockHeld) {
+      try {
+        await MulticastLock.release();
+      } catch (_) {}
+    }
+  }
+
+  Future<ProbeStep> _ifaces() => _BaseProbe.timed('网络接口', () async {
+        final sw = Stopwatch()..start();
+        final list = await (deps.listInterfaces ?? _defaultIfaces)();
+        return ProbeStep(
+          title: '网络接口',
+          outcome: ProbeOutcome.info,
+          detail: list.isEmpty
+              ? '没有可用的 IPv4 接口'
+              : list.map((i) => '${i.name} ${i.address}').join('；'),
+          elapsed: sw.elapsed,
+        );
+      });
+
+  Future<ProbeStep> _mcastLock() => _BaseProbe.timed('MulticastLock', () async {
+        final sw = Stopwatch()..start();
+        if (!Platform.isAndroid) {
+          return ProbeStep(
+            title: 'MulticastLock',
+            outcome: ProbeOutcome.skip,
+            detail: '仅 Android 需要',
+            elapsed: sw.elapsed,
+          );
+        }
+        await MulticastLock.acquire();
+        _lockHeld = true;
+        return ProbeStep(
+          title: 'MulticastLock',
+          outcome: ProbeOutcome.pass,
+          detail: '已获取（省电模式下系统会丢多播，拿住它才收得到）',
+          elapsed: sw.elapsed,
+        );
+      });
+
+  Future<ProbeStep> _meshPort() => _BaseProbe.timed('绑定 mesh 端口', () async {
+        final sw = Stopwatch()..start();
+        try {
+          final port = await (deps.bindMesh ?? _defaultBindMesh)(
+              kMeshPortBase, kMeshPortProbeCount);
+          return ProbeStep(
+            title: '绑定 mesh 端口',
+            outcome: ProbeOutcome.pass,
+            detail: '$port 可用',
+            elapsed: sw.elapsed,
+          );
+        } on MeshPortUnavailable {
+          // 正在组队时端口是被自己的服务占着的，那正是它该在的状态。
+          if (cfg.groupRunning) {
+            return ProbeStep(
+              title: '绑定 mesh 端口',
+              outcome: ProbeOutcome.pass,
+              detail: '端口被正在运行的组队服务占用（符合预期）',
+              elapsed: sw.elapsed,
+            );
+          }
+          return ProbeStep(
+            title: '绑定 mesh 端口',
+            outcome: ProbeOutcome.fail,
+            detail: '$kMeshPortBase..${kMeshPortBase + kMeshPortProbeCount - 1} 全部不可用',
+            elapsed: sw.elapsed,
+            hint: '有别的程序占了这段端口。先关掉它，或重启 App 释放残留监听',
+          );
+        }
+      });
+
+  Future<ProbeStep> _sendMulticast() =>
+      _BaseProbe.timed('发出多播', () async {
+        final sw = Stopwatch()..start();
+        final dg = _dg = await (deps.openDatagram ?? _defaultDatagram)();
+        if (!dg.joinMulticast()) {
+          return ProbeStep(
+            title: '发出多播',
+            outcome: ProbeOutcome.fail,
+            detail: '无法加入多播组 $kMcastGroup',
+            elapsed: sw.elapsed,
+            hint: '这个网络丢多播：家用路由器的 AP 隔离 / 访客网络 / 部分公司网络。'
+                '改用手机热点，或换成中继与 frp 通道',
+          );
+        }
+        final sent = dg.send(utf8.encode(
+            '{"g":"${groupSafeId(cfg.groupId)}","id":"${cfg.selfId}","probe":1}'));
+        return ProbeStep(
+          title: '发出多播',
+          outcome: sent > 0 ? ProbeOutcome.pass : ProbeOutcome.fail,
+          detail: sent > 0
+              ? '已发往 $kMcastGroup:$kDiscoveryPort（$sent 字节）'
+              : '发送返回 0 字节',
+          elapsed: sw.elapsed,
+          hint: sent > 0 ? null : '多播被系统拦下了：确认 App 有本地网络权限',
+        );
+      });
+
+  Future<ProbeStep> _countPeers() =>
+      _BaseProbe.timed('对端应答', () async {
+        final sw = Stopwatch()..start();
+        final n = await (_dg?.countAnswers(deps.timeouts.multicast) ??
+            Future.value(0));
+        return ProbeStep(
+          title: '对端应答',
+          outcome: ProbeOutcome.info,
+          detail: n > 0
+              ? '$n 个成员应答'
+              : '未发现成员（本机已就绪）',
+          elapsed: sw.elapsed,
+          hint: n > 0
+              ? null
+              : '让对方也打开组队、填同一个群组 ID，并确认两台在同一网段',
+        );
+      });
+}
+
+Future<List<ProbeIface>> _defaultIfaces() async {
+  final out = <ProbeIface>[];
+  for (final i in await NetworkInterface.list(
+      type: InternetAddressType.IPv4, includeLoopback: false)) {
+    for (final a in i.addresses) {
+      out.add(ProbeIface(name: i.name, address: a.address));
+    }
+  }
+  return out;
+}
+
+Future<int> _defaultBindMesh(int base, int count) async {
+  for (var i = 0; i < count; i++) {
+    try {
+      final s = await ServerSocket.bind(InternetAddress.anyIPv4, base + i,
+          shared: true);
+      final port = s.port;
+      await s.close();
+      return port;
+    } catch (_) {/* try next */}
+  }
+  throw const MeshPortUnavailable();
+}
+
+class _IoDatagram implements ProbeDatagram {
+  final RawDatagramSocket _s;
+  int _answers = 0;
+  _IoDatagram(this._s) {
+    _s.listen((e) {
+      if (e == RawSocketEvent.read && _s.receive() != null) _answers++;
+    });
+  }
+
+  @override
+  bool joinMulticast() {
+    try {
+      _s.joinMulticast(InternetAddress(kMcastGroup));
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  @override
+  int send(List<int> data) =>
+      _s.send(data, InternetAddress(kMcastGroup), kDiscoveryPort);
+
+  @override
+  Future<int> countAnswers(Duration window) async {
+    await Future<void>.delayed(window);
+    return _answers;
+  }
+
+  @override
+  Future<void> close() async => _s.close();
+}
+
+Future<ProbeDatagram> _defaultDatagram() async {
+  // 端口 0：借一个临时端口，绝不与正在运行的组队服务抢 kDiscoveryPort。
+  final s = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+  s.multicastLoopback = false;
+  s.multicastHops = 8;
+  return _IoDatagram(s);
 }

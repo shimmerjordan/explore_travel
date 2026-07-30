@@ -5,6 +5,7 @@ import 'package:explore_journal/models/models.dart';
 import 'package:explore_journal/services/group/frp_engine.dart';
 import 'package:explore_journal/services/group/group_probe.dart';
 import 'package:explore_journal/services/group/group_probe_io.dart';
+import 'package:explore_journal/services/group/group_wire.dart';
 
 ProbeStep step(ProbeOutcome o, [String title = 's']) => ProbeStep(
       title: title,
@@ -175,6 +176,7 @@ void main() {
   group('RelayProbe', relayTests);
   group('WebDavProbe', webdavTests);
   group('FrpProbe', frpTests);
+  group('LanProbe', lanTests);
 }
 
 class _FakeSocket implements ProbeSocket {
@@ -453,5 +455,89 @@ void frpTests() {
         FrpProbe(const ProbeConfig(groupId: 'g'), const ProbeDeps()));
     expect(steps.first.outcome, ProbeOutcome.fail);
     expect(steps.length, 1);
+  });
+}
+
+class _FakeDatagram implements ProbeDatagram {
+  final bool joinOk;
+  final int sendBytes;
+  final int answers;
+  bool closed = false;
+  // sendBytes isn't overridden by any current test but is part of the real
+  // ProbeDatagram surface; keep it constructible for future cases (same
+  // pattern as _FakeSocket.closeCode above).
+  // ignore: unused_element_parameter
+  _FakeDatagram({this.joinOk = true, this.sendBytes = 42, this.answers = 0});
+  @override
+  bool joinMulticast() => joinOk;
+  @override
+  int send(List<int> data) => sendBytes;
+  @override
+  Future<int> countAnswers(Duration window) async => answers;
+  @override
+  Future<void> close() async => closed = true;
+}
+
+void lanTests() {
+  const cfg = ProbeConfig(groupId: 'g');
+
+  ProbeDeps deps({
+    int meshPort = kMeshPortBase,
+    bool meshFails = false,
+    ProbeDatagram? dg,
+  }) =>
+      ProbeDeps(
+        listInterfaces: () async =>
+            [const ProbeIface(name: 'wlan0', address: '192.168.1.23')],
+        bindMesh: (b, c) async =>
+            meshFails ? throw const MeshPortUnavailable() : meshPort,
+        openDatagram: () async => dg ?? _FakeDatagram(),
+        timeouts: const ProbeTimeouts(multicast: Duration(milliseconds: 10)),
+      );
+
+  test('本机就绪且发现 2 个对端 → 通过，对端数是 info', () async {
+    final steps = await _run(
+        LanProbe(cfg, deps(dg: _FakeDatagram(answers: 2))));
+    final report = ProbeReport(transport: GroupTransport.lan, steps: steps);
+    expect(report.passed, isTrue);
+    final peers = steps.firstWhere((s) => s.title.contains('对端'));
+    expect(peers.outcome, ProbeOutcome.info);
+    expect(peers.detail, contains('2'));
+  });
+
+  test('0 个对端仍算通过，但提示让对方也开启', () async {
+    final steps = await _run(LanProbe(cfg, deps()));
+    expect(ProbeReport(transport: GroupTransport.lan, steps: steps).passed, isTrue);
+    final peers = steps.firstWhere((s) => s.title.contains('对端'));
+    expect(peers.detail, contains('未发现'));
+  });
+
+  test('mesh 端口全被占 → fail', () async {
+    final steps = await _run(LanProbe(cfg, deps(meshFails: true)));
+    final bad = steps.firstWhere((s) => s.outcome == ProbeOutcome.fail);
+    expect(bad.title, contains('mesh'));
+  });
+
+  test('组队正在运行时端口被自己占 → 判 pass 而不是 fail', () async {
+    final steps = await _run(LanProbe(
+      const ProbeConfig(groupId: 'g', groupRunning: true),
+      deps(meshFails: true),
+    ));
+    final mesh = steps.firstWhere((s) => s.title.contains('mesh'));
+    expect(mesh.outcome, ProbeOutcome.pass);
+    expect(mesh.detail, contains('组队'));
+  });
+
+  test('加入多播组失败 → fail 并提示 AP 隔离/多播被丢', () async {
+    final steps = await _run(
+        LanProbe(cfg, deps(dg: _FakeDatagram(joinOk: false))));
+    final bad = steps.firstWhere((s) => s.outcome == ProbeOutcome.fail);
+    expect(bad.hint, contains('多播'));
+  });
+
+  test('datagram 一定会被关掉', () async {
+    final dg = _FakeDatagram();
+    await _run(LanProbe(cfg, deps(dg: dg)));
+    expect(dg.closed, isTrue);
   });
 }
