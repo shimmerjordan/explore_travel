@@ -311,6 +311,11 @@ mod tests {
             .0;
         // Quoted entries only: the literal carries comments, and a comment
         // mentioning a key name must not count as declaring one.
+        //
+        // MAINTENANCE: this drops whole comment LINES, so a comment must never
+        // share a line with an entry. A trailing `// owner's quota` would have
+        // its apostrophe parsed as a string delimiter and shift every entry
+        // after it. Keep comments on their own lines in the Dart literal.
         let mut dart: Vec<&str> = body
             .lines()
             .filter(|l| !l.trim_start().starts_with("//"))

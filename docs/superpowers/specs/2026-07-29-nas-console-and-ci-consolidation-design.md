@@ -240,10 +240,10 @@ web-front 构建，且失败归属变模糊。
 |---|---|---|
 | `web-front.yml` | 由 `nas-backend.yml` 更名而来，并吸收 `deploy-web.yml` | Flutter web 构建 → Rust 交叉编译 → 双架构镜像 → smoke → 推 GHCR |
 | `backend.yml` | 文件名不变（避免断掉历史运行链接与分支保护引用） | npm test → 容器 E2E → 双架构镜像 → 推 GHCR |
-| `deploy-web.yml` | **删除** | 职责并入 `web-front.yml` |
+| `deploy-web.yml` | ~~**删除**~~ **实施时否决，已保留** | 见下方说明 |
+| `release.yml` | 不动 | 手动 APK 发布 |
 
 > **实施时被否决（Task 17）**：该结论的前提是「deploy-web.yml 只是重复 Flutter 构建」，但它实际产出的是合并站点（宣传落地页在 `/`、应用在 `/app/`、base-href 不同），推到远端已存在的 `web-build` 分支接 Vercel。两份产物 base-href 不同因而无法共用一次构建，而镜像里根本没有 `website/` 的落地页——删掉它等于静默废掉宣传站部署。**已保留**，并在该文件头部写明分工。
-| `release.yml` | 不动 | 手动 APK 发布 |
 
 `web-front.yml` 的构建顺序：先 `flutter build web`（带 pub 缓存），产物交给
 `docker build` 的 context，再走双架构交叉编译。Flutter 构建只跑一次，两个架构共用

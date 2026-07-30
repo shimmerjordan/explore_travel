@@ -12,8 +12,9 @@ services:
     ports:
       - "48080:48080"
     volumes:
-      # WHERE THE DATA LIVES — one variable, two modes. Holds admin.json (and,
-      # and the encrypted user config blob).
+      # WHERE THE DATA LIVES — one variable, two modes. Holds admin.json (the
+      # Argon2 password hash and derivation salt), the encrypted user config,
+      # and the metrics file.
       #
       #   unset (default) → resolves to `ejdata`, a Docker NAMED volume.
       #     Zero host setup: a named volume inherits the image's nonroot-owned

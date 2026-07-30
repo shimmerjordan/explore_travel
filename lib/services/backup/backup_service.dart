@@ -567,6 +567,19 @@ class BackupService {
   /// Write the archive bytes to a timestamped `.zip` under documents/ and
   /// return the file. Used by both local export and WebDAV upload — the
   /// archive bytes are identical, only the destination differs.
+  /// Does an export of [modules] have any credential worth sealing?
+  ///
+  /// The UI asks this before prompting for a password: prompting when the answer
+  /// is no would promise something that cannot happen (no `settings` module → no
+  /// credentials member at all) or protect nothing (no credentials configured).
+  Future<bool> hasCredentialsToSeal(Set<String> modules) async {
+    if (!modules.contains('settings')) return false;
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString('app_settings_v1');
+    if (raw == null) return false;
+    return _collectSecrets(raw).isNotEmpty;
+  }
+
   Future<File> exportToFile(Set<String> modules,
       {String? credentialsPassword}) async {
     final bytes = await exportToArchive(modules,
@@ -1622,6 +1635,15 @@ class BackupService {
           localTs != null &&
           (cloudTs == null || !cloudTs.isAfter(localTs))) {
         summary.skipped['settings'] = 1;
+        // The credential unsealing lives further down this block, so an LWW skip
+        // takes it with it. Silence here is the worst outcome available: the user
+        // was prompted for a password, typed the RIGHT one, and would otherwise
+        // be told only "本地已是最新" while nothing was restored.
+        if (readText(BackupCredentials.fileName) != null) {
+          summary.warnings.add(
+              '本机设置比备份新，已跳过设置合并——备份里的加密凭据因此也没有应用。'
+              '要强制用备份里的设置与凭据，请打开「导入前清空」再导一次');
+        }
         return;
       }
       // NEVER let a restore wipe local credentials. Exports scrub every
@@ -1655,22 +1677,35 @@ class BackupService {
         if (sealed != null &&
             credentialsPassword != null &&
             credentialsPassword.isNotEmpty) {
-          unsealed =
-              await BackupCredentials.open(sealed, credentialsPassword) ??
-                  const {};
-          if (unsealed.isEmpty) {
+          // `null` and `{}` mean different things here (see
+          // BackupCredentials.open): only null is a failure to open. Treating an
+          // empty-but-valid envelope as a wrong password would tell the user
+          // something untrue.
+          final opened =
+              await BackupCredentials.open(sealed, credentialsPassword);
+          if (opened == null) {
             summary.warnings.add(
                 '备份里的凭据没能解开（口令不对，或文件被改过）——已保留本机原有凭据');
+          } else {
+            unsealed = opened;
           }
         } else if (sealed != null) {
           summary.warnings.add(
               '这份备份带着加密的凭据，但没有提供口令——已保留本机原有凭据');
         }
+        var restoredCount = 0;
         for (final k in kVaultSecretKeys) {
           final v = unsealed[k];
           if (v == null) continue;
           if (v is String && v.isEmpty) continue;
           cloud[k] = v;
+          restoredCount++;
+        }
+        // Say so on success too. A silent success is indistinguishable from a
+        // silent no-op, and the user just typed a password specifically to make
+        // this happen — they deserve to know whether it did.
+        if (restoredCount > 0) {
+          summary.warnings.add('已从备份恢复 $restoredCount 项凭据（覆盖了本机原有值）');
         }
 
         final localRaw = prefs.getString('app_settings_v1');

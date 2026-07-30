@@ -1006,7 +1006,7 @@ fn handle_change_password(state: &AppState, req: &Request, body: &[u8]) -> Out {
         // Drop the staged file: leaving it behind would hand a later commit a
         // new PHC that no config was ever re-encrypted for.
         let _ = std::fs::remove_file(admin_file::tmp_path(dir));
-        if e == config_store::DECRYPT_ERR {
+        if e == config_store::DECRYPT_ERR || e == config_store::NOT_AN_ENVELOPE {
             // Safe to surface verbatim, and the only 500 here that tells the
             // operator something actionable -- see `config_store::DECRYPT_ERR`.
             eprintln!("ERROR: password change aborted: {e}");

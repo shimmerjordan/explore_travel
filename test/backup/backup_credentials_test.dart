@@ -69,23 +69,40 @@ void main() {
       expect(await BackupCredentials.open(b, pw), isNotNull);
     });
 
-    /// The whole reason the KDF parameters are authenticated rather than merely
-    /// stored: an attacker who can rewrite the file must not be able to make it
-    /// cheap to crack and hand it back.
-    test('weakening the iteration count is refused, not honoured', () async {
+    /// Rewriting the recorded iteration count cannot make the file cheaper to
+    /// open — in EITHER direction — because that number feeds the key
+    /// derivation. This is a property of the construction, not of a range check
+    /// (there deliberately is none; see `open`).
+    test('rewriting the iteration count breaks the key, either way', () async {
       final sealed = await shared;
       final j = jsonDecode(sealed) as Map<String, dynamic>;
       final original = j['iterations'] as int;
       expect(original, greaterThanOrEqualTo(600000),
           reason: 'a backup sitting in cloud storage deserves a real KDF cost');
 
-      j['iterations'] = 1;
-      expect(await BackupCredentials.open(jsonEncode(j), pw), isNull);
+      for (final tampered in [1, 1000, original - 1, original + 1, original * 2]) {
+        j['iterations'] = tampered;
+        expect(await BackupCredentials.open(jsonEncode(j), pw), isNull,
+            reason: 'iterations=$tampered must not open');
+      }
+    });
 
-      // Raising it is also refused-by-mismatch rather than silently accepted:
-      // the header is authenticated, so any change breaks the tag.
-      j['iterations'] = original * 2;
-      expect(await BackupCredentials.open(jsonEncode(j), pw), isNull);
+    /// The reason the range check was left out: raising the seal-time cost must
+    /// not strand backups already written at the old cost. Simulated by sealing
+    /// at the current constant and opening a file that records a LOWER count
+    /// than a future version would use — the only thing that matters is that
+    /// the recorded count is what gets used.
+    test('a backup opens at whatever cost it recorded', () async {
+      // A hand-built envelope at a low cost, opened by this same code: proves
+      // `open` honours the file rather than a compiled-in floor.
+      const cheap = 1000;
+      final low = await BackupCredentials.sealForTest(
+          {'webdavPass': 'SECRET-webdav'}, pw, cheap);
+      final opened = await BackupCredentials.open(low, pw);
+      expect(opened, isNotNull,
+          reason: 'a floor here would lock old backups out when the constant rises');
+      expect(opened!['webdavPass'], 'SECRET-webdav');
+      expect((jsonDecode(low) as Map)['iterations'], cheap);
     });
 
     test('swapping the salt or nonce is refused', () async {
@@ -99,6 +116,25 @@ void main() {
 
       final nonceSwapped = {...a, 'nonce': b['nonce']};
       expect(await BackupCredentials.open(jsonEncode(nonceSwapped), pw), isNull);
+    });
+
+    /// The seal time is the only thing tying an envelope to the archive it
+    /// shipped in, so it has to be unforgeable — otherwise a rollback (dropping
+    /// an older backup's credentials member into a newer archive) could not even
+    /// be noticed after the fact.
+    test('the seal time is readable but not editable', () async {
+      final sealed = await shared;
+      final at = BackupCredentials.sealedAt(sealed);
+      expect(at, isNotNull);
+      expect(at!, greaterThan(0));
+      final j = jsonDecode(sealed) as Map<String, dynamic>;
+      j['sealedAt'] = 0;
+      expect(await BackupCredentials.open(jsonEncode(j), pw), isNull,
+          reason: 'an edited seal time must break the tag');
+      j['sealedAt'] = at + 86400000;
+      expect(await BackupCredentials.open(jsonEncode(j), pw), isNull);
+      expect(BackupCredentials.sealedAt(null), isNull);
+      expect(BackupCredentials.sealedAt('not json'), isNull);
     });
 
     test('tampering with the ciphertext is detected', () async {

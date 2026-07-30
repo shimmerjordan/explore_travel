@@ -155,13 +155,22 @@ fails loudly instead of being silently ignored"
         // being ignored, and without this line nothing anywhere says so.
         if !had_file {
             let legacy = std::path::Path::new(&cfg.data_dir).join("config.json");
-            if legacy.exists() {
+            // Only when that file actually IS old settings. It normally holds the
+            // encrypted user config, which every compose deployment has after the
+            // first push -- warning on that would fire on every restart of every
+            // default install, and the advice it gives ("rename it") would break
+            // a working setup.
+            if legacy.exists()
+                && std::fs::read_to_string(&legacy)
+                    .map(|t| crate::config_store::looks_like_server_settings(&t))
+                    .unwrap_or(false)
+            {
                 eprintln!(
                     "WARN: no settings file at {path}, so built-in defaults are in use \
-                     (still overridden by any EJ_* variables). Note that {} exists: in older \
-                     versions THAT was the settings file, and it is now where the encrypted \
-                     user config lives. If it still holds your server settings, rename it to \
-                     server.json and restart.",
+                     (still overridden by any EJ_* variables) -- but {} looks like a server \
+                     settings file. That path was the settings file in older versions and is \
+                     now where the encrypted user config lives. Rename it to server.json and \
+                     restart to have it read.",
                     legacy.display()
                 );
             }

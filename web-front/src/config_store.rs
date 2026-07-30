@@ -111,7 +111,9 @@ pub fn save(dir: &Path, key: &[u8; 32], plaintext: &[u8]) -> Result<(), String> 
 /// password -- overwrite it with a fresh PUT /api/config" against that file
 /// tells the operator to run the one command that destroys it, for a problem
 /// that is not the one they have. So: no `ct_b64` field, no decryption was
-/// ever attempted, and the error says which file it actually is.
+/// ever attempted, and the error says which file it actually is. Note the test
+/// is a positive one -- see `looks_like_server_settings` for why "it is not an
+/// envelope" is the wrong question to ask.
 pub fn load(dir: &Path, key: &[u8; 32]) -> Result<Option<Vec<u8>>, String> {
     let path = dir.join(FILE_NAME);
     let text = match fs::read_to_string(&path) {
@@ -122,12 +124,11 @@ pub fn load(dir: &Path, key: &[u8; 32]) -> Result<Option<Vec<u8>>, String> {
             return Err(DECRYPT_ERR.into());
         }
     };
-    if !looks_like_envelope(&text) {
+    if looks_like_server_settings(&text) {
         eprintln!(
-            "ERROR: {} is not an encrypted config envelope (no ct_b64 field). If this \
-             deployment was upgraded, it is probably the OLD server settings file -- that \
-             used to live at this exact path. Rename it to server.json and restart; do NOT \
-             overwrite it via PUT /api/config, that would destroy it.",
+            "ERROR: {} holds SERVER SETTINGS, not an encrypted config envelope. That path \
+             used to be the settings file in older versions. Rename it to server.json and \
+             restart; do NOT overwrite it via PUT /api/config, that would destroy it.",
             path.display()
         );
         return Err(NOT_AN_ENVELOPE.into());
@@ -135,12 +136,32 @@ pub fn load(dir: &Path, key: &[u8; 32]) -> Result<Option<Vec<u8>>, String> {
     decrypt(&text, key).map(Some).map_err(|()| DECRYPT_ERR.to_string())
 }
 
-/// Cheap structural test, deliberately NOT a full parse: the question is only
-/// "was this file ever written by `save`", and every envelope `save` writes has
-/// this field. A truncated or tampered envelope still has it and must keep
-/// going down the undifferentiated crypto path.
-fn looks_like_envelope(text: &str) -> bool {
-    text.contains("ct_b64")
+/// Is this file recognisably the OLD server settings file?
+///
+/// Written as a POSITIVE identification, not as "it lacks `ct_b64` so it must be
+/// settings". The negative form has its false negative pointed the dangerous
+/// way: `ct_b64` is the LAST field `save` emits, so a truncated envelope loses
+/// that key first, would be classified as settings, and the operator would be
+/// told "rename it, do NOT overwrite it" — when overwriting is the only thing
+/// that recovers a truncated envelope.
+///
+/// So: only a file that parses as JSON AND carries a key that only ever
+/// belonged to the settings schema gets the special message. Everything else —
+/// including a mangled envelope — stays on the undifferentiated crypto path,
+/// which is the safe default.
+pub fn looks_like_server_settings(text: &str) -> bool {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else {
+        return false;
+    };
+    let Some(obj) = v.as_object() else { return false };
+    if obj.contains_key("ct_b64") {
+        return false; // an envelope, however damaged
+    }
+    // Keys that exist in `Config` and nowhere in the envelope.
+    ["listen", "data_dir", "web_root", "proxy_enabled", "token_ttl_secs",
+     "trust_proxy_header", "workers", "metrics_interval_secs", "proxy_allow_hosts"]
+        .iter()
+        .any(|k| obj.contains_key(*k))
 }
 
 /// Distinct from [`DECRYPT_ERR`] on purpose -- see `load`.

@@ -285,7 +285,11 @@ impl Metrics {
         // just happened", so its own read is precisely the event worth
         // excluding. Verified rather than assumed -- see
         // `the_consoles_own_poll_does_not_flush_the_ring` below.
-        if key == "/api/metrics" {
+        // Only the console's OWN successful polls. A 4xx on this route is
+        // someone probing an endpoint they cannot read -- which is precisely
+        // what a "what just happened" panel exists to surface, so it must not
+        // be swallowed along with the self-noise.
+        if key == "/api/metrics" && status < 400 {
             return;
         }
         if g.recent.len() >= MAX_RECENT {
@@ -908,6 +912,20 @@ mod tests {
         assert_eq!(recent[0]["route"], "/api/session");
         // ...while the counters still see every poll.
         assert_eq!(s["routes"]["/api/metrics"]["total"], (MAX_RECENT * 2) as u64);
+    }
+
+    /// The exclusion is for self-noise, not for the route. Somebody hammering
+    /// `/api/metrics` without a session is exactly the event the panel is for.
+    #[test]
+    fn a_rejected_metrics_read_still_lands_in_the_ring() {
+        let m = Metrics::new(tmpdir("probering"));
+        m.record_access("/api/metrics", 200, 4000, "203.0.113.9"); // console poll
+        m.record_access("/api/metrics", 401, 24, "198.51.100.4"); // a prober
+        let s = m.snapshot_json(1, 1);
+        let recent = s["recent"].as_array().unwrap();
+        assert_eq!(recent.len(), 1, "the successful poll must not be kept");
+        assert_eq!(recent[0]["status"], 401);
+        assert_eq!(recent[0]["ip"], "198.51.100.4");
     }
 
     #[test]

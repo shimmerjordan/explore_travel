@@ -443,24 +443,22 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
   ///
   /// Returns `(proceed, password)`. `proceed == false` means the user cancelled
   /// the prompt and the import should not run.
-  Future<(bool, String?)> _passwordForArchive(Uint8List bytes) async {
-    String? sealed;
+  bool _archiveHasSealedCredentials(Uint8List bytes) {
     try {
+      // Only the central directory is walked here; `ArchiveFile.content`
+      // decompresses lazily, so this reads one small member rather than
+      // inflating the whole archive.
       for (final f in ZipDecoder().decodeBytes(bytes).files) {
         if (f.isFile && f.name == BackupCredentials.fileName) {
-          sealed = utf8.decode(f.content as List<int>, allowMalformed: true);
-          break;
+          return BackupCredentials.isSealed(
+              utf8.decode(f.content as List<int>, allowMalformed: true));
         }
       }
     } catch (_) {
       // Not a readable zip — let the import itself produce the real error
       // rather than failing here with a confusing one about credentials.
-      return (true, null);
     }
-    if (!BackupCredentials.isSealed(sealed)) return (true, null);
-    final pw = await _askArchivePassword(forExport: false);
-    if (pw == null) return (false, null);
-    return (true, pw.isEmpty ? null : pw);
+    return false;
   }
 
   Future<String> _runImport(Uint8List bytes, {String? credentialsPassword}) async {
@@ -480,6 +478,18 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
     await ref.read(settingsProvider.notifier).reload();
     return '导入完成：\n${sum.describe()}';
   }
+
+  /// Is there anything for an export password to protect?
+  ///
+  /// Two reasons it can be "no": the `settings` module is not selected (the
+  /// archive will carry no settings at all, so the password would be silently
+  /// ignored — the dialog would be promising something that cannot happen), or
+  /// the user simply has no credentials configured yet. Prompting in either case
+  /// is the same mistake `_passwordForArchive` avoids on the import side:
+  /// training people to dismiss a dialog that usually means nothing.
+  Future<bool> _exportWouldCarryCredentials() => ref
+      .read(backupServiceProvider)
+      .hasCredentialsToSeal(_selectedModules(ref.read(settingsProvider)));
 
   /// Ask for the password that seals (or unseals) the credentials in an archive.
   ///
@@ -554,8 +564,12 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
       setState(() => _status = '至少选一个模块');
       return;
     }
-    final pw = await _askArchivePassword(forExport: true);
-    if (pw == null || !mounted) return; // 取消
+    var pw = '';
+    if (await _exportWouldCarryCredentials()) {
+      final typed = await _askArchivePassword(forExport: true);
+      if (typed == null || !mounted) return; // 取消 → 整个操作中止
+      pw = typed; // '' 表示「继续，但不带凭据」
+    }
     final path = await _withProgress<String>('导出备份', (report, _) async {
       report(null, pw.isEmpty ? '打包数据…' : '打包并加密凭据…');
       final f = await ref.read(backupServiceProvider).exportToFile(
@@ -585,9 +599,24 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
     if (res == null || res.files.isEmpty) return;
     final picked = res.files.single;
     if (picked.bytes == null && picked.path == null) return;
-    final bytes = picked.bytes ?? await File(picked.path!).readAsBytes();
-    final (proceed, pw) = await _passwordForArchive(bytes);
-    if (!proceed || !mounted) return;
+    // Reading (and probing) happens inside a progress pass of its own: a
+    // several-hundred-MB archive takes real time, and the password dialog can
+    // only open once the progress dialog has closed — so this is two passes
+    // rather than one, same shape as the WebDAV restore path below.
+    final probed = await _withProgress<(Uint8List, bool)>('读取备份', (report, _) async {
+      report(null, '读取文件…');
+      final b = picked.bytes ?? await File(picked.path!).readAsBytes();
+      report(null, '检查内容…');
+      return (b, _archiveHasSealedCredentials(b));
+    });
+    if (probed == null || !mounted) return;
+    final (bytes, hasSealed) = probed;
+    String? pw;
+    if (hasSealed) {
+      final typed = await _askArchivePassword(forExport: false);
+      if (typed == null || !mounted) return; // 取消
+      pw = typed.isEmpty ? null : typed;
+    }
     final status = await _withProgress<String>('导入备份', (report, _) async {
       report(null, '合并导入…');
       return _runImport(bytes, credentialsPassword: pw);
@@ -613,8 +642,12 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
       setState(() => _status = '至少选一个模块');
       return;
     }
-    final pw = await _askArchivePassword(forExport: true);
-    if (pw == null || !mounted) return; // 取消
+    var pw = '';
+    if (await _exportWouldCarryCredentials()) {
+      final typed = await _askArchivePassword(forExport: true);
+      if (typed == null || !mounted) return; // 取消 → 整个操作中止
+      pw = typed; // '' 表示「继续，但不带凭据」
+    }
     final status = await _withProgress<String>('上传到 WebDAV', (report, _) async {
       report(null, pw.isEmpty ? '打包数据…' : '打包并加密凭据…');
       final bytes = await ref.read(backupServiceProvider).exportToArchive(
@@ -676,8 +709,12 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
     });
     if (bytes == null || !mounted) return;
     final archive = Uint8List.fromList(bytes);
-    final (proceed, pw) = await _passwordForArchive(archive);
-    if (!proceed || !mounted) return;
+    String? pw;
+    if (_archiveHasSealedCredentials(archive)) {
+      final typed = await _askArchivePassword(forExport: false);
+      if (typed == null || !mounted) return; // 取消
+      pw = typed.isEmpty ? null : typed;
+    }
     final status = await _withProgress<String>('从 WebDAV 恢复', (report, _) async {
       report(null, '合并导入…');
       return _runImport(archive, credentialsPassword: pw);
