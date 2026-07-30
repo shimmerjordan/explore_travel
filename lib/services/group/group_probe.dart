@@ -139,6 +139,23 @@ class WebSocketRejected implements Exception {
   String toString() => 'WebSocketRejected(code: $code)';
 }
 
+/// The slice of WebDAV the signaling probe needs. Real impl wraps the same
+/// `webdav_client` package `WebRtcGroupService` uses.
+abstract class ProbeDav {
+  Future<void> ensureDir(String path);
+  Future<void> write(String path, List<int> bytes);
+  Future<List<int>> read(String path);
+  Future<void> remove(String path);
+}
+
+/// A WebDAV request came back with a non-2xx status.
+class DavStatus implements Exception {
+  final int status;
+  const DavStatus(this.status);
+  @override
+  String toString() => 'DavStatus($status)';
+}
+
 /// Injectable dependencies. Defaults are the production ones; tests pass fakes.
 class ProbeDeps {
   final ProbeTimeouts timeouts;
@@ -154,10 +171,16 @@ class ProbeDeps {
 
   final Future<ProbeSocket> Function(Uri url, Duration timeout)? wsConnect;
 
+  /// Defaults to a `webdav_client` `Client`-backed adapter in the io impl —
+  /// the SAME client class [WebRtcGroupService] uses for real signaling, so a
+  /// pass here means the real transport can actually reach its mailbox.
+  final ProbeDav Function(ProbeConfig cfg)? davClient;
+
   const ProbeDeps({
     this.timeouts = const ProbeTimeouts(),
     this.httpGet,
     this.wsConnect,
+    this.davClient,
   });
 }
 

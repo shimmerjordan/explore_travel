@@ -170,6 +170,7 @@ void main() {
   });
 
   group('RelayProbe', relayTests);
+  group('WebDavProbe', webdavTests);
 }
 
 class _FakeSocket implements ProbeSocket {
@@ -258,6 +259,83 @@ void relayTests() {
   test('地址没配 → 第一步就 fail，不发任何请求', () async {
     final steps = await _run(RelayProbe(
         const ProbeConfig(groupId: 'g'), const ProbeDeps()));
+    expect(steps.first.outcome, ProbeOutcome.fail);
+    expect(steps.length, 1);
+  });
+}
+
+class _FakeDav implements ProbeDav {
+  final int? failEnsureWith;
+  final int? failWriteWith;
+  final bool corruptReadBack;
+  final List<String> calls = [];
+  final Map<String, List<int>> files = {};
+  _FakeDav({this.failEnsureWith, this.failWriteWith, this.corruptReadBack = false});
+
+  @override
+  Future<void> ensureDir(String path) async {
+    calls.add('ensureDir $path');
+    if (failEnsureWith != null) throw DavStatus(failEnsureWith!);
+  }
+  @override
+  Future<void> write(String path, List<int> bytes) async {
+    calls.add('write $path');
+    if (failWriteWith != null) throw DavStatus(failWriteWith!);
+    files[path] = bytes;
+  }
+  @override
+  Future<List<int>> read(String path) async {
+    calls.add('read $path');
+    final b = files[path] ?? (throw DavStatus(404));
+    return corruptReadBack ? [...b, 33] : b;
+  }
+  @override
+  Future<void> remove(String path) async => calls.add('remove $path');
+}
+
+void webdavTests() {
+  const cfg = ProbeConfig(
+    groupId: 'g',
+    webdavUrl: 'https://dav.example.org/dav',
+    webdavUser: 'u',
+    webdavPass: 'p',
+  );
+
+  test('目录可用 + 写入 + 读回一致 → 通过，并删掉探针文件', () async {
+    final dav = _FakeDav();
+    final steps = await _run(
+        WebDavProbe(cfg, ProbeDeps(davClient: (_) => dav)));
+    expect(ProbeReport(transport: GroupTransport.webrtc, steps: steps).passed,
+        isTrue);
+    expect(dav.calls.any((c) => c.startsWith('remove')), isTrue,
+        reason: '探针文件必须清理掉');
+  });
+
+  test('401 → 凭据错，提示查用户名口令', () async {
+    final steps = await _run(WebDavProbe(
+        cfg, ProbeDeps(davClient: (_) => _FakeDav(failEnsureWith: 401))));
+    final bad = steps.firstWhere((s) => s.outcome == ProbeOutcome.fail);
+    expect(bad.detail, contains('401'));
+    expect(bad.hint, contains('口令'));
+  });
+
+  test('403 → 权限不足，与 401 给不同提示', () async {
+    final steps = await _run(WebDavProbe(
+        cfg, ProbeDeps(davClient: (_) => _FakeDav(failWriteWith: 403))));
+    final bad = steps.firstWhere((s) => s.outcome == ProbeOutcome.fail);
+    expect(bad.hint, contains('只读'));
+  });
+
+  test('读回内容不一致 → fail（这是能当信令用的最后一道判定）', () async {
+    final steps = await _run(WebDavProbe(
+        cfg, ProbeDeps(davClient: (_) => _FakeDav(corruptReadBack: true))));
+    final bad = steps.firstWhere((s) => s.outcome == ProbeOutcome.fail);
+    expect(bad.title, contains('读回'));
+  });
+
+  test('地址或账号缺失 → 第一步 fail', () async {
+    final steps = await _run(
+        WebDavProbe(const ProbeConfig(groupId: 'g'), const ProbeDeps()));
     expect(steps.first.outcome, ProbeOutcome.fail);
     expect(steps.length, 1);
   });

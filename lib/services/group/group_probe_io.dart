@@ -1,8 +1,12 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
+import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart' show visibleForTesting;
+import 'package:webdav_client/webdav_client.dart' as webdav;
 
 import '../../models/models.dart';
 import '../security/http_guard.dart';
@@ -335,8 +339,193 @@ int? _codeFromMessage(String m) {
 
 class WebDavProbe extends _BaseProbe {
   WebDavProbe(super.cfg, super.deps);
+
+  late final ProbeDav _dav = (deps.davClient ?? _defaultDavClient)(cfg);
+
+  String get _root => '${cfg.signalingPath}/${cfg.groupId}';
+  final String _probeName = '.ej-probe-${_rand8()}';
+  String get _probePath => '$_root/$_probeName';
+  bool _wrote = false;
+
+  // Address/account missing means every later step would hit the same empty
+  // config anyway — short-circuit to the one step that explains it, same as
+  // RelayProbe does for a missing relay server URL.
   @override
-  List<Future<ProbeStep> Function()> steps() => [];
+  List<Future<ProbeStep> Function()> steps() {
+    final missingConfig = (cfg.webdavUrl ?? '').trim().isEmpty ||
+        (cfg.webdavUser ?? '').isEmpty ||
+        (cfg.webdavPass ?? '').isEmpty;
+    if (missingConfig) {
+      return [_checkConfig];
+    }
+    return [
+      _checkConfig,
+      _checkDir,
+      _checkWrite,
+      _checkReadBack,
+    ];
+  }
+
+  @override
+  Future<void> cleanUp() async {
+    if (!_wrote) return;
+    try {
+      await _dav.remove(_probePath);
+    } catch (_) {/* best effort */}
+  }
+
+  Future<ProbeStep> _checkConfig() async {
+    final missing = <String>[
+      if ((cfg.webdavUrl ?? '').trim().isEmpty) '地址',
+      if ((cfg.webdavUser ?? '').isEmpty) '用户名',
+      if ((cfg.webdavPass ?? '').isEmpty) '口令',
+    ];
+    if (missing.isNotEmpty) {
+      return ProbeStep(
+        title: '配置完整性',
+        outcome: ProbeOutcome.fail,
+        detail: '缺少：${missing.join(' / ')}',
+        elapsed: Duration.zero,
+        hint: '这条通道用 WebDAV 交换信令，三项都必填（与备份用的可以是同一个账户）',
+      );
+    }
+    return ProbeStep(
+      title: '配置完整性',
+      outcome: ProbeOutcome.pass,
+      detail: '${cfg.webdavUrl} · 信令目录 $_root',
+      elapsed: Duration.zero,
+    );
+  }
+
+  Future<ProbeStep> _checkDir() => _BaseProbe.timed(
+        '信令目录可用',
+        () async {
+          final sw = Stopwatch()..start();
+          try {
+            await _dav.ensureDir(_root).timeout(deps.timeouts.webdav);
+            return ProbeStep(
+                title: '信令目录可用',
+                outcome: ProbeOutcome.pass,
+                detail: _root,
+                elapsed: sw.elapsed);
+          } on DavStatus catch (e) {
+            return ProbeStep(
+              title: '信令目录可用',
+              outcome: ProbeOutcome.fail,
+              detail: 'HTTP ${e.status}',
+              elapsed: sw.elapsed,
+              hint: switch (e.status) {
+                401 => '用户名或口令不对（有的网盘要用「应用专用口令」而不是登录口令）',
+                403 => '账号对但没权限：这个目录对你是只读的，换一个可写路径',
+                404 => '路径不存在且自动创建失败，先在网盘里手工建好这一层',
+                _ => '服务端返回 ${e.status}，确认地址是 WebDAV 根而不是网页版地址',
+              },
+            );
+          }
+        },
+        failHint: '连不上 WebDAV：确认地址可从手机网络访问',
+      );
+
+  Future<ProbeStep> _checkWrite() => _BaseProbe.timed(
+        '写入探针文件',
+        () async {
+          final sw = Stopwatch()..start();
+          try {
+            await _dav
+                .write(_probePath, utf8.encode(_probeName))
+                .timeout(deps.timeouts.webdav);
+            _wrote = true;
+            return ProbeStep(
+                title: '写入探针文件',
+                outcome: ProbeOutcome.pass,
+                detail: _probeName,
+                elapsed: sw.elapsed);
+          } on DavStatus catch (e) {
+            return ProbeStep(
+              title: '写入探针文件',
+              outcome: ProbeOutcome.fail,
+              detail: 'HTTP ${e.status}',
+              elapsed: sw.elapsed,
+              hint: e.status == 403
+                  ? '目录只读 —— 信令需要写权限，换一个可写目录或改账号权限'
+                  : '写入被拒（${e.status}）：检查配额与路径',
+            );
+          }
+        },
+      );
+
+  Future<ProbeStep> _checkReadBack() => _BaseProbe.timed(
+        '读回校验',
+        () async {
+          final sw = Stopwatch()..start();
+          final got = await _dav.read(_probePath).timeout(deps.timeouts.webdav);
+          final same = utf8.decode(got, allowMalformed: true) == _probeName;
+          return ProbeStep(
+            title: '读回校验',
+            outcome: same ? ProbeOutcome.pass : ProbeOutcome.fail,
+            detail: same ? '内容一致，可以当信令用' : '读回的内容与写入的不一致',
+            elapsed: sw.elapsed,
+            hint: same
+                ? null
+                : '网盘可能做了转码或缓存 —— 这样的目录不能当信令用，换一个',
+          );
+        },
+        failHint: '读回失败：写进去了但取不回来，这条通道不可用',
+      );
+}
+
+String _rand8() {
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  final r = Random.secure();
+  return List.generate(8, (_) => chars[r.nextInt(chars.length)]).join();
+}
+
+ProbeDav _defaultDavClient(ProbeConfig cfg) => _WebDavClientAdapter(
+      webdav.newClient(
+        cfg.webdavUrl!.trim(),
+        user: cfg.webdavUser ?? '',
+        password: cfg.webdavPass ?? '',
+      ),
+    );
+
+class _WebDavClientAdapter implements ProbeDav {
+  final webdav.Client _c;
+  _WebDavClientAdapter(this._c);
+
+  @override
+  Future<void> ensureDir(String path) => _wrap(() async {
+        try {
+          await _c.readDir(path);
+        } catch (_) {
+          await _c.mkdirAll(path);
+        }
+      });
+
+  @override
+  Future<void> write(String path, List<int> bytes) =>
+      _wrap(() => _c.write(path, Uint8List.fromList(bytes)));
+
+  @override
+  Future<List<int>> read(String path) async {
+    List<int>? out;
+    await _wrap(() async => out = await _c.read(path));
+    return out ?? const [];
+  }
+
+  @override
+  Future<void> remove(String path) => _wrap(() => _c.remove(path));
+
+  /// Turns the package's DioException into [DavStatus] so the probe can branch
+  /// on 401/403/404 instead of matching strings.
+  Future<void> _wrap(Future<void> Function() body) async {
+    try {
+      await body();
+    } on DioException catch (e) {
+      final code = e.response?.statusCode;
+      if (code != null) throw DavStatus(code);
+      rethrow;
+    }
+  }
 }
 
 class FrpProbe extends _BaseProbe {
