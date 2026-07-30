@@ -40,10 +40,49 @@ const cfg = {
   groupConnectsPerMin: Number(process.env.GROUP_CONNECTS_PER_MIN || 30),
 };
 
+// Which modules to run. Both default ON, and an unrecognised value keeps the
+// module ON rather than quietly disabling it: the two failure directions are
+// "a service you wanted is silently missing" and "a service you tried to turn
+// off is still running", and only the first is hard to notice. Unrecognised
+// values do warn, so a typo is discoverable in the log.
+function moduleEnabled(name) {
+  const raw = process.env[`EJ_MODULE_${name.toUpperCase()}`];
+  if (raw === undefined || raw === '') return true;
+  const v = raw.trim().toLowerCase();
+  if (['0', 'false', 'no', 'off'].includes(v)) return false;
+  if (['1', 'true', 'yes', 'on'].includes(v)) return true;
+  log.warn(
+    'main',
+    `EJ_MODULE_${name.toUpperCase()}="${raw}" is not a boolean; leaving ${name} enabled`,
+  );
+  return true;
+}
+
+cfg.modules = {
+  leaderboard: moduleEnabled('leaderboard'),
+  group: moduleEnabled('group'),
+};
+
+// A module that is off is not merely unrouted -- it is never constructed, so
+// it opens no files, starts no timers, and cannot answer anything. That is the
+// point of the switch: running only the leaderboard on a box should not leave
+// the relay's state machine resident.
 const MODULES = [
-  require('./modules/leaderboard')(cfg),
-  require('./modules/group')(cfg),
-];
+  cfg.modules.leaderboard && require('./modules/leaderboard')(cfg),
+  cfg.modules.group && require('./modules/group')(cfg),
+].filter(Boolean);
+
+if (MODULES.length === 0) {
+  // Refusing to start beats listening on a port with nothing behind it: the
+  // latter passes every health check while serving 404 to everything real,
+  // which is the hardest kind of outage to diagnose.
+  log.error(
+    'main',
+    'every module is disabled (EJ_MODULE_LEADERBOARD and EJ_MODULE_GROUP are both off); ' +
+      'nothing would be served, so refusing to start -- enable at least one',
+  );
+  process.exit(2);
+}
 
 const router = new Router();
 for (const m of MODULES) {
@@ -104,6 +143,7 @@ server.listen(cfg.port, cfg.host, () => {
   log.info(
     'main',
     `listening on ${cfg.host}:${cfg.port} data=${cfg.dataDir} ` +
+      `modules=${MODULES.map((m) => m.name).join('+')} ` +
       `lbAuth=${cfg.lbWriteToken ? 'on' : 'off'} groupAuth=${cfg.groupToken ? 'on' : 'off'}`,
   );
 });

@@ -50,6 +50,7 @@ curl http://localhost:48081/api/status      # 模块状态/内存/在线人数
 |---|---|---|
 | `PORT` / `HOST` | `48081` / `0.0.0.0` | 监听地址 |
 | `DATA_DIR` | `/data` | 排行榜持久化目录（compose 已挂 volume） |
+| `EJ_MODULE_LEADERBOARD` / `EJ_MODULE_GROUP` | 都开 | 只想跑其中一半时设 `0`（也接受 `false`/`no`/`off`）。关掉的模块**不会被构造**，不占内存也不注册路由：排行榜关了 `/entries` `/monthly` `/index` 返回 404，组队关了 WS 升级被拒。两个都关会**拒绝启动并以非零码退出**——带零个模块占着端口会通过健康检查却对一切真实请求返回 404，那是最难排查的一种故障。值拼错时保持启用并告警，因为「你想关的还在跑」比「你想要的悄悄没了」容易发现 |
 | `TRUST_PROXY` | 关 | `1`=信任 `CF-Connecting-IP`/`X-Forwarded-For` 做限流分桶；**经 frp/CF 暴露时必须开**，否则所有用户共享一个限流桶 |
 | `LB_WRITE_TOKEN` | 空 | 设置后 `POST /entries` 需 `Authorization: Bearer`；读接口始终公开 |
 | `LB_READS_PER_MIN` / `LB_WRITES_PER_MIN` | 60 / 10 | 每 IP 限流 |
