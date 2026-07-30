@@ -305,13 +305,51 @@ fn has_valid_session(state: &AppState, req: &Request) -> bool {
 
 fn client_ip(state: &AppState, req: &Request) -> String {
     if state.cfg.trust_proxy_header {
-        if let Some(xff) = header(req, "X-Forwarded-For") {
-            return xff.split(',').next().unwrap_or("").trim().to_string();
+        let cf = header(req, "CF-Connecting-IP");
+        let xff = header(req, "X-Forwarded-For");
+        if let Some(ip) = forwarded_client_ip(cf.as_deref(), xff.as_deref()) {
+            return ip;
         }
     }
     req.remote_addr()
         .map(|a| a.ip().to_string())
         .unwrap_or_default()
+}
+
+/// The client address a trusted proxy reported, if it reported one.
+///
+/// `CF-Connecting-IP` FIRST, and this ordering is load-bearing rather than a
+/// preference. Cloudflare *appends* the real peer to `X-Forwarded-For`, so a
+/// request that arrives carrying a forged `X-Forwarded-For: 1.2.3.4` reaches the
+/// origin as `1.2.3.4, <real ip>` — and taking the leftmost entry (the usual
+/// convention, and what this did before) hands the caller its own choice of
+/// rate-limit bucket. That defeats the 10/min auth bucket, i.e. the brute-force
+/// defence on the admin password, which is the one limit worth attacking.
+/// `CF-Connecting-IP` is a single address written by the edge and not
+/// concatenated with anything the client sent, so it can't be steered that way.
+/// Same precedence as `clientIp()` in `backends/server/lib/ratelimit.js`; the
+/// two services sit behind the same tunnel and should bucket identically.
+///
+/// The `X-Forwarded-For` fallback keeps the leftmost entry, which is the right
+/// answer for the other supported shape (your own Caddy/Nginx in front, where
+/// the proxy is expected to be configured to replace rather than append). Note
+/// what that means: with `trust_proxy_header` on and NO proxy actually in front,
+/// the bucket key is client-controlled either way — that's why the flag defaults
+/// to off and the compose comments insist on turning it on only when something
+/// really is in front.
+fn forwarded_client_ip(cf: Option<&str>, xff: Option<&str>) -> Option<String> {
+    if let Some(cf) = cf {
+        let cf = cf.trim();
+        if !cf.is_empty() {
+            return Some(cf.to_string());
+        }
+    }
+    let first = xff?.split(',').next().unwrap_or("").trim().to_string();
+    if first.is_empty() {
+        None
+    } else {
+        Some(first)
+    }
 }
 
 /// Which rate-limit bucket (and per-minute cap) a request counts against.
@@ -1566,6 +1604,45 @@ mod tests {
         }
         // ...while the GET side of the same paths keeps the wide budget.
         assert_eq!(bucket_for("GET", "/foo"), ("static", 1200));
+    }
+
+    /// The bucket key behind Cloudflare must come from `CF-Connecting-IP`, not
+    /// from the leftmost `X-Forwarded-For` entry. The edge APPENDS the real peer
+    /// to whatever the caller sent, so trusting the leftmost entry lets a caller
+    /// pick its own bucket and spend someone else's budget instead of its own —
+    /// which turns the 10/min auth bucket (the brute-force defence on the admin
+    /// password) into no defence at all.
+    #[test]
+    fn a_forged_forwarded_for_cannot_steer_the_bucket_behind_cloudflare() {
+        // What the origin actually sees when a caller sends `X-Forwarded-For:
+        // 1.2.3.4` through Cloudflare: its forgery first, the real peer last.
+        assert_eq!(
+            forwarded_client_ip(Some("203.0.113.7"), Some("1.2.3.4, 203.0.113.7")),
+            Some("203.0.113.7".to_string()),
+            "CF-Connecting-IP must win over anything in X-Forwarded-For"
+        );
+
+        // Without Cloudflare (own reverse proxy) the leftmost XFF entry stands.
+        assert_eq!(
+            forwarded_client_ip(None, Some("198.51.100.9, 10.0.0.2")),
+            Some("198.51.100.9".to_string())
+        );
+
+        // Blank/absent values must fall through to the socket address rather
+        // than becoming an empty bucket key shared by every such request.
+        assert_eq!(forwarded_client_ip(None, None), None);
+        assert_eq!(forwarded_client_ip(Some("  "), Some("")), None);
+        assert_eq!(forwarded_client_ip(Some(""), Some(" , 10.0.0.2")), None);
+
+        // Padding around either value is tolerated.
+        assert_eq!(
+            forwarded_client_ip(None, Some("  198.51.100.9  ,10.0.0.2")),
+            Some("198.51.100.9".to_string())
+        );
+        assert_eq!(
+            forwarded_client_ip(Some(" 203.0.113.7 "), None),
+            Some("203.0.113.7".to_string())
+        );
     }
 
     /// Buckets must not share a counter: spending one to exhaustion has to

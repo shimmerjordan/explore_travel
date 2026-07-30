@@ -107,10 +107,12 @@ pub const PERSIST_EVERY_SAMPLES: u32 = 10;
 const MAX_RECENT: usize = 100;
 
 /// Longest client IP string kept in the recent ring. With
-/// `EJ_TRUST_PROXY=1` the value comes from `X-Forwarded-For`, which the client
-/// writes, so without a cap 100 ring entries could hold 100 × whatever header
-/// size the client felt like sending. 45 characters is the longest real
-/// textual address (an IPv4-mapped IPv6 literal with a zone).
+/// `EJ_TRUST_PROXY=1` the value comes from a forwarding header
+/// (`CF-Connecting-IP`, else `X-Forwarded-For`) — both of which a client can
+/// put arbitrary bytes into when nothing trustworthy is actually in front, so
+/// without a cap 100 ring entries could hold 100 × whatever header size the
+/// client felt like sending. 45 characters is the longest real textual address
+/// (an IPv4-mapped IPv6 literal with a zone).
 const MAX_IP_LEN: usize = 45;
 
 const FILE_NAME: &str = "metrics.json";

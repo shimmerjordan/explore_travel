@@ -3,6 +3,62 @@
 All notable changes to Explore Journal are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow SemVer once releases start.
 
+## [Unreleased] — 2026-07-30
+
+### 安全（限流分桶在 Cloudflare 后面是可被操纵的）
+
+- **`web-front` 的 `client_ip()` 改为 `CF-Connecting-IP` 优先**，取不到才回退
+  `X-Forwarded-For` 最左项（[main.rs](web-front/src/main.rs)）。此前只看 XFF 最左项，
+  而 **Cloudflare 是把真实 IP 追加在 XFF 末尾的**——调用方自带一个伪造的
+  `X-Forwarded-For: 1.2.3.4`，到达源站就是 `1.2.3.4, <真实IP>`，于是每个来访者都能
+  自选限流桶，**登录那条 10 次/分钟的爆破防护（admin 口令的唯一防线）等于不存在**。
+  这个缺口只在 `EJ_TRUST_PROXY=1` 时打开，正是把服务暴露到 Cloudflare 后必须开的那个
+  开关。次序与 `backends/server/lib/ratelimit.js` 的 `clientIp()` 对齐——两个服务在同
+  一条隧道后面应当分桶一致。顺带修掉空转发头会变成空桶键的问题（改为回退到 socket 地址）。
+  新增单测覆盖伪造 XFF、自建反代、空值与空格四种形态；已用变异测试确认它能抓住旧行为。
+
+### 部署（Cloudflare Tunnel 暴露两个服务）
+
+- `web-front` 的 GHCR compose 默认 `EJ_TRUST_PROXY: "1"`（默认姿态是走隧道），并在注释
+  里写明反向风险：**没有反代却开着它等于没有限流**，局域网直连请改回 `0`。
+- 新增文档章节「经 Cloudflare Tunnel 暴露到公网」（`docs/web-display-deploy.md`）：一条
+  tunnel 同时带两个服务（`ej-front` → 48080、`ej-backend` → 48081），cloudflared 用
+  `network_mode: host` 以便 ingress 直接写 `localhost`（Container Station 里两个服务是
+  独立应用，容器名互不可见）；含 Cloudflare 的三条硬限制（约 100 秒请求超时、100 MB
+  请求体、CDN 条款对大文件分发的限制）与 `/admin` 暴露公网后的口令强度提醒。
+- `docs/self-host.md` 的 Cloudflare 一节指向上面这一处单一来源，并补上客户端该填什么；
+  `docs/onedrive_setup.md` 与部署文档补 `https://ej-front.<域名>/auth.html` 这条 SPA
+  重定向 URI（Azure 不做前缀匹配，多种访问方式要各加一条）。
+
+### 部署（数据落在宿主目录 + 图形界面能直接粘）
+
+- **两个服务的数据默认落到宿主目录**：`web-front` → `/share/Web/ej_data/front`，
+  `ej-backend` → `/share/Web/ej_data/backend`（QNAP 上共享文件夹的真实路径）。容器
+  升级、删了重建、NAS 自带的备份任务都不再受影响。首次启动前要 `chown` 一次：
+  web-front 是 UID **65532**（distroless nonroot），ej-backend 是 UID **1000**（node）
+  —— docker 会把不存在的挂载点建成 root 所有，不改权限服务起不来。命名卷方案仍然
+  保留为备选（改挂载那一行的左边即可），且卷名现在显式钉死为 `ej-web-front-data` /
+  `ej-backend-data`：此前真实卷名带 compose 项目前缀（命令行取目录名、Container
+  Station 取应用名），换个目录或重建应用就会静默挂上一个空卷，看起来像数据全丢。
+- **两份 GHCR compose 去掉全部 `${变量}`**（也因此不再需要 `.env`）：QNAP Container
+  Station / 群晖 Container Manager 的「创建应用程序」YAML 框不做变量插值，粘一份带
+  变量的进去会直接以 `invalid reference format` 失败——它把整串变量当成镜像名。现在
+  两份文件都能整段粘进去。令牌与端口改字面量，钉版本改 `image:` 那一行。
+- 两条镜像流水线的**运行摘要**同步重写（去掉 `.env` 那一步、补图形界面部署提示、
+  备份改成直接打包宿主目录），并把反代 / 安全上下文 / OneDrive 重定向 URI /
+  排错表收敛到 `docs/web-display-deploy.md` 单一来源，不在摘要页重复第二遍。
+
+### 文档（消重与合并）
+
+- `docs/self-host-server-deploy.md` + `docs/self-host-client-config.md` 合并为
+  **`docs/self-host.md`**（部署在前、客户端接入在后）。App 内「关于 → 文档」的入口
+  从两条并为一条，`openServerGuide()` 不再需要 `client` 参数。
+- `web-front/README.md` 与 `backends/README.md` 里与 docs 重复的逐步部署段落压缩为
+  指路；两个 README 只留组件知识（端点、配置项、威胁模型、模块 API）。
+- `PRODUCT.md` / `DESIGN.md` 移入 `docs/`（impeccable 技能支持该目录，已实测仍能
+  正确解析）；两份 README 新增**文档地图**一节，列全 `docs/` 下所有文档。
+- 修正两份 README 路线图里已完成却仍标未完成的「移动端推送配置到 NAS」。
+
 ## [Unreleased] — 2026-07-28
 
 ### 性能（同步/备份大提速）

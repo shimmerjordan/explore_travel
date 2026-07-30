@@ -23,16 +23,25 @@
 ### 用现成镜像（推荐，NAS 上不需要编译器）
 
 ```bash
-sudo mkdir -p /volume1/docker/web-front/data && cd /volume1/docker/web-front
-# 取 web-front/docker-compose.ghcr.yml，然后：
-printf 'EJ_DATA_PATH=/volume1/docker/web-front/data\n' > .env
-sudo chown -R 65532:65532 /volume1/docker/web-front/data   # 容器以 UID 65532 运行
+sudo mkdir -p /share/Web/ej_data/front
+sudo chown -R 65532:65532 /share/Web/ej_data/front   # 容器以 UID 65532 运行
+cd /share/Web/ej_data
+# 把 web-front/docker-compose.ghcr.yml 放到这里，然后：
 sudo docker compose up -d
 curl localhost:48080/healthz        # {"status":"ok"}
 ```
 
-**没有任何必填的环境变量。** 早先必填的 JWT secret、以及整个 `EJ_CORS_ORIGINS`
-都不存在了——web 产物由这个服务自己托管，页面与 API 同源，压根不经过 CORS。
+那条 `chown` 是必须的：docker 会把不存在的挂载点自动建成 root 所有，而服务以
+nonroot 运行——不改权限的话第一行日志就是 `admin file error`。
+
+**没有 `.env`、没有任何必填的环境变量。** 早先必填的 JWT secret、以及整个
+`EJ_CORS_ORIGINS` 都不存在了——web 产物由这个服务自己托管，页面与 API 同源，
+压根不经过 CORS。
+
+`docker-compose.ghcr.yml` 刻意**不使用 `${变量}`**，所以它也能整段粘进 **QNAP
+Container Station / 群晖 Container Manager** 的「创建应用程序」YAML 框：那些图形
+界面不做变量插值，粘一份带变量的进去会直接以 `invalid reference format` 失败（它
+把整串变量当成镜像名）。用图形界面时，上面的 `mkdir` + `chown` 仍要 SSH 跑一次。
 
 「web-front 镜像（GHCR）」这条 workflow 的运行摘要会把上面这段连同那次提交的确切
 镜像 tag 一起打出来，从那里复制即可。
@@ -46,27 +55,178 @@ web-front 用 **48080**，`ej-backend`（排行榜 + 组队）用 **48081**。
 
 ```yaml
 environment:
-  EJ_TRUST_PROXY: "1"
+  EJ_TRUST_PROXY: "1"   # GHCR 那份 compose 里已经是 1（默认姿态是走 Cloudflare）
 ```
 
 限流是**按客户端 IP 分桶**的。不开这个，服务看到的来源永远是反代自己的地址，于是
-**所有访客共享同一个桶**——一个人试几次口令就能把别人也挡在外面。直接暴露端口时
-保持 `0`（那时 `X-Forwarded-For` 是客户端可伪造的，信任它反而让限流失效）。
+**所有访客共享同一个桶**——一个人试几次口令就能把别人也挡在外面。
+
+**反过来同样危险：没有任何反代却开着它，等于没有限流。** 那时转发头是调用方随手写的，
+每个来访者都能自选分桶，登录那条 10 次/分钟的爆破防护就形同虚设。只在局域网里直连
+端口用，请改回 `0`。
+
+服务优先读 `CF-Connecting-IP`，取不到才回退 `X-Forwarded-For` 的最左项。这个次序是
+必须的，不是偏好：**Cloudflare 是把真实 IP 追加在 `X-Forwarded-For` 末尾的**，调用方
+自带的伪造值留在最左，只看 XFF 会被它带偏（`ej-backend` 的 `clientIp()` 同样是这个
+次序，两个服务在同一条隧道后面应当分桶一致）。
 
 其余可调项（都有合理默认，不必动）：`EJ_WEB_ROOT`（覆盖镜像里自带的 web 产物）、
 `EJ_METRICS_INTERVAL_SECS`（采样间隔）、`EJ_WORKERS`（工作线程数）。
 两个 compose 文件里都已列出并写了说明。
 
+### 经 Cloudflare Tunnel 暴露到公网（推荐）
+
+家宽的入方向 80/443 被封，而 Tunnel 走的是**出**方向 443，所以不需要公网 IP、不需要
+端口映射、还白拿 HTTPS。**一条 tunnel 就能同时带这两个服务**，不用起两个 cloudflared。
+
+> ⚠️ **先看清你的 NAS 上有没有已经在跑的 cloudflared**，这决定走下面哪条路，而且两条
+> 路**不能混**：cloudflared 只要看见 `TUNNEL_TOKEN` 环境变量（或命令行 `--token`），
+> 就会去跑 token 对应的那条隧道并**完全忽略本地 `config.yml`**。往一台已经用
+> config.yml 托着好几个服务的机器上再塞一个带 token 的容器，那些服务会一起哑掉。
+
+#### 情况 1：NAS 上已经有 cloudflared 在跑本地 config.yml（多服务共用一条隧道）
+
+这时**不要新建隧道、不要起第二个容器**，只往现有 `config.yml` 的 `ingress` 里加两条：
+
+```yaml
+ingress:
+  # …你已有的那些服务…
+  - hostname: ej-front.<你的域名>
+    service: http://localhost:48080
+  - hostname: ej-backend.<你的域名>
+    service: http://localhost:48081
+  # catch-all 必须留在最后一条，新条目一律插在它前面
+  - service: http_status:404
+```
+
+然后重启那个容器（`docker restart <容器名>`，或在它的目录里 `docker compose restart`）。
+
+DNS：如果你当初是把整个 `*.<你的域名>` 通配符 CNAME 指到这条隧道的，**DNS 侧什么都不用
+动**；如果是逐条加的，就再加两条 CNAME 指向同一条隧道（`<隧道ID>.cfargotunnel.com`），
+或者用 `cloudflared tunnel route dns <隧道名> ej-front.<你的域名>`。
+
+`service:` 写 `http://`（不是 https）——隧道内部是明文到本机，对外 TLS 由 Cloudflare 边缘
+终止。那个 cloudflared 容器需要能连到这两个端口：host 网络下 `localhost` 就是 NAS 本机；
+若它跑在 bridge 网络里，把 `localhost` 换成 NAS 的局域网 IP。
+
+#### 情况 2：从零起一条隧道（NAS 上还没有 cloudflared）
+
+最省事的是 token 模式，hostname 在 Cloudflare 面板里管，本机不需要 config 文件：
+
+**① 建 tunnel 拿 token** —— 面板 → **Zero Trust** → **Networks** → **Tunnels** →
+**Create a tunnel** → 选 **Cloudflared** → 起个名（例如 `ej-nas`）→ 环境选 **Docker** →
+复制它给你的那条 `--token eyJ…`（只要 token 那一段）。
+
+**② NAS 上跑 cloudflared**（Container Station / Container Manager 里新建一个应用，粘这段）
+
+```yaml
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: ej-cloudflared
+    restart: unless-stopped
+    # host 网络是刻意的：Container Station 里 web-front 与 ej-backend 是两个独立
+    # 应用，各自在自己的 compose 网络里，cloudflared 用容器名连不到它们。走 host
+    # 网络后，面板里的 ingress 直接写 http://localhost:48080 / 48081 就行。
+    # 万一你的机器不给用 host 网络：删掉这一行，把面板里的 localhost 换成 NAS 的
+    # 局域网 IP（例如 http://192.168.1.10:48080）。
+    network_mode: host
+    # token 直接填在这里（这份文件不含任何 ${变量}，图形界面能整段粘）。
+    # ⚠️ 这一行让本容器进入 token 模式，它会忽略任何本地 config.yml。
+    command: tunnel --no-autoupdate run --token 把你复制的token粘到这里
+    mem_limit: 128m
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+```
+
+**③ 面板里加两条 Public hostname**（同一条 tunnel 下，**Public Hostname** 标签页）
+
+| Subdomain | Domain | Type | URL |
+|---|---|---|---|
+| `ej-front` | `<你的域名>` | HTTP | `localhost:48080` |
+| `ej-backend` | `<你的域名>` | HTTP | `localhost:48081` |
+
+Type 填 **HTTP**（不是 HTTPS），理由同上。DNS 那两条 CNAME 由 Cloudflare 自动建。
+
+> 如果你以后还要往这台机器加别的服务、或者想给某个 origin 配 `noTLSVerify` 之类的
+> `originRequest` 选项，改用 config.yml 模式（`cloudflared tunnel login` +
+> `tunnel create` + `tunnel --config … run`，**不设 TUNNEL_TOKEN**）会更好管：
+> 一条隧道 + 一个通配符 CNAME，之后加服务只动 ingress。
+
+**④ 验证**
+
+```bash
+curl https://ej-front.<你的域名>/healthz        # → {"status":"ok"}
+curl https://ej-backend.<你的域名>/healthz      # → ok
+```
+
+之后：浏览器开 `https://ej-front.<你的域名>/`（看板在 `/admin`）；手机 App 的
+「Web 前端 · 配置推送」服务器地址填 `https://ej-front.<你的域名>`；排行榜与
+组队中继填 `https://ej-backend.<你的域名>`（组队的 `wss://…/group/v1/ws` 由
+App 自己转换，Cloudflare 默认放行 WebSocket，不用额外配置）。
+
+**换成 https 之后白捡的东西**：整站进入**安全上下文**，于是地理定位、PWA「安装到桌面」、
+`crypto.subtle` 全部可用——这些在 `http://<局域网IP>:48080` 下是拿不到的（见下面 E 节）。
+代价是 OneDrive 要在 Azure 里补一条 SPA 重定向 URI：
+`https://ej-front.<你的域名>/auth.html`（Azure 不做前缀匹配，逐字一致）。
+
+**几件必须知道的事**
+
+- **`/admin` 现在暴露在公网上，任何人都能打开那个登录页。** 服务只校验口令 ≥ 8 位，
+  没有别的强度策略，也没有第二因素。**改一个真正强的口令**，否则等于把全部云凭据
+  挂在公网上赌 10 次/分钟的限流。想加一层就在 Cloudflare 面板给 `/admin` 挂一条
+  Access 策略（邮箱 OTP），它不影响 App 推配置与浏览器登录 API。
+- **单次 HTTP 请求有超时**（免费版约 100 秒，超时给 524）。日常 API 都在毫秒级，唯一
+  可能撞上的是 WebDAV 只读代理拉一个很大的媒体文件。
+- **请求体上限 100 MB**（免费版）。配置推送 ≤ 256 KiB，够不着。
+- **别拿它当视频分发**：大量非 HTML 大文件走 CDN 属于 Cloudflare 服务条款的灰区。
+  照片级别的 WebDAV 回读没问题。
+- 两个服务的**限流分桶**依赖上一节那个开关：web-front 的 GHCR compose 已经是 `1`，
+  `ej-backend` 的 `TRUST_PROXY` 本来就是 `1`，不用改。
+
+`ej-backend` 侧的部署与它自己的暴露方式见 [self-host.md](self-host.md)。
+
 ### 数据放哪
 
-`EJ_DATA_PATH` 不设 → Docker 命名卷（零宿主配置）；设成绝对路径 → bind mount，
-但**首次启动前**要 `chown -R 65532:65532 <path>`，否则容器起不来。
+三个小文件（总计通常不到 1 MB）：`admin.json`（口令哈希与派生盐）、
+`config.json`（配置密文）、`metrics.json`（指标）。两份 compose 的默认位置
+**刻意不同**：
 
-目录里三个小文件（总计通常不到 1 MB）：`admin.json`（口令哈希与派生盐）、
-`config.json`（配置密文）、`metrics.json`（指标）。
+| compose | 默认 | 首次启动前要做的事 |
+|---|---|---|
+| `docker-compose.ghcr.yml`（NAS 部署） | 宿主目录 `/share/Web/ej_data/front` | `mkdir -p` + `chown -R 65532:65532`（见上） |
+| `docker-compose.yml`（源码构建 / 本地开发） | Docker 命名卷 `ej-web-front-data` | 无。命名卷继承镜像里 nonroot 拥有的 `/data` |
+
+`/share/Web/…` 是 QNAP 上共享文件夹的真实路径（`/share/<共享文件夹名>/…`），群晖
+一般是 `/volume1/docker/…`。换成另一种方案只需改 compose 里挂载那一行的左边：
+绝对路径 = 宿主目录，名字 = 命名卷。
+
+宿主目录方案的好处是数据在容器之外，升级、删了重建、NAS 自带的备份任务都不受影响；
+命名卷方案的好处是零权限配置，代价是 **`docker compose down -v` 会连数据一起删掉**
+（停服务请用不带 `-v` 的 `down`），而且只能用 docker 命令导出：
+
+```bash
+# 备份 —— 宿主目录方案
+sudo tar czf web-front-backup-$(date +%F).tgz -C /share/Web/ej_data/front .
+
+# 备份 —— 命名卷方案
+docker run --rm -v ej-web-front-data:/data -v "$PWD":/backup busybox \
+  tar czf /backup/web-front-data.tgz -C /data .
+
+# 从命名卷迁到宿主目录（含 2026-07-30 之前部署用的 `<项目名>_ejdata`）
+sudo mkdir -p /share/Web/ej_data/front
+docker run --rm -v ej-web-front-data:/from -v /share/Web/ej_data/front:/to \
+  busybox sh -c 'cd /from && cp -a . /to'
+sudo chown -R 65532:65532 /share/Web/ej_data/front
+```
 
 **放本地盘，不要放 NFS/SMB。** 落盘用「写临时文件 → fsync → 原子改名 → fsync 目录」，
 网络文件系统对这套语义不可靠。
+
+> 兄弟服务 `ej-backend`（排行榜 + 组队）的数据目录是 `/share/Web/ej_data/backend`，
+> 但它以 `node`（UID **1000**）运行，`chown` 的 UID 与这里不同。部署见
+> [self-host.md](self-host.md)。
 
 ---
 
@@ -138,9 +298,13 @@ EJ_PROXY_ENABLED: "1"
 前缀匹配）：
 
 ```
-http://<NAS 或本机>:48080/auth.html     ← web-front 自托管（应用在根路径）
-https://<你的域名>/app/auth.html        ← 宣传站部署（应用在 /app/ 下）
+https://ej-front.<你的域名>/auth.html   ← 经 Cloudflare Tunnel（推荐姿态）
+http://<NAS 或本机>:48080/auth.html             ← 局域网直连 web-front（应用在根路径）
+https://<你的域名>/app/auth.html                ← 宣传站部署（应用在 /app/ 下）
 ```
+
+三个可以同时存在（Azure 允许一个应用注册挂多条 SPA 重定向 URI），所以走 Cloudflare
+之后不必删掉局域网那条——两种访问方式都还能登。
 
 没加会在登录后报 `AADSTS9002326`。细节见 [onedrive_setup.md](onedrive_setup.md)。
 
@@ -159,8 +323,10 @@ https://<你的域名>/app/auth.html        ← 宣传站部署（应用在 /app
 | PWA「安装到桌面」 | 不出现安装按钮 |
 | `crypto.subtle` | 不可用 |
 
-**解法**（任一）：在 NAS 本机用 `http://localhost:48080`；前面套一个带证书的反代
-（Caddy / Nginx / Cloudflare Tunnel）走 https；或者只看数据不需要定位，接受上表缺失。
+**解法**：走 [Cloudflare Tunnel](#经-cloudflare-tunnel-暴露到公网推荐)（`https://ej-front.…`，
+上表三项全部恢复，且不需要自己管证书）——这是本仓库的默认姿态；或在 NAS 本机用
+`http://localhost:48080`；或前面自套带证书的 Caddy / Nginx；或者只看数据不需要定位，
+接受上表缺失。
 
 > **另一件必须做的事**：web-front 是 thread-per-request 的，`tiny_http` 不暴露读写
 > 超时。8 个慢速连接就能把全部 worker 占死（`curl --limit-rate 1k` 拉一个大资源即可），
@@ -227,7 +393,7 @@ https://<你的域名>/app/auth.html        ← 宣传站部署（应用在 /app
 
 | 日志 | 原因 |
 |---|---|
-| `admin file error: ...` | `/data` 不可写。bind mount 忘了 `chown 65532` |
+| `admin file error: ...` | `/data` 不可写。挂宿主目录时忘了 `chown -R 65532:65532`（最常见）；docker 自动创建的挂载点是 root 所有的 |
 | `config error: parse ... unknown field` | `EJ_CONFIG` 指错了文件，或设置里键名拼错。**注意** `<data_dir>/config.json` 是配置**密文**，不是服务端设置；设置文件默认是 `<data_dir>/server.json` |
 | `listen on ...: Address already in use` | 端口被占 |
 
