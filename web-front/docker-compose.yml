@@ -12,28 +12,33 @@ services:
     ports:
       - "48080:48080"
     volumes:
-      # WHERE THE DATA LIVES — one variable, two modes. Holds admin.json (the
-      # Argon2 password hash and derivation salt), the encrypted user config,
-      # and the metrics file.
+      # WHERE THE DATA LIVES — holds admin.json (the Argon2 password hash and
+      # derivation salt), the encrypted user config, and the metrics file. Three
+      # small files, well under 1 MB in total.
       #
-      #   unset (default) → resolves to `ejdata`, a Docker NAMED volume.
-      #     Zero host setup: a named volume inherits the image's nonroot-owned
-      #     /data, so it's writable out of the box.
+      # DEFAULT — the Docker-managed named volume declared at the bottom of this
+      # file. Nothing outside the container is touched: no host directory to
+      # create, no ownership to fix (a named volume inherits the image's
+      # nonroot-owned /data). `pull` + `up -d` replaces the container and keeps
+      # the volume, so an upgrade never loses the password or the config.
+      #   ⚠ `docker compose down -v` DELETES the volume — and with it the admin
+      #     password and every stored cloud credential. Stop with plain `down`.
       #
-      #   set to an absolute path → bind mount, data sits in your own directory
-      #     (the usual choice on a NAS, so it lands on the big disk and gets
-      #     picked up by the NAS's own backup jobs):
+      # This file builds from source and is meant for local development, hence
+      # the named-volume default: it keeps the data off your dev machine's
+      # filesystem. The NAS deployment file (docker-compose.ghcr.yml) defaults
+      # the other way — a host directory, `/share/Web/ej_data/front`.
       #
-      #       EJ_DATA_PATH=/volume1/docker/web-front/data
-      #
-      #     A bind mount does NOT inherit image ownership, so grant the
-      #     container's nonroot UID access ONCE before the first start:
-      #       sudo mkdir -p /volume1/docker/web-front/data
-      #       sudo chown -R 65532:65532 /volume1/docker/web-front/data
-      #
+      # OPTIONAL — set EJ_DATA_PATH to an absolute path to keep the data in a
+      # directory of your own instead (e.g. so the NAS's own backup job sees it):
+      #   EJ_DATA_PATH=/share/Web/ej_data/front
+      # A bind mount does NOT inherit image ownership, so grant the container's
+      # nonroot UID access ONCE before the first start:
+      #   sudo mkdir -p /share/Web/ej_data/front
+      #   sudo chown -R 65532:65532 /share/Web/ej_data/front
       # Local filesystem only — never point this at NFS/SMB: unreliable POSIX
       # locking on network mounts risks corrupting the on-disk files.
-      - "${EJ_DATA_PATH:-ejdata}:/data"
+      - "${EJ_DATA_PATH:-ej-web-front-data}:/data"
     environment:
       EJ_LISTEN: "0.0.0.0:48080"
       EJ_DATA_DIR: "/data"
@@ -56,9 +61,19 @@ services:
       EJ_WORKERS: "${EJ_WORKERS:-8}"
 
 volumes:
-  # Only used in the default (named-volume) mode; ignored when EJ_DATA_PATH
-  # points at a host directory. Its real name is prefixed with the compose
-  # project — `web-front_ejdata` when you run from this directory. Back it up:
-  #   docker run --rm -v web-front_ejdata:/data -v "$PWD":/backup busybox \
-  #     tar czf /backup/ejdata.tgz -C /data .
-  ejdata:
+  # Used unless EJ_DATA_PATH points at a host directory.
+  ej-web-front-data:
+    # The explicit `name:` is what makes "recreate without losing data" true.
+    # Without it the real volume name carries the compose project prefix (the
+    # directory name by default, or the application name under QNAP Container
+    # Station / Synology Container Manager), so bringing the stack up from a
+    # differently named directory or re-creating the application silently mounts
+    # a FRESH EMPTY volume — the service then looks wiped while the old volume
+    # sits there unmounted. Back it up any time with:
+    #   docker run --rm -v ej-web-front-data:/data -v "$PWD":/backup busybox \
+    #     tar czf /backup/web-front-data.tgz -C /data .
+    # Coming from a deployment made before 2026-07-30 (volume was
+    # `<project>_ejdata`), copy the old contents over once:
+    #   docker run --rm -v web-front_ejdata:/from -v ej-web-front-data:/to \
+    #     busybox sh -c 'cd /from && cp -a . /to'
+    name: ej-web-front-data

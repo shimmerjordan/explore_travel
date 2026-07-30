@@ -201,15 +201,19 @@ jobs:
           cat >> "$S" <<HOWTO
           ### 在 NAS / 服务器上一键部署
 
-          不需要源码、不需要在目标机器上编译。三步，把 \`/volume1/docker/ej-backend\` 换成你的实际路径。
+          不需要源码、不需要在目标机器上编译。三步。数据默认落在宿主目录 \`/share/Web/ej_data/backend\`（QNAP 上共享文件夹 \`Web\` 的真实路径）；换别的机器就改下面 compose 里那一行挂载路径，群晖一般是 \`/volume1/docker/…\`。
 
-          **① 建目录**
+          **① 建数据目录并授权**（跳过这步排行榜写不进去）
 
           \`\`\`bash
-          sudo mkdir -p /volume1/docker/ej-backend/data && cd /volume1/docker/ej-backend
+          sudo mkdir -p /share/Web/ej_data/backend
+          sudo chown -R 1000:1000 /share/Web/ej_data/backend
+          cd /share/Web/ej_data
           \`\`\`
 
-          **② 写 compose 文件**（整段复制执行）
+          docker 会把不存在的挂载点自动建成 root 所有，而服务以 \`node\`（UID 1000）运行。注意兄弟服务 web-front 的 UID 是 **65532**，两个目录的 \`chown\` 值不一样。
+
+          **② 写 compose 文件**（整段复制执行。**不需要 .env**——这份文件刻意不使用 \`\${变量}\`）
 
           HOWTO
 
@@ -223,21 +227,19 @@ jobs:
 
           cat >> "$S" <<HOWTO2
 
-          **③ 生成配置并起服务**
+          **③ 填两个令牌，起服务**
 
           \`\`\`bash
-          cat > .env <<EOF
-          EJ_BACKEND_DATA_PATH=/volume1/docker/ej-backend/data
-          LB_WRITE_TOKEN=\$(openssl rand -hex 24)
-          GROUP_TOKEN=\$(openssl rand -hex 24)
-          EOF
-          sudo chown -R 1000:1000 /volume1/docker/ej-backend/data
+          openssl rand -hex 24    # → 填进 compose 的 LB_WRITE_TOKEN
+          openssl rand -hex 24    # → 填进 compose 的 GROUP_TOKEN
           sudo docker compose up -d
           curl localhost:48081/healthz          # → ok
           curl localhost:48081/api/status       # 模块状态 / 内存 / 在线人数
           \`\`\`
 
-          那条 \`chown\` 是必须的：容器以 \`node\`（UID 1000）运行，bind mount 不继承镜像里的目录所有权，不改权限排行榜就写不进去。把生成的两个令牌填进 App：排行榜页「配置社区服务器」填 \`LB_WRITE_TOKEN\`，组队设置「中继令牌」填 \`GROUP_TOKEN\`。
+          两个令牌**留空就是公开可写 / 公开可连**（任何人都能往你的排行榜里写、往你的中继上挂）。填了就把同样的值填进 App：排行榜页「配置社区服务器」填 \`LB_WRITE_TOKEN\`，组队设置「中继令牌」填 \`GROUP_TOKEN\`。
+
+          > **用图形界面部署？** QNAP Container Station / 群晖 Container Manager 里，把 ② 那段 YAML 整段粘进「创建应用程序」的 YAML 框就行（令牌先填好再粘）——这也是这份 compose 不用 \`\${变量}\` 的原因：那些 UI 不做插值，粘一份带变量的进去会以 \`invalid reference format\` 失败。但 ① 的 \`mkdir\` + \`chown\` 仍然要 SSH 跑一次。
 
           ### 只想跑一半
 
@@ -263,11 +265,15 @@ jobs:
           # 升级
           sudo docker compose pull && sudo docker compose up -d
 
-          # 钉到本次这个版本（可复现、可回滚）
-          echo 'EJ_BACKEND_IMAGE=${IMAGE}:sha-${GITHUB_SHA:0:7}' >> .env && sudo docker compose up -d
+          # 钉到本次这个版本（可复现、可回滚）：把 compose 里 image 那行换成
+          #   image: ${IMAGE}:sha-${GITHUB_SHA:0:7}
+          # 再 sudo docker compose up -d
+
+          # 备份（数据就在宿主目录里，直接打包）
+          sudo tar czf ej-backend-backup-\$(date +%F).tgz -C /share/Web/ej_data/backend .
           \`\`\`
 
-          数据存哪由 \`EJ_BACKEND_DATA_PATH\` 决定：留空是 Docker 命名卷（零配置），填绝对路径就是 bind mount（备份方便，NAS 推荐）。别指向 NFS/SMB。
+          数据默认就在挂载的那个宿主目录里，容器升级、删了重建都不受影响，NAS 自带的备份任务也能直接看到。不想在宿主上建目录、也不想操心权限的话，把 compose 里挂载的左边换成 \`ej-backend-data\`（文件末尾已声明好的 Docker 命名卷，零权限配置）——代价是数据只能用 \`docker run\` 导出，而且 \`docker compose down -v\` 会连数据一起删掉。两种方式都别指向 NFS/SMB。
 
           本仓库是公开的，经 Actions 用 \`GITHUB_TOKEN\` 推送的包会关联到仓库并随之公开 —— 实测 \`ej-backend\` 与 \`web-front\` 都能**匿名** \`docker pull\`，NAS 上**不需要** \`docker login\`。万一 \`pull\` 报 \`denied\`/\`unauthorized\`，说明包是 private：① NAS 上 \`docker login ghcr.io -u <你的用户名>\` + 带 \`read:packages\` 的 PAT；或 ② 包页 → 右侧齿轮 **Package settings** → **滚到最底部 Danger Zone** → **Change visibility**（公开后不可逆）。
 

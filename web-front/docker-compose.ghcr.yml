@@ -1,66 +1,96 @@
-# web-front — deploy from the prebuilt GHCR image (no source checkout, no build).
+# web-front —— 用 GHCR 上编好的镜像部署，不需要源码、不需要编译器。
 #
-# This is the file the CI run summary hands you for a NAS deployment. It is
-# deliberately self-contained: `docker compose up -d` next to a .env is all it
-# needs. For building from source instead, use docker-compose.yml.
-#
-# .env next to this file (the summary generates it for you):
-#   EJ_DATA_PATH=/volume1/docker/web-front/data      where admin.json lives (see below)
+# 这份就是 CI 运行摘要给出的部署文件，刻意**不使用任何 `${变量}`**：
+#   • SSH 上：丢进一个目录，`docker compose up -d` 就完事，不需要 .env。
+#   • QNAP Container Station / 群晖 Container Manager：可以整段粘进「创建应用
+#     程序」的 YAML 框。这些 UI 不做 `${VAR:-默认值}` 插值，粘一份带变量的进去
+#     会直接以 `invalid reference format` 失败（它把整串变量当成镜像名了）。
+# 要改端口、镜像 tag、开关，就直接改下面的字面量。
+# 从源码编译请用 docker-compose.yml（那份用变量，面向命令行）。
 
 services:
   web-front:
-    # Multi-arch manifest (amd64 + arm64) — docker picks the right one.
-    # Pin to a commit sha instead of `latest` if you want reproducible rollouts:
+    # 多架构 manifest（amd64 + arm64），docker 自动选对应架构。
+    # 想要可复现、可回滚的发布就钉 sha，别用 latest：
     #   image: ghcr.io/shimmerjordan/explore_travel/web-front:sha-1a2b3c4
-    image: ${EJ_WEB_FRONT_IMAGE:-ghcr.io/shimmerjordan/explore_travel/web-front:latest}
+    image: ghcr.io/shimmerjordan/explore_travel/web-front:latest
     container_name: web-front
     restart: unless-stopped
-    # High host port. NEVER use 80 / 443 / 8080: consumer ISPs block inbound
-    # traffic on those, which makes a home/NAS deployment unreachable from the
-    # internet. Sibling: ej-backend on 48081. (There is no separate static-web service any more — this image serves the web build itself.)
+    # 左侧宿主端口可改，但**绝不要用 80 / 443 / 8080**：家宽运营商封这三个的
+    # 入方向，配上去从公网完全连不上。兄弟服务 ej-backend 用 48081。
+    # 右侧容器端口要与下面的 EJ_LISTEN 一致，改一个就得改两个。
     ports:
-      - "${EJ_PORT:-48080}:48080"
+      - "48080:48080"
     volumes:
-      # WHERE THE DATA LIVES — holds admin.json (the Argon2 password hash and
-      # derivation salt), the encrypted user config, and the metrics file.
-      #   unset (default) → `ejdata`, a Docker named volume; zero host setup.
-      #   absolute path   → bind mount; the usual NAS choice, so the data lands
-      #                     on the big disk and the NAS's own backup job sees it.
-      #                     Grant the container's nonroot UID access ONCE first:
-      #                       sudo mkdir -p <path> && sudo chown -R 65532:65532 <path>
-      # Local filesystem only — never NFS/SMB: unreliable POSIX locking on
-      # network mounts risks corrupting the on-disk files.
-      - "${EJ_DATA_PATH:-ejdata}:/data"
+      # 数据存这里：admin.json（口令哈希与派生盐）、config.json（配置密文）、
+      # metrics.json（指标）。三个小文件，总计通常不到 1 MB。数据在宿主目录里，
+      # 容器怎么升级、删了重建都不受影响，NAS 自带的备份任务也能直接看到。
+      #
+      # ⚠ 首次启动前**必须**在 NAS 上跑一次这两条，否则容器起不来（日志第一行是
+      #   `admin file error: ...`）：docker 会把不存在的挂载点自动建成 root 所有，
+      #   而服务以 nonroot（UID 65532）运行，写不进去。
+      #     sudo mkdir -p /share/Web/ej_data/front
+      #     sudo chown -R 65532:65532 /share/Web/ej_data/front
+      #
+      # 这里用的是 QNAP 上共享文件夹 `Web` 的真实路径（`/share/<共享文件夹名>/…`）。
+      # 换别的机器要改：群晖一般是 `/volume1/docker/…`。
+      # 只能是本机文件系统，别指向 NFS/SMB：落盘用「写临时文件 → fsync → 原子
+      # 改名 → fsync 目录」，网络文件系统对这套语义不可靠。
+      #
+      # 备选：不想在宿主上建目录、也不想操心权限，就把左边换成 `ej-web-front-data`
+      # ——文件末尾声明好的 Docker 命名卷，它会继承镜像里 nonroot 拥有的 /data，
+      # 零权限配置。代价是数据只能用 docker 命令导出（见文件末尾），而且
+      # `docker compose down -v` 会**连数据一起删掉**。
+      - "/share/Web/ej_data/front:/data"
     environment:
       EJ_LISTEN: "0.0.0.0:48080"
       EJ_DATA_DIR: "/data"
-      EJ_PROXY_ENABLED: "${EJ_PROXY_ENABLED:-false}"
-      EJ_PROXY_ALLOW_HOSTS: "${EJ_PROXY_ALLOW_HOSTS:-}"
-      EJ_TOKEN_TTL_SECS: "${EJ_TOKEN_TTL_SECS:-3600}"
-      # 经 frp / Cloudflare / 任何反代暴露时**必须**设为 1，否则所有访客共享
+      # 只读 WebDAV 代理。用 WebDAV 当云盘的话必须打开（改成 "1"）：浏览器直连
+      # WebDAV 会被 CORS 拦死。默认关闭，且关闭时连「这个功能存在」都不暴露。
+      EJ_PROXY_ENABLED: "false"
+      EJ_PROXY_ALLOW_HOSTS: ""
+      EJ_TOKEN_TTL_SECS: "3600"
+      # 经 frp / Cloudflare / 任何反代暴露时**必须**是 "1"，否则所有访客共享
       # 同一个限流桶（限流是按客户端 IP 分桶的，不开这个的话看到的 IP 永远是
-      # 反代自己）。直接暴露端口时保持 0。
-      EJ_TRUST_PROXY: "${EJ_TRUST_PROXY:-0}"
+      # 反代自己）。这里默认开着，因为本仓库的部署姿态是走 Cloudflare Tunnel
+      # （见 docs/web-display-deploy.md 的「经 Cloudflare Tunnel 暴露」）。
+      #
+      # ⚠ 反过来也要小心：**没有任何反代、直接把端口暴露出去时请改回 "0"**。
+      # 那种情形下转发头是调用方随便写的，信任它等于让每个来访者自选限流桶，
+      # 登录那条 10 次/分钟的爆破防护就形同虚设。只在局域网里用也建议 "0"。
+      # （服务优先读 CF-Connecting-IP，回退 X-Forwarded-For 最左项——Cloudflare
+      # 是把真实 IP 追加在 XFF 末尾的，所以只看 XFF 会被伪造值带偏。）
+      EJ_TRUST_PROXY: "1"
       # 静态产物目录。镜像里已经带了一份 web 产物；挂一个同名目录可以覆盖它
       # （例如临时换一个前端版本而不重建镜像）。
-      EJ_WEB_ROOT: "${EJ_WEB_ROOT:-/web}"
+      EJ_WEB_ROOT: "/web"
       # 指标采样间隔（秒，上限 86400）。落盘是每 10 个采样点一次，所以调小它
       # 会让机械盘更频繁地转。
-      EJ_METRICS_INTERVAL_SECS: "${EJ_METRICS_INTERVAL_SECS:-60}"
+      EJ_METRICS_INTERVAL_SECS: "60"
       # 工作线程数。服务是 thread-per-request 的，见 README 的威胁模型一节：
       # 无论调多大都要置于带读写超时的反代之后。
-      EJ_WORKERS: "${EJ_WORKERS:-8}"
-    # No healthcheck: the image is distroless (no shell, no wget/curl) and the
-    # binary has no self-probe subcommand. Check it from the host instead:
-    #   curl localhost:48080/healthz   → {"status":"ok"}
+      EJ_WORKERS: "8"
+    # 没有 healthcheck：镜像是 distroless（无 shell、无 wget/curl），二进制也没有
+    # 自探子命令。从宿主探：curl localhost:48080/healthz → {"status":"ok"}
     mem_limit: 256m
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }
 
 volumes:
-  # Only used when EJ_DATA_PATH is unset. Real name is prefixed with the
-  # compose project (the directory name). Back it up with:
-  #   docker run --rm -v <project>_ejdata:/data -v "$PWD":/backup busybox \
-  #     tar czf /backup/ejdata.tgz -C /data .
-  ejdata:
+  # 只在你把上面的挂载改成 `ej-web-front-data:/data`（命名卷方案）时才用得到；
+  # 默认的宿主目录挂载不碰它。
+  ej-web-front-data:
+    # 显式写 `name:` 是命名卷方案下「重建不丢数据」的关键。不写它，真实卷名会带上
+    # compose 项目前缀（命令行下默认取所在目录名，Container Station /
+    # Container Manager 下取应用名），于是换个目录 up、或者把应用删了重建，挂上来
+    # 的是一个全新的空卷 —— 服务看起来数据全没了，其实旧卷还在，只是没人挂它。
+    # 命名卷的数据只能用 docker 命令导出：
+    #   docker run --rm -v ej-web-front-data:/data -v "$PWD":/backup busybox \
+    #     tar czf /backup/web-front-data.tgz -C /data .
+    # 从命名卷迁到宿主目录（或从 2026-07-30 之前的 `<项目名>_ejdata` 迁过来）：
+    #   sudo mkdir -p /share/Web/ej_data/front
+    #   docker run --rm -v ej-web-front-data:/from -v /share/Web/ej_data/front:/to \
+    #     busybox sh -c 'cd /from && cp -a . /to'
+    #   sudo chown -R 65532:65532 /share/Web/ej_data/front
+    name: ej-web-front-data

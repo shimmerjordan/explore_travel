@@ -38,8 +38,7 @@ on:
       # 而且没有任何信号。
       - 'assets/**'
       - 'docs/leaderboard-server-api.md'
-      - 'docs/self-host-server-deploy.md'
-      - 'docs/self-host-client-config.md'
+      - 'docs/self-host.md'
       - 'pubspec.yaml'
       - 'pubspec.lock'
       - '.github/actions/image-build-setup/**'
@@ -245,17 +244,21 @@ jobs:
 
           cat >> "$S" <<HOWTO
 
-          ### 在 NAS 上一键部署
+          ### 在 NAS 上部署
 
-          在 NAS 上开个 SSH，四步。把 \`/volume1/docker/web-front\` 换成你的实际路径（群晖一般是 \`/volume1/docker/…\`，威联通是 \`/share/Container/…\`）。
+          四步。数据默认落在宿主目录 \`/share/Web/ej_data/front\`（三个小文件：口令哈希、配置密文、指标）——那是 QNAP 上共享文件夹 \`Web\` 的真实路径。换别的机器要改下面 compose 里那一行挂载路径：群晖一般是 \`/volume1/docker/…\`。
 
-          **① 建目录**
+          **① 建数据目录并授权**（跳过这步容器一定起不来）
 
           \`\`\`bash
-          sudo mkdir -p /volume1/docker/web-front/data && cd /volume1/docker/web-front
+          sudo mkdir -p /share/Web/ej_data/front
+          sudo chown -R 65532:65532 /share/Web/ej_data/front
+          cd /share/Web/ej_data
           \`\`\`
 
-          **② 写 compose 文件**（整段复制执行）
+          docker 会把不存在的挂载点自动建成 root 所有，而服务以 nonroot（UID 65532）运行 —— 不 \`chown\` 的话第一行日志就是 \`admin file error\`。
+
+          **② 写 compose 文件**（整段复制执行。**不需要 .env、没有任何必填密钥**——这份文件刻意不使用 \`\${变量}\`）
 
           HOWTO
 
@@ -269,27 +272,20 @@ jobs:
 
           cat >> "$S" <<HOWTO2
 
-          **③ 指定数据位置**（**没有任何必填的密钥**——早先那个必填的 JWT secret 已经不存在了）
-
-          \`\`\`bash
-          printf 'EJ_DATA_PATH=/volume1/docker/web-front/data\\n' > .env
-          sudo chown -R 65532:65532 /volume1/docker/web-front/data
-          \`\`\`
-
-          那条 \`chown\` 是必须的：容器以 UID 65532 运行，而 bind mount 不会继承镜像里的目录所有权，不改权限服务起不来。
-
-          **④ 起服务并自检**
+          **③ 起服务并自检**（**没有 .env、没有任何必填的密钥**——早先那个必填的 JWT secret 已经不存在了）
 
           \`\`\`bash
           sudo docker compose up -d
           curl localhost:48080/healthz          # → {"status":"ok"}
           \`\`\`
 
-          **⑤ 立刻改掉默认口令**
+          **④ 立刻改掉默认口令**
 
           浏览器打开 \`http://<NAS>:48080/admin\`，用 \`admin\` / \`admin\` 登录——顶部会挂一条红色横幅，改密表单就内联在里面。**任何能连到这个端口的人都能用默认口令登录并读走你全部云凭据。**
 
           之后在手机 App 的 **备份 → 「Web 前端 · 配置推送」** 里把配置推上来，浏览器打开 \`http://<NAS>:48080/\` 就能看数据了。
+
+          > **用图形界面部署？** QNAP Container Station / 群晖 Container Manager 里，把 ② 那段 YAML 整段粘进「创建应用程序」的 YAML 框就行——这也是这份 compose 刻意不用 \`\${变量}\` 的原因：那些 UI 不做插值，粘一份带变量的进去会直接以 \`invalid reference format\` 失败。但 ① 的 \`mkdir\` + \`chown\` 仍然要 SSH 跑一次。
 
           ### 之后的运维
 
@@ -297,23 +293,23 @@ jobs:
           # 升级到最新镜像
           sudo docker compose pull && sudo docker compose up -d
 
-          # 钉到本次这个版本（可复现、可回滚）
-          echo 'EJ_WEB_FRONT_IMAGE=${IMAGE}:sha-${GITHUB_SHA:0:7}' >> .env && sudo docker compose up -d
+          # 钉到本次这个版本（可复现、可回滚）：把 compose 里 image 那行换成
+          #   image: ${IMAGE}:sha-${GITHUB_SHA:0:7}
+          # 再 sudo docker compose up -d
 
-          # 备份（三个小文件：口令哈希、配置密文、指标）
-          sudo tar czf web-front-backup-\$(date +%F).tgz -C /volume1/docker/web-front/data .
+          # 备份（数据就在宿主目录里，直接打包那三个小文件）
+          sudo tar czf web-front-backup-\$(date +%F).tgz -C /share/Web/ej_data/front .
 
           # WebDAV 用户需要打开只读代理（浏览器无法直连 WebDAV）
-          # 在 compose 的 environment 里加 EJ_PROXY_ENABLED: "1"
+          # 把 compose 里的 EJ_PROXY_ENABLED 改成 "1"，再 up -d
           \`\`\`
 
           ### 几个容易踩的点
 
-          - **端口**：\`48080\` 是刻意选的高端口。家宽运营商封 \`80\` / \`443\` / \`8080\` 的入方向，配到那三个上从公网连不上。同项目另一个服务 ej-backend 用 \`48081\`。
-          - **数据别放网络盘**：\`EJ_DATA_PATH\` 必须指向 NAS 本地文件系统。落盘用「写临时文件 → fsync → 原子改名 → fsync 目录」，NFS/SMB 对这套语义不可靠。
+          - **端口**：\`48080\` 是刻意选的高端口。家宽运营商封 \`80\` / \`443\` / \`8080\` 的入方向，配到那三个上从公网连不上。同项目另一个服务 ej-backend 用 \`48081\`、数据目录 \`/share/Web/ej_data/backend\` —— 注意它以 \`node\`（UID **1000**）运行，\`chown\` 的 UID 与这里不同。
+          - **数据别放网络盘**：挂载的宿主路径必须在 NAS 本地文件系统上。落盘用「写临时文件 → fsync → 原子改名 → fsync 目录」，NFS/SMB 对这套语义不可靠。
           - **忘记 admin 口令 = 已存的配置永久读不出来**。配置是用口令派生的密钥加密的，没有恢复通道。出路是从手机端重推一份覆盖它。
-          - **地理定位与 PWA 安装需要安全上下文**：用 \`http://<局域网IP>:48080\` 打开时浏览器不给这些能力。在 NAS 本机用 \`localhost\`，或前面套个带证书的反代。
-          - **必须置于带超时的反代之后**：服务是 thread-per-request 的，8 个慢速连接就能把全部 worker 占死。反代需要**同时**有读超时与响应写超时（或做响应缓冲）。
-          - **OneDrive 重定向 URI**：Azure 应用注册里要加 SPA 平台的 \`http://<NAS>:48080/auth.html\`（早先文档里的 \`48082\` 是那个已不存在的独立静态服务的端口）。
           - **镜像可见性**：本仓库是公开的，经 Actions 用 \`GITHUB_TOKEN\` 推送的包会关联到仓库并随之公开 —— 实测 \`web-front\` 与 \`ej-backend\` 都能**匿名** \`docker pull\`，NAS 上**不需要** \`docker login\`。万一哪天 \`pull\` 报 \`denied\`/\`unauthorized\`，说明那个包是 private，两条路：① NAS 上 \`docker login ghcr.io -u <你的用户名>\`，密码填带 \`read:packages\` 的 PAT，一次就够；② 把包改成公开 —— 包页 → 右侧齿轮 **Package settings** → **滚到页面最底部的 Danger Zone** → **Change visibility**（入口藏得深，容易找不到）。注意公开后**不能再改回私有**。
+
+          经反代 / 内网穿透暴露时**必须**打开的那个开关、局域网 \`http\` 下地理定位与 PWA 安装为什么失效、OneDrive 在 Azure 里要加的重定向 URI、WebDAV 只读代理的细节、以及一整套排错表——都在仓库文档里，这一页不重复：**[docs/web-display-deploy.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_SHA}/docs/web-display-deploy.md)**
           HOWTO2
