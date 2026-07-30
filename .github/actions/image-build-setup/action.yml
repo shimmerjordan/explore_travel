@@ -1,0 +1,74 @@
+name: 镜像构建与发布的公共前置
+description: >-
+  QEMU + buildx + GHCR 登录 + 标签计算。两条镜像流水线（web-front / backend）
+  唯一真正重复的那一段。
+
+# 为什么只做「前置」而不连 build/push 一起包进来：
+#
+# 两条流水线的构建流程刻意不一样——它们各自先把单架构镜像 load 到本地 daemon、
+# 用自己那套 smoke 脚本把容器真跑起来验一遍（web-front 打完整 API，backend 跑
+# 排行榜与中继的 E2E），全部通过之后才推双架构 manifest。把 build+push 收进一个
+# composite 就只能是一次 `platforms: amd64,arm64` 的推送，逐架构冒烟会整个消失。
+# 那是拿「少几行 YAML」换掉「交叉编译产物算得对不对」的验证，不划算：ring 有
+# aarch64 专用汇编、Argon2 有架构相关路径，「能链接」不等于「算得对」。
+#
+# 所以边界画在这里：把与服务无关的样板（模拟器、构建器、登录、标签规则）收成
+# 一处，把与服务有关的（构建什么、怎么验、推什么）留在各自的 workflow 里。
+
+inputs:
+  image:
+    description: 镜像全名（不含 tag），例如 ghcr.io/owner/repo/ej-backend
+    required: true
+  qemu-platforms:
+    description: 需要模拟的架构。只用于「跑」外来架构的容器做冒烟，不用于编译。
+    required: false
+    default: arm64
+  login:
+    description: >-
+      是否登录 GHCR 并计算标签。PR 上应为 false —— fork 来的 PR 拿不到
+      packages:write，登录会直接失败。
+    required: false
+    default: 'true'
+
+outputs:
+  tags:
+    description: metadata-action 算出的 tag 列表（换行分隔）
+    value: ${{ steps.meta.outputs.tags }}
+  labels:
+    description: OCI 标准 labels
+    value: ${{ steps.meta.outputs.labels }}
+  version:
+    description: 主 tag（便于摘要里引用）
+    value: ${{ steps.meta.outputs.version }}
+
+runs:
+  using: composite
+  steps:
+    - uses: docker/setup-qemu-action@v3
+      with:
+        platforms: ${{ inputs.qemu-platforms }}
+
+    - uses: docker/setup-buildx-action@v3
+
+    - name: 登录 GHCR
+      if: inputs.login == 'true'
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        # composite action 里不能引用 secrets，所以用调用方注入的 GITHUB_TOKEN。
+        # 它由 workflow 的 permissions.packages: write 授权，不是额外的凭据。
+        password: ${{ github.token }}
+
+    - name: 计算镜像标签
+      id: meta
+      if: inputs.login == 'true'
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ inputs.image }}
+        # latest 只在默认分支上打，否则一条特性分支的推送会把 latest 抢走，
+        # 而 latest 正是 compose 文件默认拉的那个。sha- 前缀那条是可复现发布
+        # 的锚点：部署文档里让人钉 sha 而不是 latest，靠的就是它。
+        tags: |
+          type=raw,value=latest,enable={{is_default_branch}}
+          type=sha,prefix=sha-

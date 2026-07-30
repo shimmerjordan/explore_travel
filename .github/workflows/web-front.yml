@@ -20,16 +20,21 @@ name: web-front 镜像（GHCR）
 # PR 只验证不推送；只有 main 上的 push 才会发布 latest。
 # ════════════════════════════════════════════════════════════════════════
 
+# 触发源包含 Flutter 侧：web 产物现在被 COPY 进这个镜像，所以改了 lib/ 或
+# pubspec 之后不重建镜像，镜像里带的就是旧前端。
 on:
   push:
     branches: [main]
-    paths:
+    paths: &paths
       - 'web-front/**'
+      - 'lib/**'
+      - 'web/**'
+      - 'pubspec.yaml'
+      - 'pubspec.lock'
+      - '.github/actions/image-build-setup/**'
       - '.github/workflows/web-front.yml'
   pull_request:
-    paths:
-      - 'web-front/**'
-      - '.github/workflows/web-front.yml'
+    paths: *paths
   workflow_dispatch: {}
 
 concurrency:
@@ -56,29 +61,40 @@ jobs:
         working-directory: web-front
         run: cargo test --locked
 
-      # QEMU 只用于「跑」arm64 容器做冒烟验证，不用于编译（编译走交叉）。
-      - uses: docker/setup-qemu-action@v3
+      # Flutter 只构建一次，两个架构共用：web 产物是纯静态资源，与架构无关。
+      # 放在这里（Rust 测试之后、镜像构建之前）是因为 docker build 的 context
+      # 需要 web-dist/ 里已经有产物；Dockerfile 的 COPY 不是可选的。
+      - uses: subosito/flutter-action@v2
         with:
-          platforms: arm64
-      - uses: docker/setup-buildx-action@v3
+          channel: stable
+          cache: true
+      - name: 构建 Flutter web 产物
+        run: |
+          set -euo pipefail
+          flutter pub get
+          flutter build web --release
+          # 先清空再拷：残留的上一次产物会被一起打进镜像，而 Flutter 的文件名
+          # 并非全都带内容哈希，旧文件不会被新文件覆盖掉。
+          rm -rf web-front/web-dist
+          mkdir -p web-front/web-dist
+          cp -r build/web/. web-front/web-dist/
+          # 产物必须全局可读：COPY 保留宿主权限位，0600 的文件在镜像里对
+          # nonroot 不可读（见 Dockerfile 里 /web 那段注释）。
+          chmod -R a+rX web-front/web-dist
+          echo "产物大小：$(du -sh web-front/web-dist | cut -f1)"
+          test -f web-front/web-dist/index.html || {
+            echo "::error::web-dist 里没有 index.html —— 镜像会退化成只有说明页"; exit 1; }
 
-      - name: 登录 GHCR
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: 计算镜像标签
+      # 模拟器 / 构建器 / 登录 / 标签规则这四步与服务无关，两条镜像流水线共用
+      # 同一个 composite。构建与冒烟仍留在下面，见该 action 里为什么不把 push
+      # 一起收进去。
+      - name: 镜像构建前置
         id: meta
-        if: github.event_name != 'pull_request'
-        uses: docker/metadata-action@v5
+        uses: ./.github/actions/image-build-setup
         with:
-          images: ${{ env.IMAGE }}
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,prefix=sha-
+          image: ${{ env.IMAGE }}
+          qemu-platforms: arm64
+          login: ${{ github.event_name != 'pull_request' }}
 
       # 先单架构 load 到本地 daemon，才能把容器真跑起来验。
       - name: 编译 amd64（加载到本地）

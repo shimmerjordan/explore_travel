@@ -1,4 +1,16 @@
-name: Build web → web-build branch
+name: Build public site → web-build branch
+
+# 这条流水线与 web-front 镜像流水线**不是**重复的，别因为两边都跑
+# `flutter build web` 就把它删掉：
+#
+#   * 这里产出的是**合并站点**（scripts/build-site.sh）：宣传落地页在 `/`、
+#     Flutter 应用在 `/app/`，base-href 是 `/app/`。它推到 `web-build` 分支，
+#     由 Vercel / Cloudflare Pages 直接部署，面向公网访客。
+#   * web-front 镜像里那份是**纯应用**，base-href 是 `/`，由 NAS 上的服务端
+#     托管，面向已经有 admin 口令的自己。
+#
+# 两份产物的 base-href 不同，所以物理上无法共用一次构建；而镜像里根本没有
+# `website/` 的落地页。删掉这条等于静默废掉宣传站的部署。
 
 # On every push to main, build the integrated static site (promo landing at /,
 # Flutter app at /app/) and publish the built output to the `web-build` branch.

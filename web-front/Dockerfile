@@ -49,6 +49,11 @@ ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
 # commit always yields the same image contents.
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+# The console page is `include_str!`'d into the binary, so it has to be in the
+# BUILD stage's context -- not just the runtime stage. Missing it fails the
+# compile with `couldn't read src/../assets/dashboard.html`, which only shows up
+# in the image build and never when running `cargo build` in a checkout.
+COPY assets ./assets
 RUN set -eux; \
     TRIPLE="$(cat /triple)"; \
     cargo build --release --locked --target "$TRIPLE"; \
