@@ -1,4 +1,5 @@
 import '../../models/models.dart';
+import 'frp_engine.dart';
 import 'group_probe_stub.dart'
     if (dart.library.io) 'group_probe_io.dart' as impl;
 
@@ -176,11 +177,22 @@ class ProbeDeps {
   /// pass here means the real transport can actually reach its mailbox.
   final ProbeDav Function(ProbeConfig cfg)? davClient;
 
+  /// Defaults to `FrpEngine.create` in the io impl. Injected so tests don't
+  /// need the native gomobile frpc plugin, and so the probe uses the SAME
+  /// engine class the real frp transport does.
+  final FrpEngine Function()? frpEngine;
+
+  /// Defaults to a plain `Socket.connect` in the io impl.
+  final Future<void> Function(String host, int port, Duration timeout)?
+      tcpConnect;
+
   const ProbeDeps({
     this.timeouts = const ProbeTimeouts(),
     this.httpGet,
     this.wsConnect,
     this.davClient,
+    this.frpEngine,
+    this.tcpConnect,
   });
 }
 

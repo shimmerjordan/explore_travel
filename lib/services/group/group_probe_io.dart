@@ -10,6 +10,8 @@ import 'package:webdav_client/webdav_client.dart' as webdav;
 
 import '../../models/models.dart';
 import '../security/http_guard.dart';
+import 'frp_config.dart';
+import 'frp_engine.dart';
 import 'group_probe.dart';
 import 'group_wire.dart';
 
@@ -530,8 +532,225 @@ class _WebDavClientAdapter implements ProbeDav {
 
 class FrpProbe extends _BaseProbe {
   FrpProbe(super.cfg, super.deps);
+
+  FrpEngine? _engine;
+  bool _startedByUs = false;
+
+  /// Set false when [_checkTcp] can't reach frps. `run()` executes every
+  /// step regardless of earlier outcomes (so the report is as complete as
+  /// possible), but starting a temporary frpc against a server we already
+  /// know is unreachable would just burn the login timeout for nothing.
+  bool _tcpOk = true;
+
+  // Address missing means every later step would fail against an empty
+  // config anyway — short-circuit to the one step that explains it, same as
+  // RelayProbe and WebDavProbe do for their own missing-address case.
   @override
-  List<Future<ProbeStep> Function()> steps() => [];
+  List<Future<ProbeStep> Function()> steps() {
+    final addr = (cfg.frpServerAddr ?? '').trim();
+    if (addr.isEmpty) {
+      return [_checkConfig];
+    }
+    return [
+      _checkConfig,
+      _checkTcp,
+      _checkLoginAndProxy,
+      _checkDashboard,
+    ];
+  }
+
+  @override
+  Future<void> cleanUp() async {
+    if (_startedByUs) {
+      try {
+        await _engine?.stop();
+      } catch (_) {}
+    }
+  }
+
+  Future<ProbeStep> _checkConfig() async {
+    final addr = (cfg.frpServerAddr ?? '').trim();
+    if (addr.isEmpty) {
+      return ProbeStep(
+        title: '配置完整性',
+        outcome: ProbeOutcome.fail,
+        detail: '未填 frp 服务器地址',
+        elapsed: Duration.zero,
+        hint: '填 frps 的地址与端口（本仓库示例用 17000）',
+      );
+    }
+    return ProbeStep(
+      title: '配置完整性',
+      outcome: ProbeOutcome.pass,
+      detail: '$addr:${cfg.frpServerPort} · '
+          '令牌${(cfg.frpToken ?? '').isEmpty ? "未设" : "已设"} · '
+          '共享口令${(cfg.passphrase ?? '').isEmpty ? "未设（xtcp 需要它派生 sk）" : "已设"}',
+      elapsed: Duration.zero,
+    );
+  }
+
+  Future<ProbeStep> _checkTcp() => _BaseProbe.timed(
+        '连接 frps',
+        () async {
+          final sw = Stopwatch()..start();
+          final connect = deps.tcpConnect ?? _defaultTcpConnect;
+          try {
+            await connect(cfg.frpServerAddr!.trim(), cfg.frpServerPort,
+                deps.timeouts.net);
+          } catch (_) {
+            _tcpOk = false;
+            rethrow;
+          }
+          return ProbeStep(
+            title: '连接 frps',
+            outcome: ProbeOutcome.pass,
+            detail: 'TCP ${cfg.frpServerAddr}:${cfg.frpServerPort} 可达',
+            elapsed: sw.elapsed,
+          );
+        },
+        failHint: '连不上 frps：确认服务在跑、安全组放行了这个端口、'
+            '地址没写成 dashboard 的端口',
+      );
+
+  Future<ProbeStep> _checkLoginAndProxy() => _BaseProbe.timed(
+        'frpc 登录并注册 xtcp proxy',
+        () async {
+          final sw = Stopwatch()..start();
+
+          // TCP 都连不上，再启一次 frpc 也只是白白等满登录超时。
+          if (!_tcpOk) {
+            return ProbeStep(
+              title: 'frpc 登录并注册 xtcp proxy',
+              outcome: ProbeOutcome.skip,
+              detail: '上一步连不上 frps，跳过',
+              elapsed: sw.elapsed,
+            );
+          }
+
+          final engine = _engine = (deps.frpEngine ?? FrpEngine.create)();
+
+          // 正在组队：读现有状态，不碰它。「用着的时候想查为什么连不上」是最常见
+          // 的场景，那时把隧道断掉去测是最差的选择。
+          if (cfg.groupRunning) {
+            final running = await engine.isRunning();
+            return ProbeStep(
+              title: 'frpc 登录并注册 xtcp proxy',
+              outcome: running ? ProbeOutcome.pass : ProbeOutcome.fail,
+              detail: running
+                  ? '组队正在运行，frpc 在线（未重启，避免打断现有隧道）'
+                  : '组队标记为运行中，但 frpc 不在线',
+              elapsed: sw.elapsed,
+              hint: running ? null : '先在组队页停止再重新开启，或看诊断日志里 frpc 的报错',
+            );
+          }
+
+          // 未组队：用只含自己 proxy 的最小配置临时启一次。
+          final builder = FrpConfigBuilder(
+            serverAddr: cfg.frpServerAddr!.trim(),
+            serverPort: cfg.frpServerPort,
+            token: cfg.frpToken,
+            protocol: 'quic',
+            groupPrefix: 'ej-${groupSafeId(cfg.groupId)}',
+            selfPeerId: cfg.selfId,
+            localMeshPort: kMeshPortBase,
+            secretKey: cfg.passphrase ?? '',
+          );
+          final lines = <String>[];
+          final done = Completer<ProbeOutcome>();
+          final sub = engine.events.listen((l) {
+            lines.add(l);
+            final low = l.toLowerCase();
+            if (low.contains('login') && low.contains('fail')) {
+              if (!done.isCompleted) done.complete(ProbeOutcome.fail);
+            } else if (low.contains('start proxy success') ||
+                low.contains('proxy added')) {
+              if (!done.isCompleted) done.complete(ProbeOutcome.pass);
+            }
+          });
+          try {
+            await engine.start(builder.build(const []).toml);
+            _startedByUs = true;
+            final outcome = await done.future
+                .timeout(deps.timeouts.frpLogin, onTimeout: () => ProbeOutcome.fail);
+            final loginFailed = lines.any((l) =>
+                l.toLowerCase().contains('login') &&
+                l.toLowerCase().contains('fail'));
+            return ProbeStep(
+              title: 'frpc 登录并注册 xtcp proxy',
+              outcome: outcome,
+              detail: lines.isEmpty
+                  ? '${deps.timeouts.frpLogin.inSeconds}s 内没有任何 frpc 事件'
+                  : lines.last,
+              elapsed: sw.elapsed,
+              hint: outcome == ProbeOutcome.pass
+                  ? null
+                  : loginFailed
+                      ? 'frps 拒绝登录：auth.token 必须与服务端 frps.toml 里的完全一致'
+                      : '没等到 proxy 注册成功：确认 frps 允许 xtcp、'
+                          '共享口令已设（它派生 xtcp 的 secretKey）',
+            );
+          } on FrpUnsupported catch (e) {
+            return ProbeStep(
+              title: 'frpc 登录并注册 xtcp proxy',
+              outcome: ProbeOutcome.skip,
+              detail: '当前平台没有内置 frpc：${e.message}',
+              elapsed: sw.elapsed,
+            );
+          } finally {
+            await sub.cancel();
+          }
+        },
+      );
+
+  Future<ProbeStep> _checkDashboard() async {
+    final url = (cfg.frpDashboardUrl ?? '').trim();
+    if (url.isEmpty) {
+      return ProbeStep(
+        title: 'frps dashboard 查询',
+        outcome: ProbeOutcome.skip,
+        detail: '未配置 dashboard（成员发现将只能靠手动添加）',
+        elapsed: Duration.zero,
+      );
+    }
+    return _BaseProbe.timed('frps dashboard 查询', () async {
+      final sw = Stopwatch()..start();
+      final get = deps.httpGet ?? _defaultHttpGet;
+      final basic = base64Encode(utf8.encode(
+          '${cfg.frpDashboardUser ?? ''}:${cfg.frpDashboardPass ?? ''}'));
+      final r = await get(
+        Uri.parse('${url.replaceAll(RegExp(r'/+$'), '')}/api/proxy/xtcp'),
+        headers: {'Authorization': 'Basic $basic'},
+        timeout: deps.timeouts.net,
+      );
+      if (r.status != 200) {
+        return ProbeStep(
+          title: 'frps dashboard 查询',
+          outcome: ProbeOutcome.fail,
+          detail: 'HTTP ${r.status}',
+          elapsed: sw.elapsed,
+          hint: r.status == 401
+              ? 'dashboard 账号或口令不对（frps.toml 的 webServer.user/password）'
+              : '拿不到 /api/proxy/xtcp：确认 dashboard 端口已放行且地址填对',
+        );
+      }
+      final prefix = 'ej-${groupSafeId(cfg.groupId)}.';
+      final mine = RegExp('"name"\\s*:\\s*"${RegExp.escape(prefix)}')
+          .allMatches(r.body)
+          .length;
+      return ProbeStep(
+        title: 'frps dashboard 查询',
+        outcome: ProbeOutcome.pass,
+        detail: '可查询；本组在线 proxy $mine 个',
+        elapsed: sw.elapsed,
+      );
+    });
+  }
+}
+
+Future<void> _defaultTcpConnect(String host, int port, Duration timeout) async {
+  final s = await Socket.connect(host, port, timeout: timeout);
+  await s.close();
+  s.destroy();
 }
 
 class LanProbe extends _BaseProbe {

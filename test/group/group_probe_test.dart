@@ -1,5 +1,8 @@
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:explore_journal/models/models.dart';
+import 'package:explore_journal/services/group/frp_engine.dart';
 import 'package:explore_journal/services/group/group_probe.dart';
 import 'package:explore_journal/services/group/group_probe_io.dart';
 
@@ -171,6 +174,7 @@ void main() {
 
   group('RelayProbe', relayTests);
   group('WebDavProbe', webdavTests);
+  group('FrpProbe', frpTests);
 }
 
 class _FakeSocket implements ProbeSocket {
@@ -336,6 +340,117 @@ void webdavTests() {
   test('地址或账号缺失 → 第一步 fail', () async {
     final steps = await _run(
         WebDavProbe(const ProbeConfig(groupId: 'g'), const ProbeDeps()));
+    expect(steps.first.outcome, ProbeOutcome.fail);
+    expect(steps.length, 1);
+  });
+}
+
+class _FakeFrpEngine implements FrpEngine {
+  final List<String> lines;
+  final bool running;
+  bool started = false;
+  bool stopped = false;
+  _FakeFrpEngine({this.lines = const [], this.running = false});
+
+  @override
+  Stream<String> get events => Stream.fromIterable(lines);
+  @override
+  Future<bool> isRunning() async => running || started;
+  @override
+  Future<void> start(String configToml) async => started = true;
+  @override
+  Future<void> reload(String configToml) async {}
+  @override
+  Future<void> stop() async => stopped = true;
+}
+
+void frpTests() {
+  const cfg = ProbeConfig(
+    groupId: 'g',
+    passphrase: 'pw',
+    frpServerAddr: 'frps.example.org',
+    frpServerPort: 17000,
+    frpToken: 't',
+  );
+
+  test('未组队时：临时启 frpc，login 成功 + proxy 上线 → 通过，且一定 stop', () async {
+    final engine = _FakeFrpEngine(lines: const [
+      'login to server success',
+      'proxy added: [ej-g.probe]',
+      'start proxy success',
+    ]);
+    final steps = await _run(FrpProbe(
+      cfg,
+      ProbeDeps(
+        frpEngine: () => engine,
+        tcpConnect: (h, p, t) async {},
+      ),
+    ));
+    expect(ProbeReport(transport: GroupTransport.frp, steps: steps).passed, isTrue);
+    expect(engine.started, isTrue);
+    expect(engine.stopped, isTrue, reason: '临时 frpc 必须在 finally 里停掉');
+  });
+
+  test('login 失败（token 错）→ fail 并提示 auth.token 要一致', () async {
+    final engine = _FakeFrpEngine(
+        lines: const ['login to server failed: authorization failed']);
+    final steps = await _run(FrpProbe(
+      cfg,
+      ProbeDeps(
+        frpEngine: () => engine,
+        tcpConnect: (h, p, t) async {},
+        timeouts: const ProbeTimeouts(frpLogin: Duration(milliseconds: 200)),
+      ),
+    ));
+    final bad = steps.firstWhere((s) => s.outcome == ProbeOutcome.fail);
+    expect(bad.hint, contains('auth.token'));
+  });
+
+  test('TCP 连不上 frps → 在启 frpc 之前就 fail', () async {
+    final engine = _FakeFrpEngine();
+    final steps = await _run(FrpProbe(
+      cfg,
+      ProbeDeps(
+        frpEngine: () => engine,
+        tcpConnect: (h, p, t) async => throw const SocketException('refused'),
+      ),
+    ));
+    expect(steps.any((s) => s.outcome == ProbeOutcome.fail), isTrue);
+    expect(engine.started, isFalse, reason: '连不上就不该再启 frpc');
+  });
+
+  test('正在组队时：读现有 engine 状态，绝不 start/stop', () async {
+    final engine = _FakeFrpEngine(running: true);
+    final steps = await _run(FrpProbe(
+      const ProbeConfig(
+        groupId: 'g',
+        passphrase: 'pw',
+        frpServerAddr: 'frps.example.org',
+        frpServerPort: 17000,
+        groupRunning: true,
+      ),
+      ProbeDeps(frpEngine: () => engine, tcpConnect: (h, p, t) async {}),
+    ));
+    expect(engine.started, isFalse);
+    expect(engine.stopped, isFalse);
+    expect(steps.any((s) => s.detail.contains('正在运行')), isTrue);
+  });
+
+  test('没配 dashboard → 该步 skip 而不是 fail', () async {
+    final steps = await _run(FrpProbe(
+      cfg,
+      ProbeDeps(
+        frpEngine: () => _FakeFrpEngine(lines: const ['login to server success', 'start proxy success']),
+        tcpConnect: (h, p, t) async {},
+      ),
+    ));
+    expect(steps.any((s) => s.title.contains('dashboard') && s.outcome == ProbeOutcome.skip),
+        isTrue);
+  });
+
+  test('地址没配 → 第一步 fail', () async {
+    final steps = await _run(
+        FrpProbe(const ProbeConfig(groupId: 'g'), const ProbeDeps()));
     expect(steps.first.outcome, ProbeOutcome.fail);
     expect(steps.length, 1);
   });

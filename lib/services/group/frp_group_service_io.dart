@@ -7,6 +7,7 @@ import 'frp_engine.dart';
 import 'group_diagnostics.dart';
 import 'group_service_io.dart' show GroupService;
 import 'group_types.dart';
+import 'group_wire.dart' as wire;
 
 const _tag = 'frp';
 GroupDiagnostics get _diag => groupDiagnostics;
@@ -27,8 +28,11 @@ GroupDiagnostics get _diag => groupDiagnostics;
 /// lexicographically-smaller id initiates the visitor connection, the larger
 /// one accepts on its own proxy — exactly one socket per pair.
 class FrpGroupService implements GroupService {
-  static const int kPortBase = 47830;
-  static const int kProbeCount = 5;
+  // Forwarded from group_wire.dart so this class keeps its own names (used
+  // throughout this file) while sharing the actual values with the probes —
+  // same pattern _LanGroupService uses (group_service_io.dart).
+  static const int kPortBase = wire.kMeshPortBase;
+  static const int kProbeCount = wire.kMeshPortProbeCount;
 
   final String selfId;
   final String selfName;
@@ -89,9 +93,7 @@ class FrpGroupService implements GroupService {
   @override
   Stream<List<GroupPeer>> get peers => _peersCtrl.stream;
 
-  static String _safeId(String s) =>
-      s.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '').padRight(1, 'g');
-  String get _groupPrefix => 'ej-${_safeId(groupId)}';
+  String get _groupPrefix => 'ej-${wire.groupSafeId(groupId)}';
 
   @override
   Future<void> start() async {
