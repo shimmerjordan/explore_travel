@@ -1,0 +1,140 @@
+import '../../models/models.dart';
+import 'group_probe_stub.dart'
+    if (dart.library.io) 'group_probe_io.dart' as impl;
+
+/// One line of a connectivity probe run.
+///
+/// `info` and `skip` deliberately do NOT count towards pass/fail: the LAN probe
+/// reports how many peers answered as information (nobody else being online is
+/// not a configuration error), and steps that can't run on this platform — or
+/// can't be verified from one device at all, like "is the shared passphrase the
+/// same as everyone else's" — are honestly marked as unverified instead of
+/// silently omitted. A report that only shows green ticks for things it actually
+/// checked is worth more than one that looks complete.
+enum ProbeOutcome { pass, fail, skip, info }
+
+class ProbeStep {
+  final String title;
+  final ProbeOutcome outcome;
+  final String detail;
+  final Duration elapsed;
+
+  /// What to do about it. Only set for [ProbeOutcome.fail].
+  final String? hint;
+
+  const ProbeStep({
+    required this.title,
+    required this.outcome,
+    required this.detail,
+    required this.elapsed,
+    this.hint,
+  });
+}
+
+class ProbeReport {
+  final GroupTransport transport;
+  final List<ProbeStep> steps;
+  const ProbeReport({required this.transport, required this.steps});
+
+  bool get passed => steps.every((s) => s.outcome != ProbeOutcome.fail);
+
+  String get summary {
+    final failed = steps.where((s) => s.outcome == ProbeOutcome.fail);
+    if (failed.isNotEmpty) return '失败于：${failed.first.title}';
+    final checked =
+        steps.where((s) => s.outcome == ProbeOutcome.pass).length;
+    return '通过 · $checked 步';
+  }
+}
+
+/// Snapshot of everything the probes read out of settings. Plain data so tests
+/// can construct one without touching prefs or riverpod.
+class ProbeConfig {
+  final String groupId;
+  final String selfId;
+  final String? passphrase;
+
+  // relay
+  final String? relayServerUrl;
+  final String? relayToken;
+
+  // webrtc / WebDAV signaling
+  final String? webdavUrl;
+  final String? webdavUser;
+  final String? webdavPass;
+  final String signalingPath;
+
+  // frp
+  final String? frpServerAddr;
+  final int frpServerPort;
+  final String? frpToken;
+  final String? frpDashboardUrl;
+  final String? frpDashboardUser;
+  final String? frpDashboardPass;
+
+  /// True when the real group service is currently running — the frp probe
+  /// reads the live engine instead of starting its own frpc, and the LAN probe
+  /// treats an already-bound mesh port as success rather than failure.
+  final bool groupRunning;
+
+  const ProbeConfig({
+    required this.groupId,
+    this.selfId = 'probe',
+    this.passphrase,
+    this.relayServerUrl,
+    this.relayToken,
+    this.webdavUrl,
+    this.webdavUser,
+    this.webdavPass,
+    this.signalingPath = '/explore_journal/signaling',
+    this.frpServerAddr,
+    this.frpServerPort = 7000,
+    this.frpToken,
+    this.frpDashboardUrl,
+    this.frpDashboardUser,
+    this.frpDashboardPass,
+    this.groupRunning = false,
+  });
+}
+
+/// Per-step timeouts. Total budget is enforced by the probe itself: once it's
+/// spent, remaining steps are emitted as `skip` with 「总时长超限」 rather than
+/// leaving the user staring at a spinner.
+class ProbeTimeouts {
+  final Duration net;         // TCP connect / plain HTTP
+  final Duration webdav;      // one WebDAV request
+  final Duration multicast;   // waiting for peer answers
+  final Duration frpLogin;    // frpc login + proxy registration
+  final Duration total;
+  const ProbeTimeouts({
+    this.net = const Duration(seconds: 5),
+    this.webdav = const Duration(seconds: 8),
+    this.multicast = const Duration(seconds: 3),
+    this.frpLogin = const Duration(seconds: 12),
+    this.total = const Duration(seconds: 45),
+  });
+}
+
+/// Injectable dependencies. Defaults are the production ones; tests pass fakes.
+class ProbeDeps {
+  final ProbeTimeouts timeouts;
+  const ProbeDeps({this.timeouts = const ProbeTimeouts()});
+}
+
+abstract class GroupProbe {
+  /// Emits steps as they complete. Closing the subscription cancels the run.
+  Stream<ProbeStep> run();
+
+  Future<void> cancel();
+
+  static GroupProbe forTransport(
+    GroupTransport transport,
+    ProbeConfig config, {
+    ProbeDeps? deps,
+  }) =>
+      impl.createProbe(
+        transport.canonical,
+        config,
+        deps ?? const ProbeDeps(),
+      );
+}
