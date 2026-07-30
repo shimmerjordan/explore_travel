@@ -71,6 +71,7 @@ typedef SyncProgress = void Function(int done, int total, String label);
 /// the old layouts, so pull-before-push keeps working mid-upgrade.
 class SyncEngine {
   final Ref ref;
+
   SyncEngine(this.ref);
 
   static const _indexName = '.ej_index.json';
@@ -220,6 +221,8 @@ class SyncEngine {
     required int from,
     required int to,
     CancelToken? cancelToken,
+    /// Threaded through from the caller — see `syncUp`.
+    String? credentialsPassphrase,
   }) async {
     _ensureTableTracking();
     // Flush pending table-update notifications so fingerprints reflect every
@@ -265,6 +268,11 @@ class SyncEngine {
       final files = await backup.exportToFiles(
         byGroup[group]!,
         deterministic: true,
+        // Credentials roam between the user's own devices, encrypted, when they
+        // have set a sync passphrase. Unset → the settings blob keeps carrying
+        // every secret as null, exactly as before this existed.
+        credentialsPassword: credentialsPassphrase,
+        credentialsAreForSync: true,
         includeManifest: group == 'meta',
         forceRequired: false,
         manifestModules: manifestModules,
@@ -326,6 +334,17 @@ class SyncEngine {
     SyncStorage? storage,
     SyncProgress? onProgress,
     CancelToken? cancelToken,
+    /// Key for the credential blob that rides along with this sync, or null to
+    /// carry no credentials (the settings blob then travels with every secret
+    /// scrubbed, exactly as it did before this existed).
+    ///
+    /// Passed IN rather than read from settings here, deliberately: this engine
+    /// had no dependency on `settingsProvider` — and therefore none on
+    /// SharedPreferences — and taking one would drag a plugin into a code path
+    /// that is otherwise pure enough to test on the VM without a binding.
+    /// (Discovered by 12 sync tests failing with "Binding has not yet been
+    /// initialized" the moment the engine reached for settings.)
+    String? credentialsPassphrase,
   }) async {
     final SyncStorage od = storage ?? ref.read(syncStorageProvider);
     void report(int permille, String label) =>
@@ -338,7 +357,8 @@ class SyncEngine {
         report: report,
         from: 0,
         to: 450,
-        cancelToken: cancelToken);
+        cancelToken: cancelToken,
+        credentialsPassphrase: credentialsPassphrase);
     final packed = local.packed;
     final localIndex = local.index;
 
@@ -444,6 +464,17 @@ class SyncEngine {
     SyncStorage? storage,
     SyncProgress? onProgress,
     CancelToken? cancelToken,
+    /// Key for the credential blob that rides along with this sync, or null to
+    /// carry no credentials (the settings blob then travels with every secret
+    /// scrubbed, exactly as it did before this existed).
+    ///
+    /// Passed IN rather than read from settings here, deliberately: this engine
+    /// had no dependency on `settingsProvider` — and therefore none on
+    /// SharedPreferences — and taking one would drag a plugin into a code path
+    /// that is otherwise pure enough to test on the VM without a binding.
+    /// (Discovered by 12 sync tests failing with "Binding has not yet been
+    /// initialized" the moment the engine reached for settings.)
+    String? credentialsPassphrase,
   }) async {
     final SyncStorage od = storage ?? ref.read(syncStorageProvider);
     void report(int permille, String label) =>
@@ -462,6 +493,11 @@ class SyncEngine {
       toFetch = remoteIndex.keys.toList();
     } else {
       report(20, '计算本地基线…');
+      // No passphrase here on purpose: this pass only computes local hashes to
+      // diff against the cloud. Sealing uses a fresh random salt every time, so
+      // including credentials would make the local baseline differ from the
+      // cloud copy on every single run and re-download the settings shard
+      // forever.
       final local = await _buildLocalShards(modules,
           keepBytes: false,
           report: report,
@@ -538,6 +574,7 @@ class SyncEngine {
           modules: modules,
           clearBeforeImport: clearBeforeImport,
           restore: restore,
+          credentialsPassword: credentialsPassphrase,
           onProgress: (d, t, l) =>
               report(800 + (t == 0 ? 0 : (200 * d / t).round()), l),
         );

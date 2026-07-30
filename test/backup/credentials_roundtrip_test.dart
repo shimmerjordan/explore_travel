@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:explore_journal/services/backup/backup_credentials.dart';
 import 'package:explore_journal/services/backup/backup_service.dart';
+import 'package:explore_journal/services/vault/config_payload.dart';
 
 /// The question this file answers is the one the feature exists for: **can a
 /// backup actually restore the app**, and does a stolen copy of it still give
@@ -55,6 +56,39 @@ void main() {
     // scrubbing it would make the new install sign as a stranger and get
     // refused under the server's TOFU rule.
     expect(kVaultSecretKeys, isNot(contains('leaderboardPrivateKey')));
+  });
+
+  group('sync passphrase', () {
+    test('it is a credential: scrubbed from plaintext, absent from roaming', () {
+      // Scrubbed → it never travels in a settings blob in the clear.
+      expect(kVaultSecretKeys, contains('syncCredentialsPassphrase'));
+      // Not roamed → the payload it protects would otherwise carry the key to
+      // the very server the payload is being protected from.
+      expect(ConfigPayload.kConfigPayloadKeys,
+          isNot(contains('syncCredentialsPassphrase')),
+          reason: 'roaming the key that encrypts the payload is circular');
+      expect(ConfigPayload.deviceOnlySecretKeys,
+          contains('syncCredentialsPassphrase'));
+    });
+
+    test('it is NOT the p2p passphrase', () {
+      // The p2p one is meant to be shared with the people you travel with, so
+      // reusing it here would let any group member who obtained the sync folder
+      // decrypt the cloud credentials in it.
+      expect(kVaultSecretKeys, contains('p2pPassphrase'));
+      expect('syncCredentialsPassphrase', isNot('p2pPassphrase'));
+    });
+
+    test('a scrubbed settings blob does not carry it', () {
+      final raw = jsonEncode({
+        'syncCredentialsPassphrase': 'SYNC-KEY-SECRET',
+        'webdavUrl': 'https://dav.example.com',
+      });
+      final scrubbed = scrubSettingsForTest(raw);
+      expect(scrubbed.contains('SYNC-KEY-SECRET'), isFalse,
+          reason: 'the key that unlocks everything must not travel in the clear');
+      expect(scrubbed.contains('dav.example.com'), isTrue);
+    });
   });
 
   group('sealed credentials round-trip', () {

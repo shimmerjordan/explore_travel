@@ -73,6 +73,9 @@ class ConfigPayload {
     'frpToken',
     'frpDashboardPass',
     'relayToken',
+    // The sync-blob encryption key. Roaming it would be circular (the payload it
+    // protects is what would carry it), and the web console has no use for it.
+    'syncCredentialsPassphrase',
   };
 
   /// Config keys whose [AppSettings] field is a `Map`, not a `String`.

@@ -134,6 +134,47 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
             );
           }),
 
+          // ── 凭据如何随备份与同步旅行 ──────────────────────────────────
+          const _SectionHeader('凭据的旅行方式'),
+          Container(
+            margin: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+            child: Text(
+              '导出的备份与云同步都会把设置里的凭据（各家口令、令牌、API 密钥）'
+              '剔除，所以泄露的文件不会泄露凭据。代价是换设备后要手工重填——'
+              '除非给它们一把钥匙。\n\n'
+              '备份用的是导出时现场输入的口令。云同步是后台跑的、没人能输口令，'
+              '所以它用下面这个：两台设备填同一个值，凭据就会加密后随同步旅行。'
+              '留空则同步不带凭据（和没有这个功能时一样）。',
+              style: TextStyle(
+                fontSize: 11,
+                height: 1.5,
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+          _TextSetting(
+            Icons.key_rounded,
+            '同步凭据口令',
+            s.syncCredentialsPassphrase ?? '',
+            (v) => n.update((p) =>
+                p.copyWith(syncCredentialsPassphrase: v.isEmpty ? null : v)),
+            hint: '留空 = 同步不带凭据；两台设备要填同一个',
+            obscure: true,
+          ),
+          Container(
+            margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Text(
+              '它本身也算凭据：不会随明文设置外传，但**会**被封进带口令的备份里——'
+              '所以在新设备上恢复一次带口令的备份，就等于把这把钥匙也带过去了，'
+              '不用两边各输一遍。忘了它只影响凭据能否随同步旅行，数据不受影响。',
+              style: TextStyle(
+                fontSize: 11,
+                height: 1.5,
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+
           // ── 本地导出 / 导入 ────────────────────────────────────────────
           const _SectionHeader('本地文件'),
           ListTile(
@@ -487,6 +528,13 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
   /// the user simply has no credentials configured yet. Prompting in either case
   /// is the same mistake `_passwordForArchive` avoids on the import side:
   /// training people to dismiss a dialog that usually means nothing.
+  /// The passphrase credentials ride along with sync under, or null when the
+  /// user has not set one (sync then carries none, as before).
+  String? _syncPassphrase() {
+    final v = ref.read(settingsProvider).syncCredentialsPassphrase;
+    return (v == null || v.isEmpty) ? null : v;
+  }
+
   Future<bool> _exportWouldCarryCredentials() => ref
       .read(backupServiceProvider)
       .hasCredentialsToSeal(_selectedModules(ref.read(settingsProvider)));
@@ -816,6 +864,7 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
     final res =
         await _withProgress<SyncUpResult>('同步到 OneDrive', (report, cancel) {
       return ref.read(syncEngineProvider).syncUp(
+          credentialsPassphrase: _syncPassphrase(),
             modules: _selectedModules(ref.read(settingsProvider)),
             cancelToken: cancel,
             onProgress: (done, total, label) =>
@@ -834,6 +883,7 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
     final status =
         await _withProgress<String>('从 OneDrive 恢复', (report, cancel) async {
       final summary = await ref.read(syncEngineProvider).syncDown(
+          credentialsPassphrase: _syncPassphrase(),
             modules: _selectedModules(ref.read(settingsProvider)),
             clearBeforeImport:
                 ref.read(settingsProvider).importClearBeforeImport,
@@ -881,6 +931,7 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
     final res = await _withProgress<SyncUpResult>(
         '导出到本地文件夹', (report, cancel) {
       return ref.read(syncEngineProvider).syncUp(
+          credentialsPassphrase: _syncPassphrase(),
             modules: _selectedModules(ref.read(settingsProvider)),
             storage: LocalFolderStorage(root),
             cancelToken: cancel,
@@ -902,6 +953,7 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
     final status = await _withProgress<String>(
         '从本地文件夹导入', (report, cancel) async {
       final summary = await ref.read(syncEngineProvider).syncDown(
+          credentialsPassphrase: _syncPassphrase(),
             modules: _selectedModules(ref.read(settingsProvider)),
             clearBeforeImport:
                 ref.read(settingsProvider).importClearBeforeImport,

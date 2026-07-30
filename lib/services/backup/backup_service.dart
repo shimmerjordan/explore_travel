@@ -217,11 +217,16 @@ class BackupService {
     bool forceRequired = true,
     List<String>? manifestModules,
     // Non-null (and non-empty) means "seal the credentials into this archive
-    // under this password". Only the EXPLICIT backup paths pass it: the sync
-    // engine runs unattended, and there is nobody there to type a password —
-    // so a synced archive keeps carrying no credentials at all, exactly as
-    // before. See BackupCredentials for the threat model.
+    // under this password". Two sources: a human typing one into the backup
+    // dialog, or — on the unattended sync path — `syncCredentialsPassphrase`
+    // from the settings themselves, which is how credentials roam between the
+    // user's own devices without anyone typing anything per sync. Null means the
+    // archive carries no credentials at all (the settings blob still has every
+    // secret scrubbed). See BackupCredentials for the threat model.
     String? credentialsPassword,
+    // True only for the unattended sync path — see the settings module below.
+    // Callers whose password came from a human leave this false.
+    bool credentialsAreForSync = false,
   }) async {
     // Force the required modules — caller can't opt out.
     final modules =
@@ -417,6 +422,18 @@ class BackupService {
         // importer a password prompt for nothing.
         if (credentialsPassword != null && credentialsPassword.isNotEmpty) {
           final creds = _collectSecrets(raw);
+          // The two paths differ here, and the difference is the whole
+          // bootstrap story:
+          //
+          //  * a HUMAN-typed backup password → keep the sync passphrase in the
+          //    blob. Restoring that backup on a new device is how the new device
+          //    acquires it, and from then on sync carries credentials by itself.
+          //  * the SYNC path → drop it. Encrypting the sync passphrase with the
+          //    sync passphrase tells a device that already has it nothing, and a
+          //    device that lacks it still cannot open the blob.
+          if (credentialsAreForSync) {
+            creds.remove('syncCredentialsPassphrase');
+          }
           if (creds.isNotEmpty) {
             addText(BackupCredentials.fileName,
                 await BackupCredentials.seal(creds, credentialsPassword));
@@ -1876,6 +1893,12 @@ const kVaultSecretKeys = <String>{
   // granting access to data, which is why they were missed at first.
   'amapApiKey',
   'googleMapKey',
+  // The key the sync-side credential blob is encrypted with. It is a credential
+  // in its own right, so it is scrubbed from plaintext settings and sealed into
+  // password-protected backups — which is also how a new device acquires it
+  // without the user typing it twice. It is excluded from the SYNC blob itself
+  // (sealing a key with itself is circular); see BackupService.exportToFiles.
+  'syncCredentialsPassphrase',
 };
 
 /// Deliberately NOT in [kVaultSecretKeys]: `leaderboardPrivateKey`.

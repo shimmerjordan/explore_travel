@@ -1,5 +1,5 @@
 import 'dart:convert';
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show debugPrint, kIsWeb;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/models.dart';
 import '../services/backup/backup_service.dart' show kVaultSecretKeys;
@@ -49,6 +49,25 @@ class AppSettings {
   /// Non-secret, and only the phone needs it (the browser reaches the console
   /// at its own origin). The session token is NOT here — it's
   /// bearer-equivalent and short-lived, kept in a clearable session store.
+  /// Key for the credentials that ride along with cloud sync, encrypted.
+  ///
+  /// Cloud sync runs unattended — nobody is there to type a password — so an
+  /// encrypted credential blob needs a key the device already holds and the
+  /// OTHER device can also hold. There are only two ways to get one there: the
+  /// user types the same thing twice, or a password-protected backup carries it.
+  /// Both work here, because this field is itself in [kVaultSecretKeys]: it is
+  /// scrubbed from any plaintext settings that travel, and sealed into a
+  /// password-protected backup — so restoring such a backup on a new device
+  /// bootstraps encrypted sync with nothing else typed.
+  ///
+  /// **Deliberately not `p2pPassphrase`.** That one is *meant* to be shared with
+  /// the people you travel with; using it here would mean any group member who
+  /// got hold of your sync folder could decrypt your cloud credentials.
+  ///
+  /// Empty/null → credentials do not travel through sync at all (the behaviour
+  /// before this existed): the settings blob still has every secret scrubbed.
+  final String? syncCredentialsPassphrase;
+
   final String? nasServerUrl;
   final String? zerotierNetworkId;
   final String displayName;
@@ -268,6 +287,7 @@ class AppSettings {
     this.oneDriveRefreshToken,
     this.oneDriveAccount,
     this.syncBackend = 'onedrive',
+    this.syncCredentialsPassphrase,
     this.nasServerUrl,
     this.zerotierNetworkId,
     this.displayName = '旅人',
@@ -372,6 +392,7 @@ class AppSettings {
     String? oneDriveRefreshToken,
     String? oneDriveAccount,
     String? syncBackend,
+    String? syncCredentialsPassphrase,
     String? nasServerUrl,
     String? zerotierNetworkId,
     String? displayName,
@@ -474,6 +495,8 @@ class AppSettings {
         oneDriveRefreshToken: oneDriveRefreshToken ?? this.oneDriveRefreshToken,
         oneDriveAccount: oneDriveAccount ?? this.oneDriveAccount,
         syncBackend: syncBackend ?? this.syncBackend,
+        syncCredentialsPassphrase:
+            syncCredentialsPassphrase ?? this.syncCredentialsPassphrase,
         nasServerUrl: nasServerUrl ?? this.nasServerUrl,
         zerotierNetworkId: zerotierNetworkId ?? this.zerotierNetworkId,
         displayName: displayName ?? this.displayName,
@@ -591,6 +614,7 @@ class AppSettings {
         'oneDriveRefreshToken': oneDriveRefreshToken,
         'oneDriveAccount': oneDriveAccount,
         'syncBackend': syncBackend,
+        'syncCredentialsPassphrase': syncCredentialsPassphrase,
         'nasServerUrl': nasServerUrl,
         'zerotierNetworkId': zerotierNetworkId,
         'displayName': displayName,
@@ -694,6 +718,7 @@ class AppSettings {
         oneDriveRefreshToken: j['oneDriveRefreshToken'],
         oneDriveAccount: j['oneDriveAccount'],
         syncBackend: j['syncBackend']?.toString() ?? 'onedrive',
+        syncCredentialsPassphrase: j['syncCredentialsPassphrase']?.toString(),
         nasServerUrl: j['nasServerUrl']?.toString(),
         zerotierNetworkId: j['zerotierNetworkId'],
         displayName: j['displayName'] ?? '旅人',
@@ -876,7 +901,23 @@ class PrefsStore {
         j[k] = (sec != null && sec.isNotEmpty) ? sec : null;
       }
     }
-    final settings = AppSettings.fromJson(j);
+    // `fromJson` hard-casts (enum indices, ints, doubles), so ONE field of the
+    // wrong shape throws — and this runs during app start. A settings blob can
+    // legitimately be foreign: written by a much older version, hand-edited, or
+    // merged in from another device's archive. Letting that abort startup turns a
+    // cosmetic preference problem into "the app does not open", so fall back to
+    // defaults and say so rather than propagate.
+    //
+    // Deliberately NOT a silent fallback: the raw blob is left in prefs
+    // untouched, so nothing is destroyed and the next successful save fixes it.
+    final AppSettings settings;
+    try {
+      settings = AppSettings.fromJson(j);
+    } catch (e) {
+      debugPrint('[PrefsStore] settings blob is unreadable ($e) — using defaults '
+          'for this run; the stored copy is left as-is');
+      return const AppSettings();
+    }
     if (hasPlaintext) {
       // One-time migration: rewrite the prefs file with the secrets moved
       // into secure storage, now rather than on the next user edit.

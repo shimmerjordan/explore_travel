@@ -46,6 +46,12 @@ class SecureCredentials {
   static const aiApiKey = 'ai_api_key';
   static const leaderboardRepoPat = 'leaderboard_repo_pat';
   static const leaderboardServerToken = 'leaderboard_server_token';
+  // NOTE: `syncCredentialsPassphrase` deliberately does NOT appear here.
+  // This list is the set of secrets that must ALSO roam in the config payload
+  // (a test pins that), and the sync passphrase is the key those payloads are
+  // encrypted with — roaming it would be circular. The prefs overlay reaches it
+  // anyway, because that iterates `kVaultSecretKeys` by settings-field name
+  // rather than this list.
 
   static const all = <String>[
     githubPat,

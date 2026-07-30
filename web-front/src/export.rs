@@ -53,6 +53,11 @@ const SECRET_KEYS: &[&str] = &[
     // carries to the browser.
     "amapApiKey",
     "googleMapKey",
+    // The key the phone's sync-side credential blob is encrypted with. It never
+    // roams to this server, but a config stored before that exclusion existed
+    // could still carry it, and it is the one value that would unlock all the
+    // others.
+    "syncCredentialsPassphrase",
 ];
 
 /// Replace every credential value with `null`, at any depth.
