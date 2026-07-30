@@ -6,6 +6,7 @@ import 'frp_engine.dart';
 import 'frp_group_service_io.dart';
 import 'group_diagnostics.dart';
 import 'group_types.dart';
+import 'group_wire.dart' as wire;
 import 'multicast_lock_io.dart';
 import 'relay_group_service_io.dart';
 import 'webrtc_group_service_io.dart';
@@ -201,10 +202,12 @@ abstract class GroupService {
 ///   - Actual data (chat, location, voice) flows over TCP. Wire format
 ///     unchanged.
 class _LanGroupService implements GroupService {
-  static const int kPortBase = 47830;
-  static const int kProbeCount = 5;
-  static const int kDiscoveryPort = 47829;
-  static const String _kMcastGroup = '239.42.42.42';
+  // Forwarded from group_wire.dart so this class keeps its own names (used
+  // throughout this file) while sharing the actual values with the probes.
+  static const int kPortBase = wire.kMeshPortBase;
+  static const int kProbeCount = wire.kMeshPortProbeCount;
+  static const int kDiscoveryPort = wire.kDiscoveryPort;
+  static const String _kMcastGroup = wire.kMcastGroup;
   static const _heartbeat = Duration(seconds: 8);
   static const _discoveryInterval = Duration(seconds: 4);
 

@@ -6,6 +6,7 @@ import '../p2p/crypto.dart';
 import 'group_diagnostics.dart';
 import 'group_service_io.dart' show GroupService;
 import 'group_types.dart';
+import 'group_wire.dart' as wire;
 
 /// Cloud-relay transport: every member connects one WebSocket to the
 /// self-hosted backend (`backends/` in this repo) and the server fans
@@ -65,28 +66,14 @@ class RelayGroupService implements GroupService {
   @override
   Stream<List<GroupPeer>> get peers => _peersCtrl.stream;
 
-  static String _safeId(String s) =>
-      s.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '').padRight(1, 'g');
-
-  Uri _wsUri() {
-    var base = serverUrl.trim();
-    if (base.isEmpty) {
-      throw StateError('未配置中继服务器地址');
-    }
-    base = base.replaceAll(RegExp(r'/+$'), '');
-    if (base.startsWith('https://')) {
-      base = 'wss://${base.substring(8)}';
-    } else if (base.startsWith('http://')) {
-      base = 'ws://${base.substring(7)}';
-    } else if (!base.startsWith('ws://') && !base.startsWith('wss://')) {
-      base = 'wss://$base';
-    }
-    return Uri.parse('$base/group/v1/ws').replace(queryParameters: {
-      'group': _safeId(groupId),
-      'peer': selfId,
-      if ((token ?? '').isNotEmpty) 'token': token!,
-    });
-  }
+  // Delegates to group_wire.dart so this transport and the probes can never
+  // drift apart on scheme rewriting / path / query shape.
+  Uri _wsUri() => wire.relayWsUri(
+        serverUrl: serverUrl,
+        groupId: groupId,
+        selfId: selfId,
+        token: token,
+      );
 
   @override
   Future<void> start() async {
