@@ -4,6 +4,7 @@ mod auth;
 mod config;
 mod config_store;
 mod dashboard;
+mod dav;
 mod export;
 mod metrics;
 mod proxy;
@@ -20,7 +21,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
-use tiny_http::{Header, Method, Request, Response, Server};
+use tiny_http::{Header, Request, Response, Server};
 
 // POST /api/session and PUT /api/password bodies are small, fixed-shape JSON
 // objects and share this tight cap. PUT /api/config carries the user's actual
@@ -58,6 +59,11 @@ struct AppState {
     cfg: Config,
     limiter: Mutex<Limiter>,
     agent: ureq::Agent,
+    /// Separate from `agent` because the two proxies must NOT share an address
+    /// predicate: see `proxy::is_lan_or_public_ip` for why a LAN WebDAV host
+    /// has to be reachable while `/proxy/url` must keep refusing private
+    /// ranges.
+    dav_agent: ureq::Agent,
     sessions: session::Sessions,
     admin: Mutex<AdminFile>,
     /// Serializes writers of `config.json`: `PUT /api/config`'s `save` and
@@ -184,6 +190,7 @@ fn main() {
         cfg,
         limiter: Mutex::new(Limiter::new()),
         agent: proxy::safe_agent(),
+        dav_agent: proxy::lan_agent(),
         config_write: Mutex::new(()),
         metrics: metrics::Metrics::load_or_new(data_dir.clone()),
         started: Instant::now(),
@@ -486,15 +493,16 @@ fn allow(state: &AppState, ip: &str, bucket: &str, limit: u32) -> bool {
 }
 
 fn serve(state: &AppState, mut req: Request) {
-    let method = match req.method() {
-        Method::Get => "GET",
-        Method::Head => "HEAD",
-        Method::Post => "POST",
-        Method::Put => "PUT",
-        Method::Delete => "DELETE",
-        _ => "OTHER",
-    }
-    .to_string();
+    // The method verbatim, uppercased -- NOT collapsed into a known-methods
+    // enum. The WebDAV proxy needs `PROPFIND` and `OPTIONS` to survive as
+    // themselves: folding every unrecognised verb into one `"OTHER"` bucket
+    // erased the method before routing ever saw it, so a PROPFIND could not be
+    // routed at all, only 404'd. Uppercasing means a lowercase verb can't slip
+    // past a match arm; an unknown verb still falls through to the unrouted
+    // arm exactly as before, it just does so under its own name (and shows up
+    // that way in the access log, which is strictly more useful when
+    // diagnosing a client).
+    let method = req.method().as_str().to_ascii_uppercase();
 
     let raw_url = req.url().to_string();
     let (path, query) = match raw_url.split_once('?') {
@@ -631,6 +639,13 @@ fn route(state: &AppState, req: &Request, method: &str, path: &str, query: &str,
         ("PUT", "/api/config") => handle_put_config(state, req, body),
         ("GET", "/api/metrics") => handle_metrics(state, req),
         ("GET", "/api/export") => handle_export(state, req, query),
+        // Any read verb under this prefix. Must sit above the static fallback,
+        // and above the `/proxy/` JSON-404 arm, or a PROPFIND would never
+        // reach it.
+        (m, p) if p.starts_with("/proxy/dav/") || p == "/proxy/dav" => {
+            let rest = p.strip_prefix("/proxy/dav").unwrap_or("");
+            guard_proxy(state, req, || handle_dav(state, req, m, rest, body))
+        }
         // The console is a page, so it deliberately does NOT require a session
         // to be served -- it renders its own login form and then talks to the
         // session-gated endpoints. Serving the shell unauthenticated leaks
@@ -1198,6 +1213,93 @@ fn handle_export(state: &AppState, req: &Request, query: &str) -> Out {
     )
 }
 
+/// `GET|HEAD|PROPFIND|OPTIONS /proxy/dav/<path>`: read the user's own WebDAV
+/// through this server, because the browser cannot.
+///
+/// The order of the checks below is the security design, not an accident:
+/// session first (so an unauthenticated caller learns nothing, not even
+/// whether WebDAV is configured), then method (so a write verb is refused
+/// before any config is decrypted), then config, then path confinement. Each
+/// step's failure is a different status precisely so an operator can tell
+/// "not logged in" from "not configured" from "that path is not allowed".
+fn handle_dav(state: &AppState, req: &Request, method: &str, rest: &str, body: &[u8]) -> Out {
+    let key = match session_token(req).and_then(|t| state.sessions.get_key(&t)) {
+        Some(k) => k,
+        None => return no_store(Out::json(401, json!({"error":"unauthorized"}))),
+    };
+    if !dav::ALLOWED_METHODS.contains(&method) {
+        return no_store(Out::json(
+            405,
+            json!({"error":"this proxy is read-only", "allowed": dav::ALLOWED_METHODS}),
+        ))
+        .with("Allow", &dav::ALLOWED_METHODS.join(", "));
+    }
+
+    let cfg = match dav::load_config(Path::new(&state.cfg.data_dir), &key) {
+        Ok(Some(v)) => v,
+        Ok(None) => return no_store(Out::json(409, json!({"error": DAV_UNCONFIGURED}))),
+        Err(e) if e == config_store::DECRYPT_ERR => {
+            return no_store(Out::json(500, json!({"error": e})))
+        }
+        Err(e) => return server_error("dav: load config", &e),
+    };
+    let dc = match dav::dav_config(&cfg) {
+        Some(c) => c,
+        None => return no_store(Out::json(409, json!({"error": DAV_UNCONFIGURED}))),
+    };
+
+    let target = match dav::resolve_target(&dc.base, rest) {
+        Ok(t) => t,
+        Err(why) => return no_store(Out::json(403, json!({"error": why}))),
+    };
+    let depth_hdr = header(req, "Depth");
+    let depth = match dav::depth_or_default(depth_hdr.as_deref()) {
+        Ok(d) => d,
+        Err(why) => return no_store(Out::json(400, json!({"error": why}))),
+    };
+
+    let relayed = dav::relay(
+        &state.dav_agent,
+        method,
+        &target,
+        dav::basic_auth(&dc.user, &dc.pass).as_deref(),
+        (method == "PROPFIND").then_some(depth),
+        header(req, "Range").as_deref(),
+        body,
+    );
+    match relayed {
+        None => no_store(Out::json(
+            502,
+            json!({"error":"the WebDAV server did not answer"}),
+        )),
+        Some(r) => {
+            let mime = r
+                .headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("Content-Type"))
+                .map(|(_, v)| v.clone())
+                .unwrap_or_else(|| "application/octet-stream".into());
+            let mut out = Out::bytes(r.status, &mime, r.body);
+            for (k, v) in r.headers {
+                // Content-Type is already the response's own; re-adding it
+                // would emit the header twice.
+                if !k.eq_ignore_ascii_case("Content-Type")
+                    && !k.eq_ignore_ascii_case("Content-Length")
+                {
+                    out = out.with(&k, &v);
+                }
+            }
+            no_store(out)
+        }
+    }
+}
+
+/// One message for "no WebDAV to talk to", whether that is a missing config or
+/// a config without a usable URL. The distinction is invisible to the caller
+/// and the fix is the same, so telling them apart would only invite guessing.
+const DAV_UNCONFIGURED: &str = "no WebDAV server is configured; push the app's \
+settings to this server first (phone: 备份 → Web 前端 · 配置推送)";
+
 fn no_store(out: Out) -> Out {
     out.with("Cache-Control", "no-store")
         .with("X-Content-Type-Options", "nosniff")
@@ -1377,6 +1479,7 @@ mod tests {
             cfg: config::Config::default(),
             limiter: Mutex::new(Limiter::new()),
             agent: proxy::safe_agent(),
+            dav_agent: proxy::lan_agent(),
             sessions: session::Sessions::new(60),
             admin: Mutex::new(AdminFile {
                 v: 1,

@@ -140,3 +140,107 @@ mod tests {
         }
     }
 }
+
+/// Like [`is_safe_ip`], but permits RFC1918 / ULA addresses.
+///
+/// The two proxies have genuinely different threat models and so cannot share
+/// one predicate:
+///
+///   * `/proxy/url` takes its target from the *request*, so an attacker with a
+///     session picks the address and private ranges must be refused — that is
+///     a classic SSRF pivot.
+///   * the WebDAV proxy takes its target from the admin's own stored config,
+///     and the overwhelmingly common deployment is a NAS talking to a WebDAV
+///     server on the same LAN. Refusing private addresses there does not close
+///     an attack path (whoever can rewrite that config already holds every
+///     cloud credential this server stores); it just makes the feature
+///     unusable for the setup it exists to serve.
+///
+/// Still refused: loopback (a request loop back into this process),
+/// unspecified, multicast, broadcast, and **link-local — which is what keeps
+/// cloud metadata at 169.254.169.254 out of reach**.
+pub fn is_lan_or_public_ip(ip: &IpAddr) -> bool {
+    if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
+        return false;
+    }
+    match ip {
+        IpAddr::V4(v4) => !(v4.is_link_local() || v4.is_broadcast() || v4.is_documentation()),
+        IpAddr::V6(v6) => {
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return is_lan_or_public_ip(&IpAddr::V4(mapped));
+            }
+            (v6.segments()[0] & 0xffc0) != 0xfe80 // fe80::/10
+        }
+    }
+}
+
+struct LanResolver;
+
+impl ureq::Resolver for LanResolver {
+    fn resolve(&self, netloc: &str) -> std::io::Result<Vec<SocketAddr>> {
+        let ok: Vec<SocketAddr> = netloc
+            .to_socket_addrs()?
+            .filter(|a| is_lan_or_public_ip(&a.ip()))
+            .collect();
+        if ok.is_empty() {
+            return Err(std::io::Error::other("blocked or unresolved target"));
+        }
+        Ok(ok)
+    }
+}
+
+/// Agent for the WebDAV proxy. Same pinning and no-redirect posture as
+/// [`safe_agent`] — only the address predicate differs (see
+/// [`is_lan_or_public_ip`]).
+pub fn lan_agent() -> ureq::Agent {
+    ureq::builder()
+        .resolver(LanResolver)
+        .redirects(0)
+        .timeout(Duration::from_secs(30))
+        .build()
+}
+
+/// The cap this module reads a proxied body up to, exposed so the WebDAV proxy
+/// bounds its own reads by the same number rather than inventing a second one.
+pub const BODY_CAP: u64 = MAX_PROXY_BYTES;
+
+#[cfg(test)]
+mod lan_tests {
+    use super::*;
+
+    #[test]
+    fn lan_predicate_allows_private_but_still_blocks_the_dangerous_ones() {
+        // Not a TEST-NET address here on purpose: 192.0.2.0/24, 198.51.100.0/24
+        // and 203.0.113.0/24 are the documentation ranges and `is_documentation`
+        // refuses them, which is correct -- nobody's WebDAV lives there.
+        for ok in ["192.168.1.5", "10.0.0.9", "172.16.4.4", "93.184.216.34"] {
+            assert!(
+                is_lan_or_public_ip(&ok.parse().unwrap()),
+                "{ok} is a plausible WebDAV host"
+            );
+        }
+        for bad in [
+            "127.0.0.1",
+            "0.0.0.0",
+            "169.254.169.254",
+            "255.255.255.255",
+            "203.0.113.9", // documentation range
+        ] {
+            assert!(!is_lan_or_public_ip(&bad.parse().unwrap()), "{bad} must stay blocked");
+        }
+        // The metadata address is the one that would actually hurt, so pin it
+        // from the other direction too: the stricter predicate agrees.
+        assert!(!is_safe_ip(&"169.254.169.254".parse().unwrap()));
+        // ...and the LAN address the strict one refuses is exactly why this
+        // second predicate exists.
+        assert!(!is_safe_ip(&"192.168.1.5".parse().unwrap()));
+    }
+
+    #[test]
+    fn ipv6_mapped_and_link_local_follow_the_same_rules() {
+        assert!(!is_lan_or_public_ip(&"::ffff:127.0.0.1".parse().unwrap()));
+        assert!(is_lan_or_public_ip(&"::ffff:192.168.1.5".parse().unwrap()));
+        assert!(!is_lan_or_public_ip(&"fe80::1".parse().unwrap()));
+        assert!(is_lan_or_public_ip(&"fd00::1".parse().unwrap()), "ULA is a real LAN in v6");
+    }
+}
