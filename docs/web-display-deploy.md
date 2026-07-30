@@ -42,6 +42,21 @@ curl localhost:48080/healthz        # {"status":"ok"}
 家宽运营商普遍封禁**入方向**的这三个端口，改回去会从公网完全连不上。
 web-front 用 **48080**，`ej-backend`（排行榜 + 组队）用 **48081**。
 
+### 经反代 / 内网穿透暴露时必须开一个开关
+
+```yaml
+environment:
+  EJ_TRUST_PROXY: "1"
+```
+
+限流是**按客户端 IP 分桶**的。不开这个，服务看到的来源永远是反代自己的地址，于是
+**所有访客共享同一个桶**——一个人试几次口令就能把别人也挡在外面。直接暴露端口时
+保持 `0`（那时 `X-Forwarded-For` 是客户端可伪造的，信任它反而让限流失效）。
+
+其余可调项（都有合理默认，不必动）：`EJ_WEB_ROOT`（覆盖镜像里自带的 web 产物）、
+`EJ_METRICS_INTERVAL_SECS`（采样间隔）、`EJ_WORKERS`（工作线程数）。
+两个 compose 文件里都已列出并写了说明。
+
 ### 数据放哪
 
 `EJ_DATA_PATH` 不设 → Docker 命名卷（零宿主配置）；设成绝对路径 → bind mount，

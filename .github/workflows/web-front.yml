@@ -33,6 +33,13 @@ on:
       - 'web-front/**'
       - 'lib/**'
       - 'web/**'
+      # assets/ 与 pubspec 里声明打进 App 的那三个 docs 也是 Flutter 构建的输入。
+      # 少了它们，只改字体/贴图/内置文档时镜像不会重建，镜像里带的还是旧前端，
+      # 而且没有任何信号。
+      - 'assets/**'
+      - 'docs/leaderboard-server-api.md'
+      - 'docs/self-host-server-deploy.md'
+      - 'docs/self-host-client-config.md'
       - 'pubspec.yaml'
       - 'pubspec.lock'
       - '.github/actions/image-build-setup/**'

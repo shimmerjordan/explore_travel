@@ -50,6 +50,11 @@ const FIXED_ROUTES: &[&str] = &[
     "/api/config",
     "/api/metrics",
     "/api/export",
+    // The console shell. It is the only route served WITHOUT a session, so
+    // folding it into the catch-all bucket would make "someone is poking at the
+    // login page" indistinguishable from ordinary asset traffic -- and at ~50 KB
+    // a hit it would also drown the real static-asset byte count.
+    "/admin",
 ];
 
 /// Proxy routes carry the upstream path (repo, tile, WebDAV object) in their
@@ -270,6 +275,19 @@ impl Metrics {
 
         let mut g = self.inner.lock().unwrap();
         bump(&mut g.p, key, status, bytes_out);
+
+        // The console's own poll does NOT go in the ring. It reads
+        // `/api/metrics` every 10 seconds while the ring holds 100 entries, so
+        // anyone who simply LEAVES THE PANEL OPEN flushes every other event out
+        // of it within ~17 minutes -- and the 20 rows actually rendered turn
+        // pure self-poll in about three. The counters still cover this route
+        // (that is what counters are for); the ring exists to answer "what else
+        // just happened", so its own read is precisely the event worth
+        // excluding. Verified rather than assumed -- see
+        // `the_consoles_own_poll_does_not_flush_the_ring` below.
+        if key == "/api/metrics" {
+            return;
+        }
         if g.recent.len() >= MAX_RECENT {
             g.recent.pop_front();
         }
@@ -854,6 +872,44 @@ mod tests {
     /// The console panel is "what just happened", so the newest access has to
     /// be the first row. The two entries differ in IP and status because a ring
     /// of identical records cannot tell the two orderings apart.
+    /// `/admin` is the only route served without a session, so it must be
+    /// visible on its own line rather than folded into the catch-all: "someone
+    /// is probing the login page" and "the browser fetched some assets" are not
+    /// the same event, and at ~50 KB a hit it would also swamp the static byte
+    /// count.
+    #[test]
+    fn the_unauthenticated_console_route_is_not_folded_into_the_catch_all() {
+        assert_eq!(normalise_route("/admin"), "/admin");
+        let m = Metrics::new(tmpdir("adminroute"));
+        m.record("/admin", 200, 52_776);
+        m.record("/some/spa/deep/link", 200, 300);
+        let s = m.snapshot_json(1, 1);
+        assert_eq!(s["routes"]["/admin"]["total"], 1);
+        assert_eq!(s["routes"]["/admin"]["bytes"], 52_776);
+        assert_eq!(
+            s["routes"]["/static"]["bytes"], 300,
+            "the console must not pollute the static-asset byte count"
+        );
+    }
+
+    /// Leaving the console open must not erase the answer it is there to give.
+    #[test]
+    fn the_consoles_own_poll_does_not_flush_the_ring() {
+        let m = Metrics::new(tmpdir("pollring"));
+        m.record_access("/api/session", 200, 10, "203.0.113.9");
+        // More polls than the ring can hold -- the old behaviour left nothing
+        // but polls behind.
+        for _ in 0..(MAX_RECENT * 2) {
+            m.record_access("/api/metrics", 200, 4000, "203.0.113.9");
+        }
+        let s = m.snapshot_json(1, 1);
+        let recent = s["recent"].as_array().unwrap();
+        assert_eq!(recent.len(), 1, "only the real event should be in the ring");
+        assert_eq!(recent[0]["route"], "/api/session");
+        // ...while the counters still see every poll.
+        assert_eq!(s["routes"]["/api/metrics"]["total"], (MAX_RECENT * 2) as u64);
+    }
+
     #[test]
     fn recent_accesses_are_newest_first() {
         let m = Metrics::new(tmpdir("recent-order"));

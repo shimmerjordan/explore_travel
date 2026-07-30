@@ -73,6 +73,7 @@ impl Config {
         let mut cfg = Config::default();
 
         let path = env::var("EJ_CONFIG").unwrap_or_else(|_| "/data/server.json".into());
+        let mut had_file = true;
         match fs::read_to_string(&path) {
             Ok(text) => {
                 cfg = serde_json::from_str(&text).map_err(|e| {
@@ -88,7 +89,7 @@ fails loudly instead of being silently ignored"
                     format!("parse {path}: {e}{hint}")
                 })?;
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => had_file = false,
             Err(e) => return Err(format!("read {path}: {e}")),
         }
 
@@ -140,6 +141,29 @@ fails loudly instead of being silently ignored"
                      using {}s",
                     cfg.metrics_interval_secs
                 ),
+            }
+        }
+
+        // Deliberately after the env overrides: `data_dir` is only final here,
+        // and checking earlier would look for the legacy file in the built-in
+        // default directory rather than the one actually in use.
+        //
+        // Running on defaults is normal and not an error. But one shape of
+        // "normal" is actually a silently-ignored upgrade: `<data_dir>/config.json`
+        // USED to be this settings file, and now holds the encrypted user
+        // config. Someone upgrading has their old settings sitting right there
+        // being ignored, and without this line nothing anywhere says so.
+        if !had_file {
+            let legacy = std::path::Path::new(&cfg.data_dir).join("config.json");
+            if legacy.exists() {
+                eprintln!(
+                    "WARN: no settings file at {path}, so built-in defaults are in use \
+                     (still overridden by any EJ_* variables). Note that {} exists: in older \
+                     versions THAT was the settings file, and it is now where the encrypted \
+                     user config lives. If it still holds your server settings, rename it to \
+                     server.json and restart.",
+                    legacy.display()
+                );
             }
         }
 

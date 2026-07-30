@@ -8,7 +8,7 @@
 > The **same Flutter codebase** also ships a read-only **web "memory" version** for
 > reminiscing in the browser, with optional per-user login backed by a tiny self-hosted
 > **NAS backend** (Rust + Docker) that stores only your settings inside a
-> **zero-knowledge encrypted vault** — never your raw travel data.
+> **encrypted config store** on a service you run — never your raw travel data.
 
 ![flutter](https://img.shields.io/badge/Flutter-3.32+-02569B?logo=flutter)
 ![platforms](https://img.shields.io/badge/platforms-Android%20%7C%20iOS%20%7C%20Linux%20%7C%20Web-success)
@@ -42,7 +42,7 @@
 | 🐞 Debug mode | Hidden — tap version label on home 10× · log buffer (ring of 1000) with filter/share · fog & recording diagnostics · simulator panel in release builds · "fire test reveal" button |
 | 💾 Portability | Everything in one SQLite + a `journal_media/` folder. Schema v4 with UUIDs. Standard zip backups. No vendor lock-in. |
 | 🔒 Security | Credentials (PATs, tokens, WebDAV password, p2p passphrase) live in **flutter_secure_storage** → Android Keystore / iOS Keychain · backup exports **strip secret fields** so leaked archives don't leak creds · runtime HTTP guard refuses **cleartext to non-private hosts** (LAN HTTP still works) · no analytics, no remote logging, no telemetry, no third-party SDK ad/analytics call |
-| 🌐 Web 回忆版 | Same codebase built for the browser as a **read-only** display/reminiscing app · drift `WasmDatabase` (IndexedDB) · import a backup zip → relive your map, fog, journal, globe · optional **login** via a self-hosted Rust+Docker **NAS backend** that stores *only settings* inside a **zero-knowledge vault** (your data stays on your own WebDAV/GitHub) · PWA-installable · debug-mode backdoor unlocks editing · [deploy guide](docs/web-display-deploy.md) |
+| 🌐 Web 回忆版 | Same codebase built for the browser as a **read-only** display/reminiscing app · drift `WasmDatabase` (IndexedDB) · import a backup zip → relive your map, fog, journal, globe · optional **login** via a self-hosted Rust+Docker service (`web-front`) that stores *only settings*, encrypted at rest (your data stays on your own WebDAV/GitHub) · PWA-installable · debug-mode backdoor unlocks editing · [deploy guide](docs/web-display-deploy.md) |
 
 ---
 
@@ -169,7 +169,8 @@ into a zip handed to the share sheet.
         web build (read-only) ┄┄┄ optional ┄┄┄┐
 ┌─────────────────────────────────────────────────────────────┐
 │  NAS backend (Rust + Docker, self-hosted, tiny)             │
-│  • argon2 login + JWT  • stores ONLY a zero-knowledge vault  │
+│  • argon2 single-admin login  • stores ONLY an encrypted   │
+│    config blob — never your travel data                    │
 │  • SSRF-guarded WebDAV proxy   (never sees your raw data)    │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -177,7 +178,7 @@ into a zip handed to the share sheet.
 **Backendless by default.** On mobile/desktop the only "server" you talk to is the WebDAV
 provider of your choice (Nextcloud, AList, Seafile, 坚果云, jianguoyun, infinicloud, your own
 dav.sh, …). The **NAS backend is optional** and exists only so the web version can log users
-in and remember *their settings* (sync URLs, keys) inside a zero-knowledge vault — your actual
+in and remember *their settings* (sync URLs, keys), encrypted at rest — your actual
 travel data never lives on it. See the [Web memory version](#web-memory-version-web-回忆版) below.
 
 ---
@@ -199,9 +200,10 @@ import → display.
 
 ### Optional NAS backend (Rust + Docker)
 
-Login & per-user isolation are served by a tiny self-hosted backend in [`web-front/`](web-front/)
-(tiny_http + rusqlite + argon2 + JWT). Its **only** job is to remember each user's *settings*
-— sync URLs, provider keys — inside a **zero-knowledge encrypted vault**:
+Login is served by a tiny self-hosted service in [`web-front/`](web-front/)
+(tiny_http + argon2 + chacha20poly1305 + ureq — no async runtime, no database). Its job is to
+remember your *settings* — sync URLs, provider keys — **encrypted at rest**, and to serve the web
+build plus an operator console:
 
 - **One admin account, no signup.** Argon2id verifies the password; the session is a table in
   the server's memory (a restart invalidates every session), not a JWT.
@@ -483,12 +485,13 @@ lib/
     ├── permissions/  Background-location walkthrough
     ├── settings/     Everything configurable
     ├── debug/        Hidden log buffer + simulator
-    ├── auth/         Web login / register (NAS vault)
+    ├── auth/         Web admin login gate
     └── about/        Version, license, contributors
 
-services/sync/      SyncStorage abstraction: WebDAV · GitHub · OneDrive · NAS
-services/vault/     Zero-knowledge settings vault (PBKDF2 → HKDF → AES-GCM)
-web-front/          Optional Rust + Docker backend (auth + vault + WebDAV proxy)
+services/sync/      SyncStorage abstraction: WebDAV · GitHub · OneDrive
+services/vault/     Admin login, roaming config payload, config sync controller
+web-front/          Optional Rust + Docker service (admin login + encrypted config
+                    + console + static hosting + read-only WebDAV proxy)
 ```
 
 Organised so a single feature lives in one folder.
@@ -513,7 +516,7 @@ Organised so a single feature lives in one folder.
 - [x] Offline map-tile cache
 - [x] Quill inline image embed
 - [x] Read-only web "memory" version (import → display, PWA)
-- [x] Zero-knowledge settings vault + optional Rust/Docker NAS backend
+- [x] Encrypted config store + optional Rust/Docker `web-front` (console / export / read-only WebDAV proxy)
 - [x] CI: build web on push → `web-build` branch → Vercel / Cloudflare Pages
 - [ ] Mobile-side "push settings to NAS" UI (web pull loop is in place)
 - [ ] Apple Watch / Wear OS companion

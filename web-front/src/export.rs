@@ -272,8 +272,60 @@ mod tests {
         assert!(v["_unparseable"].as_str().unwrap().contains("not json"));
     }
 
-    /// The cross-language copy is the weak point, so at least pin that the
-    /// list covers the credentials the roaming payload is known to carry.
+    /// The real guard: read the Dart constant this list is a copy of, and
+    /// require them to agree.
+    ///
+    /// Without this, the two sides drift silently and the drift is a *cleartext
+    /// leak*: a credential added to `kVaultSecretKeys` starts roaming
+    /// immediately (the payload is a union), the Dart-side tests stay green
+    /// (their assertion is about the difference from `deviceOnlySecretKeys`,
+    /// which still holds), and this scrubber has never heard of the key -- so
+    /// the download labelled "scrubbed" hands it over in the clear. Demonstrated
+    /// on the running server before this test existed: pushing an unknown
+    /// credential key came back verbatim from `?what=config`.
+    ///
+    /// The path is relative to this file and resolved at COMPILE time, so
+    /// renaming or moving the Dart file breaks the build rather than quietly
+    /// disabling the check.
+    #[test]
+    fn secret_list_matches_the_dart_constant_it_copies() {
+        const DART: &str =
+            include_str!("../../lib/services/backup/backup_service.dart");
+        let body = DART
+            .split_once("const kVaultSecretKeys = <String>{")
+            .expect("kVaultSecretKeys moved or was renamed in the Dart source")
+            .1
+            .split_once("};")
+            .expect("unterminated kVaultSecretKeys literal")
+            .0;
+        // Quoted entries only: the literal carries comments, and a comment
+        // mentioning a key name must not count as declaring one.
+        let mut dart: Vec<&str> = body
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .flat_map(|l| l.split('\'').skip(1).step_by(2))
+            .collect();
+        dart.sort_unstable();
+        let mut rust: Vec<&str> = SECRET_KEYS.to_vec();
+        rust.sort_unstable();
+
+        assert!(!dart.is_empty(), "parsed nothing from the Dart literal");
+        let only_dart: Vec<_> = dart.iter().filter(|k| !rust.contains(k)).collect();
+        let only_rust: Vec<_> = rust.iter().filter(|k| !dart.contains(k)).collect();
+        assert!(
+            only_dart.is_empty(),
+            "these credentials are scrubbed from backups but NOT from the server's \
+             \"scrubbed\" export -- add them to SECRET_KEYS: {only_dart:?}"
+        );
+        assert!(
+            only_rust.is_empty(),
+            "SECRET_KEYS names keys the Dart authority does not: {only_rust:?} \
+             (harmless today, but it means one side moved)"
+        );
+    }
+
+    /// Kept alongside the comparison above as a floor: if the Dart parse ever
+    /// silently yields an empty or wrong set, this still fails.
     #[test]
     fn secret_list_covers_the_known_roaming_credentials() {
         for k in [

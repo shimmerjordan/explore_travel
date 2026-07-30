@@ -99,17 +99,60 @@ pub fn save(dir: &Path, key: &[u8; 32], plaintext: &[u8]) -> Result<(), String> 
 /// Read and decrypt `dir/config.json`.
 ///
 /// `Ok(None)` means "no config has ever been saved" -- a normal, common
-/// state, not an error. Every other failure collapses into `Err(DECRYPT_ERR)`
-/// (see that constant's doc comment for why).
+/// state, not an error. A cryptographic failure collapses into
+/// `Err(DECRYPT_ERR)` (see that constant's doc comment for why it is
+/// deliberately undifferentiated).
+///
+/// The ONE case pulled out of that collapse is a file that is not an envelope
+/// at all, and it is pulled out because the generic message actively misleads
+/// there. Before this server existed in its current shape, `/data/config.json`
+/// was the *server settings* file; an upgraded deployment can still have one
+/// sitting at that path. Reporting "could not be decrypted with the current
+/// password -- overwrite it with a fresh PUT /api/config" against that file
+/// tells the operator to run the one command that destroys it, for a problem
+/// that is not the one they have. So: no `ct_b64` field, no decryption was
+/// ever attempted, and the error says which file it actually is.
 pub fn load(dir: &Path, key: &[u8; 32]) -> Result<Option<Vec<u8>>, String> {
     let path = dir.join(FILE_NAME);
     let text = match fs::read_to_string(&path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err(DECRYPT_ERR.into()),
+        Err(e) => {
+            eprintln!("ERROR: cannot read {}: {e}", path.display());
+            return Err(DECRYPT_ERR.into());
+        }
     };
+    if !looks_like_envelope(&text) {
+        eprintln!(
+            "ERROR: {} is not an encrypted config envelope (no ct_b64 field). If this \
+             deployment was upgraded, it is probably the OLD server settings file -- that \
+             used to live at this exact path. Rename it to server.json and restart; do NOT \
+             overwrite it via PUT /api/config, that would destroy it.",
+            path.display()
+        );
+        return Err(NOT_AN_ENVELOPE.into());
+    }
     decrypt(&text, key).map(Some).map_err(|()| DECRYPT_ERR.to_string())
 }
+
+/// Cheap structural test, deliberately NOT a full parse: the question is only
+/// "was this file ever written by `save`", and every envelope `save` writes has
+/// this field. A truncated or tampered envelope still has it and must keep
+/// going down the undifferentiated crypto path.
+fn looks_like_envelope(text: &str) -> bool {
+    text.contains("ct_b64")
+}
+
+/// Distinct from [`DECRYPT_ERR`] on purpose -- see `load`.
+///
+/// It is safe for this one to be specific: it is reachable only for a file that
+/// was never an envelope, so it reveals nothing about a key, a password, or any
+/// ciphertext. Saying "wrong file" out loud is what keeps the operator from
+/// deleting the right one.
+pub const NOT_AN_ENVELOPE: &str = "the file at <data_dir>/config.json is not an encrypted \
+config envelope. If this deployment was upgraded from an older version, it is most likely the \
+old SERVER SETTINGS file (that used to be its path): rename it to server.json and restart. \
+Do NOT push a config over it -- that would overwrite it.";
 
 /// Parse the envelope, base64-decode both fields, and AEAD-decrypt. Returns
 /// `Err(())` -- the unit type, not a `String` -- ON PURPOSE: it structurally

@@ -375,6 +375,11 @@ fn bucket_for(method: &str, path: &str) -> (&'static str, u32) {
         ("POST", "/api/session") | ("PUT", "/api/password") => ("auth", 10),
         (_, p) if p.starts_with("/api/") => ("api", 120),
         ("GET", "/healthz") => ("healthz", 120),
+        // The console shell is the ONE route answered without a session, and it
+        // is ~50 KB of compiled-in HTML. Left in the catch-all it would inherit
+        // 1200/min, i.e. roughly 60 MB/min of unauthenticated egress per IP.
+        // A human opens this page a handful of times; a scanner does not.
+        ("GET", "/admin") => ("console", 60),
         (_, p) if p.starts_with("/proxy/") => ("proxy", 600),
         ("GET", _) => ("static", 1200),
         _ => ("other", 60),
@@ -1525,6 +1530,12 @@ mod tests {
         // otherwise a page-load storm could starve the health probe, or
         // static traffic could starve the proxy.
         assert_eq!(bucket_for("GET", "/healthz").0, "healthz");
+        // The unauthenticated console page gets its own, deliberately tight
+        // bucket -- not the catch-all's 1200/min. It is ~50 KB of compiled-in
+        // HTML served with no session, so cheap repetition is pure egress.
+        let (cb, cl) = bucket_for("GET", "/admin");
+        assert_eq!(cb, "console");
+        assert!(cl <= 120, "an unauthenticated 50 KB page must not be cheap to hammer");
         assert_eq!(bucket_for("GET", "/proxy/gh/a/b/c/d").0, "proxy");
         assert_eq!(bucket_for("GET", "/proxy/url").0, "proxy");
         assert_eq!(bucket_for("GET", "/index.html").0, "static");

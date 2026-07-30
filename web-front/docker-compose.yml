@@ -13,7 +13,7 @@ services:
       - "48080:48080"
     volumes:
       # WHERE THE DATA LIVES — one variable, two modes. Holds admin.json (and,
-      # from Task 8 onward, the encrypted config blob).
+      # and the encrypted user config blob).
       #
       #   unset (default) → resolves to `ejdata`, a Docker NAMED volume.
       #     Zero host setup: a named volume inherits the image's nonroot-owned
@@ -40,6 +40,19 @@ services:
       EJ_PROXY_ENABLED: "${EJ_PROXY_ENABLED:-false}"
       EJ_PROXY_ALLOW_HOSTS: "${EJ_PROXY_ALLOW_HOSTS:-}"
       EJ_TOKEN_TTL_SECS: "${EJ_TOKEN_TTL_SECS:-3600}"
+      # 经 frp / Cloudflare / 任何反代暴露时**必须**设为 1，否则所有访客共享
+      # 同一个限流桶（限流是按客户端 IP 分桶的，不开这个的话看到的 IP 永远是
+      # 反代自己）。直接暴露端口时保持 0。
+      EJ_TRUST_PROXY: "${EJ_TRUST_PROXY:-0}"
+      # 静态产物目录。镜像里已经带了一份 web 产物；挂一个同名目录可以覆盖它
+      # （例如临时换一个前端版本而不重建镜像）。
+      EJ_WEB_ROOT: "${EJ_WEB_ROOT:-/web}"
+      # 指标采样间隔（秒，上限 86400）。落盘是每 10 个采样点一次，所以调小它
+      # 会让机械盘更频繁地转。
+      EJ_METRICS_INTERVAL_SECS: "${EJ_METRICS_INTERVAL_SECS:-60}"
+      # 工作线程数。服务是 thread-per-request 的，见 README 的威胁模型一节：
+      # 无论调多大都要置于带读写超时的反代之后。
+      EJ_WORKERS: "${EJ_WORKERS:-8}"
 
 volumes:
   # Only used in the default (named-volume) mode; ignored when EJ_DATA_PATH

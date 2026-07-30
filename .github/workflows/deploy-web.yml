@@ -29,6 +29,7 @@ on:
     paths:
       - 'lib/**'
       - 'web/**'
+      - 'assets/**'   # 字体 / 贴图也是 Flutter 构建的输入
       - 'website/**'
       - 'pubspec.yaml'
       - 'pubspec.lock'
