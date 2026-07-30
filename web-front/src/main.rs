@@ -3,6 +3,7 @@ mod atomic_file;
 mod auth;
 mod config;
 mod config_store;
+mod dashboard;
 mod metrics;
 mod proxy;
 mod session;
@@ -95,8 +96,7 @@ struct AppState {
     /// `Instant` rather than a wall-clock time because it is monotonic: a
     /// clock correction (NTP step on a NAS that just got its network back)
     /// must not make uptime jump or go negative.
-    // The console's metrics endpoint is what reads this back.
-    #[allow(dead_code)]
+    // The console's metrics endpoint reads this back as `uptime_secs`.
     started: Instant,
 }
 
@@ -628,6 +628,13 @@ fn route(state: &AppState, req: &Request, method: &str, path: &str, query: &str,
         ("PUT", "/api/password") => handle_change_password(state, req, body),
         ("GET", "/api/config") => handle_get_config(state, req),
         ("PUT", "/api/config") => handle_put_config(state, req, body),
+        ("GET", "/api/metrics") => handle_metrics(state, req),
+        // The console is a page, so it deliberately does NOT require a session
+        // to be served -- it renders its own login form and then talks to the
+        // session-gated endpoints. Serving the shell unauthenticated leaks
+        // nothing (it is a constant compiled into the binary) and is what lets
+        // an operator reach the login form at all.
+        ("GET", "/admin") => no_cache_html(dashboard::DASHBOARD_HTML),
         ("GET", p) if p.starts_with("/proxy/gh/") => {
             guard_proxy(state, req, || handle_proxy_gh(state, req, &p["/proxy/gh/".len()..]))
         }
@@ -1062,6 +1069,42 @@ fn handle_get_config(state: &AppState, req: &Request) -> Out {
 }
 
 /// Mark a response as never-cacheable. See `handle_get_config`.
+/// `GET /admin`: the operator console shell.
+///
+/// `no-cache` rather than a long `max-age`: the page is compiled into the
+/// binary, so its version is the image's version, and a stale copy in the
+/// browser after a container upgrade would be a console that disagrees with
+/// the `/api/metrics` shape it is reading. Revalidation is one request against
+/// a host the operator is already talking to.
+fn no_cache_html(html: &str) -> Out {
+    Out::bytes(200, "text/html; charset=utf-8", html.as_bytes().to_vec())
+        .with("Cache-Control", "no-cache")
+        .with("X-Content-Type-Options", "nosniff")
+}
+
+/// `GET /api/metrics`: the console's data source.
+///
+/// `no_store` is not optional here: the snapshot carries the recent-access
+/// ring, and that ring carries client IPs. Letting it into a shared browser
+/// cache would persist visitor addresses on disk for exactly the surface whose
+/// whole point is that they stay in memory (see `metrics::snapshot_json`).
+///
+/// `is_default_password` rides along rather than living on its own endpoint so
+/// the console cannot show a stale "all good" after a password change: every
+/// poll re-reads it.
+fn handle_metrics(state: &AppState, req: &Request) -> Out {
+    if !has_valid_session(state, req) {
+        return no_store(Out::json(401, json!({"error":"unauthorized"})));
+    }
+    let uptime = state.started.elapsed().as_secs();
+    let mut doc = state.metrics.snapshot_json(uptime, metrics::rss_mb());
+    let is_default = state.admin.lock().unwrap().is_default;
+    if let Some(obj) = doc.as_object_mut() {
+        obj.insert("is_default_password".into(), json!(is_default));
+    }
+    no_store(Out::json(200, doc))
+}
+
 fn no_store(out: Out) -> Out {
     out.with("Cache-Control", "no-store")
         .with("X-Content-Type-Options", "nosniff")

@@ -1,0 +1,1243 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="robots" content="noindex, nofollow">
+<!-- Empty data URI: keeps the browser from asking for /favicon.ico, which
+     would 404 and then show up in the very access ring shown further down,
+     looking like a real client error. No external request either. -->
+<link rel="icon" href="data:,">
+<title>服务台 · explore_journal</title>
+<style>
+/* ═══════════════════════════════════════════════════════════════════════════
+   Tokens.
+
+   The palette is the app's own Material 3 dark theme (see DESIGN.md), not a
+   second identity invented for the server side: this page is the same product
+   viewed from the other end of the wire, and an operator who has the phone app
+   in one hand should recognise it. Contrast ratios below are measured against
+   --bg first, --surface second; every text pair is >= 4.5:1.
+   ═══════════════════════════════════════════════════════════════════════════ */
+:root {
+  --bg: #0F1923;            /* dark scaffold                                  */
+  --surface: #1A2733;       /* dark card                                      */
+  --ink: #E6EDF3;           /* body text                        15.02 / 12.86 */
+  --ink-dim: #C6D2DE;       /* secondary text                   11.55 /  9.90 */
+  --muted: #93A4B4;         /* labels, units, placeholders,
+                               disabled text                     6.94 /  5.94 */
+  --accent: #26A69A;        /* seed teal: primary action only     5.92 /  5.07 */
+  --accent-bright: #4DD0C4; /* series stroke, focus ring          9.41 /  8.06 */
+  --warn: #F0B429;          /* default-password banner            9.52 /  8.15 */
+  --danger: #FF6B6B;        /* 5xx, non-zero credential failures  6.39 /  5.48 */
+
+  /* Two line colours, because elevation is 0 everywhere and --surface sits
+     only 1.17:1 above --bg -- without a border the panels merge into one
+     field. Both were computed rather than eyeballed:
+
+       --line        2.06:1 on --bg, 1.77:1 on --surface. Decorative
+                     separation only; the panel is also carried by its fill,
+                     so WCAG 1.4.11's 3:1 does not bind here.
+       --line-strong 3.87:1 on --bg, 3.32:1 on --surface. Used wherever the
+                     border IS the control -- inputs, buttons -- which is
+                     exactly what 1.4.11 asks >= 3:1 for. */
+  --line: #3A4E60;
+  --line-strong: #63788A;
+
+  /* Fixed rem scale, ratio 1.125 throughout. Deliberately not `clamp()`:
+     nobody reads a server console on a projector, and fluid type would only
+     make the dense numbers wobble between two windows on the same screen. */
+  --fs-100: 0.79rem;
+  --fs-200: 0.889rem;
+  --fs-300: 1rem;
+  --fs-400: 1.125rem;
+  --fs-500: 1.266rem;
+
+  --sp-1: 0.25rem;
+  --sp-2: 0.5rem;
+  --sp-3: 0.75rem;
+  --sp-4: 1rem;
+  --sp-5: 1.5rem;
+  --sp-6: 2rem;
+  --sp-7: 3rem;
+
+  /* DESIGN.md's three-step radius scale: chip < control < panel. */
+  --r-chip: 10px;
+  --r-control: 12px;
+  --r-panel: 16px;
+
+  /* One UI family (a system stack, which is also why this page needs no
+     network) plus one monospace family for numbers, routes and addresses. */
+  --ui: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+        "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono",
+          monospace;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+[hidden] { display: none !important; }
+
+html { background: var(--bg); }
+body {
+  margin: 0 auto;
+  padding: var(--sp-5) var(--sp-4) var(--sp-7);
+  max-width: 62rem;
+  background: var(--bg);
+  color: var(--ink);
+  font: var(--fs-300)/1.55 var(--ui);
+  -webkit-text-size-adjust: 100%;
+}
+
+/* Skip link. Positioned, and first in the DOM, so it paints over the header
+   without a single z-index in this file -- there are no stacking magic
+   numbers to get wrong. */
+.skip {
+  position: absolute;
+  left: var(--sp-4); top: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-control);
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--accent-bright);
+  transform: translateY(-200%);
+}
+.skip:focus-visible { transform: none; outline: 2px solid var(--accent-bright); outline-offset: 2px; }
+
+/* ── header: identity + the compact process line ───────────────────────── */
+.top-row {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: var(--sp-3); flex-wrap: wrap;
+}
+h1 {
+  margin: 0;
+  font-size: var(--fs-500); font-weight: 600; letter-spacing: 0.01em;
+}
+h1 .h1-sub { color: var(--muted); font-weight: 400; font-size: var(--fs-200); }
+
+/* Process identity is background information, so it is one dense line of
+   small type rather than a row of hero-metric cards: uptime and RSS answer
+   "is this the process I think it is", which nobody needs in 32px digits. */
+.statusline {
+  margin: var(--sp-3) 0 0;
+  display: flex; flex-wrap: wrap; align-items: baseline;
+  gap: var(--sp-1) var(--sp-3);
+  font-size: var(--fs-200);
+}
+.stat { display: inline-flex; align-items: baseline; gap: var(--sp-2); }
+.stat-k { color: var(--muted); font-size: var(--fs-100); }
+.stat-v { color: var(--ink); font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.sep { color: var(--line-strong); }
+
+.note {
+  margin: var(--sp-2) 0 0;
+  max-width: 54ch;
+  color: var(--muted);
+  font-size: var(--fs-100);
+}
+
+/* ── panels ────────────────────────────────────────────────────────────── */
+.card {
+  margin-top: var(--sp-5);
+  padding: var(--sp-5) var(--sp-5) var(--sp-4);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-panel);
+}
+h2 {
+  margin: 0;
+  font-size: var(--fs-400); font-weight: 600;
+}
+.hint {
+  margin: var(--sp-1) 0 var(--sp-4);
+  color: var(--muted); font-size: var(--fs-100);
+}
+.footnote {
+  margin: var(--sp-4) 0 0;
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--line);
+  color: var(--ink-dim); font-size: var(--fs-100);
+}
+.footnote .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+/* An empty panel explains what would fill it and what to do to make that
+   happen -- "暂无数据" would tell an operator who just started the container
+   nothing at all. */
+.empty {
+  margin: 0;
+  padding: var(--sp-4);
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--r-chip);
+  color: var(--ink-dim); font-size: var(--fs-200);
+  max-width: 60ch;
+}
+
+/* ── data tables ───────────────────────────────────────────────────────── */
+.dt { width: 100%; border-collapse: collapse; font-size: var(--fs-200); }
+.dt caption { text-align: left; }
+.dt th, .dt td {
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--line);
+  text-align: right;
+  white-space: nowrap;
+}
+.dt th {
+  color: var(--muted); font-size: var(--fs-100); font-weight: 500;
+  border-bottom-color: var(--line-strong);
+}
+.dt th:first-child, .dt td:first-child { text-align: left; padding-left: 0; }
+.dt th:last-child, .dt td:last-child { padding-right: 0; }
+.dt tbody tr:last-child td { border-bottom: 0; }
+/* Density is allowed here -- this is a product console, and the route table
+   is the actual subject of the page. Tabular figures so columns of numbers
+   line up rather than dancing by digit width. */
+.num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.route { font-family: var(--mono); color: var(--ink); }
+.dt tfoot td {
+  border-top: 1px solid var(--line-strong);
+  border-bottom: 0;
+  padding-top: var(--sp-3);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+/* State-driven emphasis, not decoration: a zero stays quiet. A console with a
+   permanently red "0" trains its reader to ignore red. */
+.zero { color: var(--muted); }
+.bad { color: var(--danger); }
+.dim { color: var(--ink-dim); }
+
+/* One-shot tint when a polled value actually changes, so a refresh reads as
+   "this number moved" instead of repainting the page. Only changed cells are
+   touched at all -- see setText(). */
+@keyframes bump { from { color: var(--accent-bright); } to { color: inherit; } }
+.bump { animation: bump 200ms ease-out; }
+
+/* ── sparkline ─────────────────────────────────────────────────────────── */
+.spark {
+  display: block; width: 100%; height: 4.5rem;
+  border: 1px solid var(--line);
+  border-radius: var(--r-chip);
+  background: var(--bg);
+}
+.spark-req { fill: none; stroke: var(--accent-bright); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.spark-err { fill: none; stroke: var(--danger); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+figure { margin: 0; }
+figcaption { margin-top: var(--sp-2); }
+
+/* ── forms and buttons: seven states each ──────────────────────────────── */
+.field { display: block; margin-bottom: var(--sp-3); }
+.field > .label {
+  display: block; margin-bottom: var(--sp-1);
+  color: var(--ink-dim); font-size: var(--fs-100);
+}
+.input {
+  width: 100%; max-width: 24rem;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--line-strong);       /* 1: default                  */
+  border-radius: var(--r-control);
+  background: var(--bg);
+  color: var(--ink);
+  font: var(--fs-300)/1.4 var(--ui);
+  transition: border-color 180ms ease, background-color 180ms ease;
+}
+/* Placeholders stay at --muted (5.94:1 on the field) rather than fading to
+   an unreadable grey -- a hint nobody can read is not a hint. */
+.input::placeholder { color: var(--muted); opacity: 1; }
+.input:hover:not(:disabled) { border-color: var(--muted); }                     /* 2 */
+.input:focus-visible {                                                          /* 3 */
+  outline: 2px solid var(--accent-bright); outline-offset: 1px;
+  border-color: var(--accent-bright);
+}
+.input:active:not(:disabled) { background: var(--surface); }                     /* 4 */
+/* Disabled dims via explicit colours, never `opacity` -- opacity would put
+   the text at an unknown contrast ratio instead of the 5.94:1 --muted is. */
+.input:disabled { color: var(--muted); border-color: var(--line); cursor: not-allowed; } /* 5 */
+.input[aria-busy="true"] { border-style: dashed; border-color: var(--accent-bright); }   /* 6 */
+.input[aria-invalid="true"] { border-color: var(--danger); }                     /* 7 */
+
+.err {
+  margin: calc(var(--sp-1) * -1) 0 0;
+  color: var(--danger); font-size: var(--fs-100);
+}
+
+.btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-height: 2.75rem;                        /* >= 44px touch target        */
+  padding: var(--sp-2) var(--sp-4);
+  border: 1px solid var(--line-strong);       /* 1: default                  */
+  border-radius: var(--r-control);
+  background: var(--surface);
+  color: var(--ink);
+  font: 500 var(--fs-200)/1.2 var(--ui);
+  cursor: pointer;
+  position: relative;
+  transition: border-color 180ms ease, background-color 180ms ease, color 180ms ease;
+}
+.btn:hover:not(:disabled) { border-color: var(--muted); color: var(--ink); }     /* 2 */
+.btn:focus-visible { outline: 2px solid var(--accent-bright); outline-offset: 2px; } /* 3 */
+.btn:active:not(:disabled) { background: var(--bg); }                           /* 4 */
+.btn:disabled { color: var(--muted); border-color: var(--line); cursor: not-allowed; } /* 5 */
+/* Loading: the label says what is happening and a hairline travels under the
+   button. No spinner glyph, and nothing spins inside a content area. */
+.btn[aria-busy="true"] { color: var(--ink-dim); cursor: progress; }              /* 6 */
+.btn[aria-busy="true"]::after {
+  content: ""; position: absolute; left: var(--sp-3); right: var(--sp-3); bottom: 4px;
+  height: 2px; border-radius: 2px;
+  background: var(--accent-bright);
+  transform-origin: left center;
+  animation: sweep 900ms ease-in-out infinite;
+}
+@keyframes sweep {
+  0%   { transform: scaleX(0.1) translateX(0); }
+  50%  { transform: scaleX(1) translateX(0); }
+  100% { transform: scaleX(0.1) translateX(900%); }
+}
+.btn[data-state="error"] { border-color: var(--danger); color: var(--danger); }   /* 7 */
+
+/* The one primary action per view gets the seed teal. Nothing decorative
+   does. */
+.btn-primary { border-color: var(--accent); color: var(--accent); }
+.btn-primary:hover:not(:disabled) { border-color: var(--accent-bright); color: var(--accent-bright); }
+.btn-quiet { border-color: var(--line); color: var(--ink-dim); }
+.btn-quiet:hover:not(:disabled) { border-color: var(--line-strong); color: var(--ink); }
+
+.btn-row { display: flex; flex-wrap: wrap; gap: var(--sp-3); align-items: center; }
+
+/* ── alerts ────────────────────────────────────────────────────────────── */
+.alert {
+  margin: var(--sp-3) 0 0;
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--danger);
+  border-radius: var(--r-chip);
+  color: var(--ink);
+  font-size: var(--fs-200);
+}
+.notice {
+  margin: 0 0 var(--sp-4);
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--accent);
+  border-radius: var(--r-chip);
+  color: var(--ink-dim);
+  font-size: var(--fs-200);
+}
+
+/* ── default-password banner: the change form lives inside it ──────────── */
+.banner {
+  margin-top: var(--sp-5);
+  padding: var(--sp-4) var(--sp-5);
+  background: var(--surface);
+  /* A 1px border all the way round, not a fat coloured stripe down one
+     side. */
+  border: 1px solid var(--warn);
+  border-radius: var(--r-panel);
+}
+.banner h2 { color: var(--warn); font-size: var(--fs-400); }
+.banner p { margin: var(--sp-2) 0 0; max-width: 62ch; font-size: var(--fs-200); color: var(--ink-dim); }
+.banner .lede { color: var(--ink); }
+.banner form { margin-top: var(--sp-4); }
+
+/* ── loading skeleton ──────────────────────────────────────────────────── */
+.skel { background: var(--line); border-radius: var(--r-chip); }
+.skel-line { height: 0.9rem; margin-bottom: var(--sp-3); }
+.skel-panel { height: 10rem; margin-top: var(--sp-5); border-radius: var(--r-panel); }
+.skel-wrap { animation: breathe 1600ms ease-in-out infinite; }
+@keyframes breathe { 0%, 100% { opacity: 0.55; } 50% { opacity: 0.9; } }
+
+/* ── motion opt-out: every animation above has a still equivalent ──────── */
+@media (prefers-reduced-motion: reduce) {
+  * { transition-duration: 1ms !important; }
+  .bump, .skel-wrap, .btn[aria-busy="true"]::after { animation: none !important; }
+  .skel-wrap { opacity: 0.75; }
+  /* The busy hairline stops moving but stays visible, so "in flight" is
+     still legible without motion. */
+  .btn[aria-busy="true"]::after { transform: scaleX(1); }
+}
+
+/* ── narrow screens: tables restack instead of scrolling sideways ───────
+   At <= 35rem the seven route columns cannot fit any legible type, and a
+   horizontally scrolling table hides columns behind a gesture nobody
+   discovers. Each row becomes its own labelled block instead: same data,
+   no overflow, no hidden axis. */
+@media (max-width: 35rem) {
+  body { padding-left: var(--sp-3); padding-right: var(--sp-3); }
+  .card { padding: var(--sp-4) var(--sp-4) var(--sp-3); }
+
+  .dt thead {
+    position: absolute; width: 1px; height: 1px;
+    overflow: hidden; clip-path: inset(50%);
+  }
+  .dt, .dt tbody, .dt tfoot { display: block; }
+  .dt tr {
+    display: block;
+    padding: var(--sp-3);
+    margin-bottom: var(--sp-3);
+    border: 1px solid var(--line);
+    border-radius: var(--r-chip);
+  }
+  .dt tbody tr:last-child { margin-bottom: 0; }
+  .dt td {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: var(--sp-3);
+    padding: 2px 0; border: 0;
+    text-align: right; white-space: normal;
+  }
+  .dt td::before {
+    content: attr(data-label);
+    color: var(--muted); font-size: var(--fs-100);
+    text-align: left;
+  }
+  .dt td.lead {
+    display: block; text-align: left;
+    margin-bottom: var(--sp-2);
+    padding-bottom: var(--sp-2);
+    border-bottom: 1px solid var(--line);
+    overflow-wrap: anywhere;
+  }
+  .dt td.lead::before { content: none; }
+  .dt tfoot tr { border-color: var(--line-strong); }
+  .dt tfoot td { padding-top: 2px; }
+
+  .input { max-width: none; }
+  .btn { width: 100%; }
+  .btn-row .btn { width: auto; flex: 1 1 12rem; }
+}
+</style>
+</head>
+<body>
+<a class="skip" href="#main">跳到主要内容</a>
+
+<header>
+  <div class="top-row">
+    <h1>服务台 <span class="h1-sub">explore_journal web-front</span></h1>
+    <button id="logout" class="btn btn-quiet" type="button" hidden>登出</button>
+  </div>
+
+  <p class="statusline" id="statusline" hidden>
+    <span class="stat"><span class="stat-k">运行</span><span class="stat-v" id="s-uptime">—</span></span>
+    <span class="sep" aria-hidden="true">·</span>
+    <span class="stat"><span class="stat-k">内存</span><span class="stat-v" id="s-rss">—</span></span>
+    <span class="sep" aria-hidden="true">·</span>
+    <span class="stat"><span class="stat-k">采样</span><span class="stat-v" id="s-samples">—</span></span>
+    <span class="sep" aria-hidden="true">·</span>
+    <span class="stat"><span class="stat-k">刷新于</span><span class="stat-v" id="s-refreshed">—</span></span>
+  </p>
+  <p class="note" id="rss-note" hidden>
+    内存会在第一次登录后一次性抬到 150 MB 上下，然后再也不回落：校验口令用的
+    argon2 每个工作线程各要一块工作内存，用完被分配器留在手里复用而没有还给系统。
+    这是既定行为，不是泄漏——判断内存是否真的在长，看这条曲线之后有没有继续往上爬。
+  </p>
+</header>
+
+<!-- 默认口令横幅。改密表单直接内联在这里：让人为了改一个必须马上改的东西再去点开
+     一个弹窗，纯粹是多一道门。 -->
+<section class="banner" id="banner" hidden aria-labelledby="banner-title">
+  <h2 id="banner-title">服务端仍在使用默认口令</h2>
+  <p class="lede">
+    服务端仍在使用默认口令 <span class="route">admin / admin</span> ——
+    任何能连到这个端口的人都能登录，并读走里面存的全部凭据：WebDAV 口令、
+    OneDrive 与 GitHub 令牌、AI 服务密钥。
+  </p>
+  <p>
+    存下来的配置是用口令派生出的密钥加密的，所以改口令会顺带把它重新加密一遍，
+    并吊销全部会话——手机端和这一页都要用新口令重新登录。<strong>新口令一旦忘记，
+    已存的配置就再也解不开</strong>，所以下面要输两遍。
+  </p>
+
+  <div class="btn-row" id="pw-open-row">
+    <button id="pw-open" class="btn btn-primary" type="button" aria-expanded="false" aria-controls="pw-form">
+      修改口令
+    </button>
+  </div>
+
+  <form id="pw-form" novalidate hidden>
+    <label class="field">
+      <span class="label">当前口令</span>
+      <input class="input" id="pw-old" type="password" autocomplete="current-password" placeholder="admin">
+    </label>
+    <p class="err" id="pw-old-err" hidden></p>
+
+    <label class="field">
+      <span class="label">新口令（至少 8 位）</span>
+      <input class="input" id="pw-new" type="password" autocomplete="new-password" placeholder="至少 8 位">
+    </label>
+    <p class="err" id="pw-new-err" hidden></p>
+
+    <label class="field">
+      <span class="label">再输一次新口令</span>
+      <input class="input" id="pw-new2" type="password" autocomplete="new-password" placeholder="和上面一致">
+    </label>
+    <p class="err" id="pw-new2-err" hidden></p>
+
+    <div class="btn-row">
+      <button id="pw-submit" class="btn btn-primary" type="submit">换掉口令</button>
+      <button id="pw-cancel" class="btn btn-quiet" type="button">取消</button>
+    </div>
+    <p class="alert" id="pw-alert" hidden role="alert"></p>
+  </form>
+</section>
+
+<main id="main">
+
+  <!-- 首屏骨架：内容区不放转圈，占位块直接长成它稍后会变成的形状。 -->
+  <div class="skel-wrap" id="skeleton" aria-hidden="true">
+    <div class="skel skel-line" style="width: 22rem"></div>
+    <div class="skel skel-panel"></div>
+    <div class="skel skel-panel" style="height: 7rem"></div>
+  </div>
+
+  <!-- 未登录 -->
+  <section class="card" id="login-card" hidden aria-labelledby="login-title">
+    <h2 id="login-title">登录</h2>
+    <p class="hint">这台服务端的管理口令，和手机端「推送配置到 web 前端」里填的是同一个。</p>
+    <p class="notice" id="login-notice" hidden></p>
+    <form id="login-form" novalidate>
+      <label class="field">
+        <span class="label">用户名</span>
+        <input class="input" id="login-user" type="text" autocomplete="username"
+               autocapitalize="off" spellcheck="false" placeholder="admin" value="admin">
+      </label>
+      <p class="err" id="login-user-err" hidden></p>
+
+      <label class="field">
+        <span class="label">口令</span>
+        <input class="input" id="login-pass" type="password" autocomplete="current-password" placeholder="口令">
+      </label>
+      <p class="err" id="login-pass-err" hidden></p>
+
+      <div class="btn-row">
+        <button id="login-submit" class="btn btn-primary" type="submit">登录</button>
+      </div>
+      <p class="alert" id="login-alert" hidden role="alert"></p>
+    </form>
+  </section>
+
+  <!-- 取不到指标（服务端 5xx、限流、请求发不出去） -->
+  <section class="card" id="error-card" hidden aria-labelledby="error-title">
+    <h2 id="error-title">读不到指标</h2>
+    <p class="alert" id="error-msg" role="alert"></p>
+    <div class="btn-row" style="margin-top: var(--sp-4)">
+      <button id="error-retry" class="btn btn-primary" type="button">重试</button>
+    </div>
+  </section>
+
+  <div id="data" hidden>
+
+    <!-- 主体：路由表才是这一页真正的数据 -->
+    <section class="card" aria-labelledby="routes-title">
+      <h2 id="routes-title">路由</h2>
+      <p class="hint">按请求数降序。计数在 <span class="route">metrics.json</span> 里，重启不清零。</p>
+
+      <p class="empty" id="routes-empty" hidden>
+        服务刚起来，还没有任何请求被计数过。随便访问一下——刷新这一页，
+        或者打开 <span class="route">/healthz</span> ——对应的路由行就会出现在这里。
+      </p>
+
+      <table class="dt" id="routes-table">
+        <thead>
+          <tr>
+            <th scope="col">路由</th>
+            <th scope="col">请求</th>
+            <th scope="col">成功</th>
+            <th scope="col">3xx</th>
+            <th scope="col">4xx</th>
+            <th scope="col">5xx</th>
+            <th scope="col">字节</th>
+          </tr>
+        </thead>
+        <tbody id="routes-body"></tbody>
+        <tfoot id="routes-foot" hidden>
+          <tr>
+            <td class="lead route" data-label="路由">总计</td>
+            <td class="num" data-label="请求" id="t-total">—</td>
+            <td class="num" data-label="成功" id="t-ok">—</td>
+            <td class="num" data-label="3xx" id="t-redirect">—</td>
+            <td class="num" data-label="4xx" id="t-client">—</td>
+            <td class="num" data-label="5xx" id="t-server">—</td>
+            <td class="num" data-label="字节" id="t-bytes">—</td>
+          </tr>
+        </tfoot>
+      </table>
+
+      <p class="footnote" id="lf-note">
+        口令校验失败 <span class="num" id="lf-count">—</span> 次。
+        这只数真的被校验过又被拒的口令：撞上限流的尝试在校验之前就以 429 回绝了，
+        没算进来——想知道有人试了多少次，看上面
+        <span class="route">/api/session</span> 那行的 4xx。
+      </p>
+    </section>
+
+    <!-- 速率折线：samples 存的是累计值，所以这里画的是相邻两点的差分 -->
+    <section class="card" aria-labelledby="spark-title">
+      <h2 id="spark-title">请求速率</h2>
+      <p class="hint">相邻两个采样点的差值 ÷ 时间差，单位「请求 / 秒」。</p>
+
+      <p class="empty" id="spark-empty" hidden>
+        还没攒够两个采样点。速率只能由相邻两点的差值算出来，所以至少要两点；
+        采样线程按 <span class="route">EJ_METRICS_INTERVAL_SECS</span> 的节奏记录，
+        等它再记一次，这条线就出现了。
+      </p>
+
+      <figure id="spark-wrap" hidden>
+        <svg class="spark" viewBox="0 0 320 72" preserveAspectRatio="none"
+             role="img" aria-labelledby="spark-caption">
+          <polyline class="spark-req" id="spark-req" points="" />
+          <polyline class="spark-err" id="spark-err" points="" />
+        </svg>
+        <figcaption class="hint" id="spark-caption"></figcaption>
+      </figure>
+    </section>
+
+    <!-- 最近访问：这一栏只活在进程内存里，因为它带客户端地址 -->
+    <section class="card" aria-labelledby="recent-title">
+      <h2 id="recent-title">最近访问</h2>
+      <p class="hint">
+        只在进程内存里，不落盘也不进导出（它带来源地址）。环里留最新 100 条，
+        这里显示最新 <span class="num" id="recent-shown">20</span> 条；完整访问日志在容器日志里。
+      </p>
+
+      <p class="empty" id="recent-empty" hidden>
+        进程起来之后还没有请求经过。这一栏重启即归零，所以刚重启看到空的是正常的。
+      </p>
+
+      <table class="dt" id="recent-table" hidden>
+        <thead>
+          <tr>
+            <th scope="col">时间</th>
+            <th scope="col">路由</th>
+            <th scope="col">状态</th>
+            <th scope="col">字节</th>
+            <th scope="col">来源</th>
+          </tr>
+        </thead>
+        <tbody id="recent-body"></tbody>
+      </table>
+    </section>
+
+    <!-- 导出：低频操作，退到页末 -->
+    <section class="card" aria-labelledby="export-title">
+      <h2 id="export-title">导出</h2>
+      <p class="hint">
+        脱敏那份会把凭据字段清成空值；含凭据那份是明文，别留在下载目录里。
+      </p>
+      <div class="btn-row">
+        <button class="btn" type="button" id="export-config">配置（脱敏）</button>
+        <button class="btn" type="button" id="export-secrets" aria-expanded="false" aria-controls="export-arm">配置（含凭据）</button>
+        <button class="btn" type="button" id="export-metrics">指标 CSV</button>
+      </div>
+      <div id="export-arm" hidden>
+        <p class="notice" style="margin: var(--sp-3) 0 0">
+          这份文件里的 WebDAV 口令与各家令牌是明文。确定要导出吗？
+        </p>
+        <div class="btn-row" style="margin-top: var(--sp-3)">
+          <button class="btn btn-primary" type="button" id="export-secrets-go">确定，导出明文</button>
+          <button class="btn btn-quiet" type="button" id="export-secrets-no">取消</button>
+        </div>
+      </div>
+      <p class="alert" id="export-alert" hidden role="alert"></p>
+    </section>
+
+  </div>
+</main>
+
+<script>
+"use strict";
+(function () {
+  /* ── 常量 ─────────────────────────────────────────────────────────────── */
+  var POLL_MS = 10000;          // /api/* 桶是 120 次/分钟，10 秒一次只花 6
+  var BACKOFF_MS = 30000;       // 服务端在报错时退到这个节奏，别帮着雪崩
+  var MIN_PASSWORD = 8;         // 与服务端自己的检查一致
+  var RECENT_ROWS = 20;
+  var SPARK_W = 320, SPARK_H = 72, SPARK_PAD = 6;
+
+  var VIEW_BOOT = "boot", VIEW_LOGIN = "login", VIEW_DATA = "data", VIEW_ERROR = "error";
+
+  /* ── 小工具 ───────────────────────────────────────────────────────────── */
+  function el(id) { return document.getElementById(id); }
+  function show(node, on) { if (node) { node.hidden = !on; } }
+
+  /* 只有真的变了才写 DOM，并且只写变了的那一格。轮询每 10 秒来一次，整片重建
+     会让页面在读者眼下不停闪，也会把选中的文字弄丢。 */
+  function setText(node, value) {
+    if (!node || node.textContent === value) { return; }
+    node.textContent = value;
+    node.classList.remove("bump");
+    void node.offsetWidth;      // 强制回流，动画才会重新起跑
+    node.classList.add("bump");
+  }
+  function setClass(node, name, on) {
+    if (node) { node.classList.toggle(name, !!on); }
+  }
+
+  function fmtInt(n) {
+    if (typeof n !== "number" || !isFinite(n)) { return "—"; }
+    return Math.round(n).toLocaleString();
+  }
+  function fmtBytes(n) {
+    if (typeof n !== "number" || !isFinite(n) || n < 0) { return "—"; }
+    if (n < 1024) { return n + " B"; }
+    var units = ["KB", "MB", "GB", "TB"], v = n / 1024, i = 0;
+    while (v >= 1024 && i < units.length - 1) { v /= 1024; i += 1; }
+    var text = v < 10 ? v.toFixed(2) : (v < 100 ? v.toFixed(1) : String(Math.round(v)));
+    return text + " " + units[i];
+  }
+  function fmtDuration(sec) {
+    sec = Math.max(0, Math.floor(Number(sec) || 0));
+    var d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600);
+    var m = Math.floor((sec % 3600) / 60), s = sec % 60;
+    if (d) { return d + " 天 " + h + " 小时"; }
+    if (h) { return h + " 小时 " + m + " 分"; }
+    if (m) { return m + " 分 " + s + " 秒"; }
+    return s + " 秒";
+  }
+  function fmtClock(tsSec) {
+    var d = new Date((Number(tsSec) || 0) * 1000);
+    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+  }
+  function fmtRate(r) {
+    if (!isFinite(r)) { return "—"; }
+    return r >= 10 ? r.toFixed(1) : r.toFixed(2);
+  }
+
+  /* ── 请求 ─────────────────────────────────────────────────────────────── */
+  /* 会话走 HttpOnly 的 ej_session cookie（同源 fetch 默认带上），所以令牌
+     从来不落到 JS 能读的地方，XSS 也偷不走。 */
+  function api(path, init) {
+    init = init || {};
+    var headers = Object.assign({ "Accept": "application/json" }, init.headers || {});
+    return fetch(path, Object.assign({}, init, { headers: headers })).then(function (res) {
+      return res.json().catch(function () { return null; }).then(function (body) {
+        return {
+          status: res.status,
+          body: body,
+          retryAfter: res.headers.get("Retry-After")
+        };
+      });
+    }).catch(function (e) {
+      return { status: 0, body: null, retryAfter: null, transport: String(e) };
+    });
+  }
+
+  function describe(r, what) {
+    if (r.status === 0) {
+      return what + "失败：请求没能发出去，服务端可能已经停了。";
+    }
+    if (r.status === 429) {
+      var s = parseInt(r.retryAfter || "", 10);
+      return what + "被限流了。" + (isFinite(s) ? "等 " + s + " 秒再试。" : "稍后再试。");
+    }
+    var detail = (r.body && typeof r.body.error === "string") ? "（" + r.body.error + "）" : "";
+    return what + "失败：服务端返回 " + r.status + detail + "。";
+  }
+
+  /* ── 表单七态：default / hover / focus-visible / active / disabled /
+        loading / error 里，能靠 CSS 伪类表达的四个在样式表里，剩下三个由这里
+        打开关闭。 ─────────────────────────────────────────────────────── */
+  function fieldError(input, errNode, message) {
+    if (input) { input.setAttribute("aria-invalid", "true"); }
+    if (errNode) { errNode.textContent = message; errNode.hidden = false; }
+  }
+  function clearFieldError(input, errNode) {
+    if (input) { input.removeAttribute("aria-invalid"); }
+    if (errNode) { errNode.hidden = true; errNode.textContent = ""; }
+  }
+  function setBusy(node, on) {
+    if (!node) { return; }
+    if (on) { node.setAttribute("aria-busy", "true"); node.disabled = true; }
+    else { node.removeAttribute("aria-busy"); node.disabled = false; }
+  }
+  function busyForm(inputs, button, on, label) {
+    inputs.forEach(function (i) { setBusy(i, on); });
+    setBusy(button, on);
+    if (button && label) { button.textContent = label; }
+  }
+  function showAlert(node, message) {
+    if (!node) { return; }
+    node.textContent = message;
+    node.hidden = false;
+  }
+  function hideAlert(node) { if (node) { node.hidden = true; node.textContent = ""; } }
+
+  /* ── 视图切换 ─────────────────────────────────────────────────────────── */
+  var view = VIEW_BOOT;
+  var timer = null;
+
+  function setView(next) {
+    view = next;
+    show(el("skeleton"), next === VIEW_BOOT);
+    show(el("login-card"), next === VIEW_LOGIN);
+    show(el("error-card"), next === VIEW_ERROR);
+    show(el("data"), next === VIEW_DATA);
+    show(el("statusline"), next === VIEW_DATA);
+    show(el("rss-note"), next === VIEW_DATA);
+    show(el("logout"), next === VIEW_DATA);
+    if (next !== VIEW_DATA) { show(el("banner"), false); }
+    if (next === VIEW_LOGIN) {
+      var u = el("login-user");
+      if (u && !u.disabled) { u.focus(); }
+    }
+  }
+
+  function schedule(ms) {
+    if (timer) { clearTimeout(timer); }
+    timer = setTimeout(tick, ms);
+  }
+  function stopPolling() {
+    if (timer) { clearTimeout(timer); timer = null; }
+  }
+  function tick() { refresh(); }
+
+  function refresh() {
+    return api("/api/metrics").then(function (r) {
+      if (r.status === 200 && r.body) {
+        render(r.body);
+        setView(VIEW_DATA);
+        schedule(POLL_MS);
+        return;
+      }
+      if (r.status === 401) {
+        if (view === VIEW_DATA) {
+          showAlert(el("login-notice"), "会话过期了，请重新登录。");
+        }
+        stopPolling();
+        setView(VIEW_LOGIN);
+        return;
+      }
+      showAlert(el("error-msg"), describe(r, "读取指标"));
+      if (view !== VIEW_DATA) { setView(VIEW_ERROR); }
+      schedule(BACKOFF_MS);
+    });
+  }
+
+  /* ── 渲染 ─────────────────────────────────────────────────────────────── */
+  function render(d) {
+    setText(el("s-uptime"), fmtDuration(d.uptime_secs));
+    setText(el("s-rss"), fmtInt(d.rss_mb) + " MB");
+    var samples = Array.isArray(d.samples) ? d.samples : [];
+    setText(el("s-samples"), samples.length + " 点");
+    setText(el("s-refreshed"), fmtClock(Date.now() / 1000));
+
+    show(el("banner"), d.is_default_password === true);
+
+    renderRoutes(d);
+    renderLoginFailures(d);
+    renderSpark(samples);
+    renderRecent(Array.isArray(d.recent) ? d.recent : []);
+  }
+
+  /* 路由行按名字复用，只改动过的格子。总计落在 tfoot：计划里那六个「状态卡片」
+     数字里的四个（请求总数、错误数、代理出流量、以及它们的成功数）本来就是这张
+     表的列合计，做成六张等大卡片只会让人在卡片和表格之间对着同一个数字来回看。 */
+  var routeRows = Object.create(null);
+
+  function cell(tr, cls, label) {
+    var td = document.createElement("td");
+    td.className = cls;
+    td.setAttribute("data-label", label);
+    tr.appendChild(td);
+    return td;
+  }
+
+  function routeRow(name) {
+    var row = routeRows[name];
+    if (row) { return row; }
+    var tr = document.createElement("tr");
+    row = {
+      tr: tr,
+      route: cell(tr, "lead route", "路由"),
+      total: cell(tr, "num", "请求"),
+      ok: cell(tr, "num", "成功"),
+      redirect: cell(tr, "num", "3xx"),
+      client: cell(tr, "num", "4xx"),
+      server: cell(tr, "num", "5xx"),
+      bytes: cell(tr, "num", "字节")
+    };
+    row.route.textContent = name;
+    routeRows[name] = row;
+    return row;
+  }
+
+  function renderRoutes(d) {
+    var routes = (d && typeof d.routes === "object" && d.routes) ? d.routes : {};
+    var names = Object.keys(routes).sort(function (a, b) {
+      return (routes[b].total || 0) - (routes[a].total || 0) || (a < b ? -1 : a > b ? 1 : 0);
+    });
+
+    var body = el("routes-body");
+    show(el("routes-empty"), names.length === 0);
+    show(el("routes-table"), names.length > 0);
+    show(el("routes-foot"), names.length > 0);
+
+    var live = Object.create(null);
+    var sumOk = 0, sumRedirect = 0;
+
+    names.forEach(function (name) {
+      var st = routes[name] || {};
+      var row = routeRow(name);
+      live[name] = true;
+      sumOk += st.ok || 0;
+      sumRedirect += st.redirect || 0;
+
+      setText(row.total, fmtInt(st.total || 0));
+      setText(row.ok, fmtInt(st.ok || 0));
+      setText(row.redirect, fmtInt(st.redirect || 0));
+      setText(row.client, fmtInt(st.client_err || 0));
+      setText(row.server, fmtInt(st.server_err || 0));
+      setText(row.bytes, fmtBytes(st.bytes || 0));
+
+      /* 非零才上颜色。永远红着的 0 是装饰，不是信号。 */
+      setClass(row.redirect, "zero", !st.redirect);
+      setClass(row.client, "zero", !st.client_err);
+      setClass(row.server, "zero", !st.server_err);
+      setClass(row.server, "bad", !!st.server_err);
+
+      body.appendChild(row.tr);   // 已在正确位置时 appendChild 不产生可见变化
+    });
+
+    Object.keys(routeRows).forEach(function (name) {
+      if (!live[name]) {
+        if (routeRows[name].tr.parentNode) { routeRows[name].tr.remove(); }
+        delete routeRows[name];
+      }
+    });
+
+    setText(el("t-total"), fmtInt(d.requests || 0));
+    setText(el("t-ok"), fmtInt(sumOk));
+    setText(el("t-redirect"), fmtInt(sumRedirect));
+    setText(el("t-client"), fmtInt(d.client_err || 0));
+    setText(el("t-server"), fmtInt(d.server_err || 0));
+    setText(el("t-bytes"), fmtBytes(d.bytes_out || 0));
+    setClass(el("t-redirect"), "zero", !sumRedirect);
+    setClass(el("t-client"), "zero", !d.client_err);
+    setClass(el("t-server"), "zero", !d.server_err);
+    setClass(el("t-server"), "bad", !!d.server_err);
+  }
+
+  function renderLoginFailures(d) {
+    var n = d.login_failures || 0;
+    var node = el("lf-count");
+    setText(node, fmtInt(n));
+    setClass(node, "bad", n > 0);
+    setClass(node, "zero", n === 0);
+  }
+
+  /* samples 里存的是累计值，所以速率必须先差分：rate = Δrequests / Δts。
+     直接把累计值画出来只会得到一条永远向上的线。 */
+  function renderSpark(samples) {
+    var pts = [];
+    for (var i = 1; i < samples.length; i += 1) {
+      var dt = (samples[i].ts || 0) - (samples[i - 1].ts || 0);
+      if (dt <= 0) { continue; }   // 时钟回拨或重复采样：跳过而不是画出负速率
+      pts.push({
+        ts: samples[i].ts || 0,
+        req: Math.max(0, (samples[i].requests || 0) - (samples[i - 1].requests || 0)) / dt,
+        err: Math.max(0, (samples[i].server_err || 0) - (samples[i - 1].server_err || 0)) / dt
+      });
+    }
+
+    show(el("spark-empty"), pts.length === 0);
+    show(el("spark-wrap"), pts.length > 0);
+    if (pts.length === 0) { return; }
+
+    var maxReq = 0, anyErr = false, k;
+    for (k = 0; k < pts.length; k += 1) {
+      if (pts[k].req > maxReq) { maxReq = pts[k].req; }
+      if (pts[k].err > 0) { anyErr = true; }
+    }
+    var span = pts[pts.length - 1].ts - pts[0].ts;
+    var innerW = SPARK_W - SPARK_PAD * 2, innerH = SPARK_H - SPARK_PAD * 2;
+
+    function xOf(k) {
+      if (pts.length === 1 || span <= 0) { return SPARK_PAD + innerW / 2; }
+      return SPARK_PAD + ((pts[k].ts - pts[0].ts) / span) * innerW;
+    }
+    function yOf(v) {
+      if (maxReq <= 0) { return SPARK_H - SPARK_PAD; }
+      return SPARK_H - SPARK_PAD - (v / maxReq) * innerH;
+    }
+    function polyline(pick) {
+      var out = [];
+      for (var k2 = 0; k2 < pts.length; k2 += 1) {
+        out.push(xOf(k2).toFixed(1) + "," + yOf(pick(pts[k2])).toFixed(1));
+      }
+      /* 只有一个点时，重复一次坐标：零长度线段配 stroke-linecap="round"
+         才画得出一个点，否则这一格看着像渲染失败。 */
+      if (out.length === 1) { out.push(out[0]); }
+      return out.join(" ");
+    }
+
+    el("spark-req").setAttribute("points", polyline(function (p) { return p.req; }));
+    /* 5xx 速率恒为零时不画：一条贴在底边的红线是装饰，不是信息。 */
+    el("spark-err").setAttribute("points", anyErr ? polyline(function (p) { return p.err; }) : "");
+
+    var caption = pts.length + " 个采样区间 · 峰值 " + fmtRate(maxReq) +
+      " · 最新 " + fmtRate(pts[pts.length - 1].req) + " 请求/秒";
+    if (anyErr) { caption += " · 红线是 5xx 速率（同一纵轴）"; }
+    if (maxReq <= 0) { caption += " · 这段时间一个请求都没有，线贴在底边"; }
+    setText(el("spark-caption"), caption);
+  }
+
+  var recentRows = [];
+
+  function renderRecent(recent) {
+    var rows = recent.slice(0, RECENT_ROWS);
+    setText(el("recent-shown"), String(RECENT_ROWS));
+    show(el("recent-empty"), rows.length === 0);
+    show(el("recent-table"), rows.length > 0);
+
+    var body = el("recent-body");
+    while (recentRows.length > rows.length) {
+      var dead = recentRows.pop();
+      if (dead.tr.parentNode) { dead.tr.remove(); }
+    }
+    while (recentRows.length < rows.length) {
+      var tr = document.createElement("tr");
+      recentRows.push({
+        tr: tr,
+        time: cell(tr, "lead num", "时间"),
+        route: cell(tr, "route", "路由"),
+        status: cell(tr, "num", "状态"),
+        bytes: cell(tr, "num", "字节"),
+        ip: cell(tr, "num", "来源")
+      });
+      body.appendChild(tr);
+    }
+
+    rows.forEach(function (a, k) {
+      var row = recentRows[k];
+      var status = Number(a.status) || 0;
+      /* 全部走 textContent。来源地址在 EJ_TRUST_PROXY=1 下来自客户端自己写的
+         X-Forwarded-For，也就是说这一列的内容是远端可控的；用 innerHTML 就是
+         把这一页拱手送人。 */
+      setText(row.time, fmtClock(a.ts));
+      setText(row.route, String(a.route == null ? "—" : a.route));
+      setText(row.status, String(status));
+      setText(row.bytes, fmtBytes(a.bytes_out || 0));
+      setText(row.ip, a.ip ? String(a.ip) : "—");
+      setClass(row.status, "bad", status >= 500);
+      setClass(row.status, "dim", status < 500);
+    });
+  }
+
+  /* ── 登录 ─────────────────────────────────────────────────────────────── */
+  function onLogin(ev) {
+    ev.preventDefault();
+    var u = el("login-user"), p = el("login-pass");
+    var uErr = el("login-user-err"), pErr = el("login-pass-err");
+    clearFieldError(u, uErr); clearFieldError(p, pErr);
+    hideAlert(el("login-alert"));
+
+    if (!u.value) { fieldError(u, uErr, "填一下用户名。"); u.focus(); return; }
+    if (!p.value) { fieldError(p, pErr, "填一下口令。"); p.focus(); return; }
+
+    busyForm([u, p], el("login-submit"), true, "登录中…");
+    api("/api/session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: u.value, password: p.value })
+    }).then(function (r) {
+      busyForm([u, p], el("login-submit"), false, "登录");
+      if (r.status === 200) {
+        p.value = "";
+        hideAlert(el("login-notice"));
+        refresh();
+        return;
+      }
+      if (r.status === 401) {
+        fieldError(p, pErr, "用户名或口令不对。");
+        showAlert(el("login-alert"), "登录被拒。没改过的话是 admin / admin；连试 10 次会被限流一分钟。");
+        p.focus();
+        return;
+      }
+      showAlert(el("login-alert"), describe(r, "登录"));
+    });
+  }
+
+  function onLogout() {
+    var btn = el("logout");
+    setBusy(btn, true);
+    stopPolling();
+    api("/api/session", { method: "DELETE" }).then(function (r) {
+      setBusy(btn, false);
+      /* 服务端没答应也要在本地退出：留在一个已经按下登出的页面上更糟。
+         但要说清楚服务端那边的会话可能还在。 */
+      showAlert(el("login-notice"), r.status === 200
+        ? "已登出。"
+        : "本地已退出，但服务端没确认（返回 " + r.status + "），那边的会话可能还有效到过期为止。");
+      setView(VIEW_LOGIN);
+    });
+  }
+
+  /* ── 改口令 ───────────────────────────────────────────────────────────── */
+  function openPwForm(on) {
+    var opener = el("pw-open");
+    show(el("pw-form"), on);
+    show(el("pw-open-row"), !on);
+    if (opener) { opener.setAttribute("aria-expanded", on ? "true" : "false"); }
+    if (on) { el("pw-old").focus(); }
+    else {
+      opener.focus();
+      ["pw-old", "pw-new", "pw-new2"].forEach(function (id) { el(id).value = ""; });
+      clearFieldError(el("pw-old"), el("pw-old-err"));
+      clearFieldError(el("pw-new"), el("pw-new-err"));
+      clearFieldError(el("pw-new2"), el("pw-new2-err"));
+      hideAlert(el("pw-alert"));
+    }
+  }
+
+  function onChangePassword(ev) {
+    ev.preventDefault();
+    var oldI = el("pw-old"), newI = el("pw-new"), new2I = el("pw-new2");
+    var oldE = el("pw-old-err"), newE = el("pw-new-err"), new2E = el("pw-new2-err");
+    clearFieldError(oldI, oldE); clearFieldError(newI, newE); clearFieldError(new2I, new2E);
+    hideAlert(el("pw-alert"));
+
+    if (!oldI.value) { fieldError(oldI, oldE, "先输当前口令。"); oldI.focus(); return; }
+    if (newI.value.length < MIN_PASSWORD) {
+      fieldError(newI, newE, "新口令至少 " + MIN_PASSWORD + " 位。");
+      newI.focus(); return;
+    }
+    /* 两遍输入不是仪式感：配置是用口令派生的密钥加密的，敲错一个字符就等于把
+       已存的配置连同自己一起锁在门外，服务端也没有第二把钥匙。 */
+    if (newI.value !== new2I.value) {
+      fieldError(new2I, new2E, "两次输入的新口令不一样。");
+      new2I.focus(); return;
+    }
+    if (newI.value === oldI.value) {
+      fieldError(newI, newE, "新口令和当前口令一样，等于没改。");
+      newI.focus(); return;
+    }
+
+    var inputs = [oldI, newI, new2I];
+    busyForm(inputs, el("pw-submit"), true, "正在换…");
+    setBusy(el("pw-cancel"), true);
+    api("/api/password", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ old: oldI.value, "new": newI.value })
+    }).then(function (r) {
+      busyForm(inputs, el("pw-submit"), false, "换掉口令");
+      setBusy(el("pw-cancel"), false);
+      if (r.status === 200) {
+        stopPolling();
+        openPwForm(false);
+        showAlert(el("login-notice"),
+          "口令已经换了。所有会话都被吊销——这一页和手机端都要用新口令重新登录。");
+        setView(VIEW_LOGIN);
+        var p = el("login-pass");
+        if (p) { p.value = ""; }
+        return;
+      }
+      if (r.status === 401) {
+        fieldError(oldI, oldE, "当前口令不对。");
+        oldI.focus();
+        return;
+      }
+      if (r.status === 400) {
+        fieldError(newI, newE, "服务端拒绝了这个新口令：至少要 " + MIN_PASSWORD + " 位。");
+        newI.focus();
+        return;
+      }
+      showAlert(el("pw-alert"), describe(r, "改口令"));
+    });
+  }
+
+  /* ── 导出 ─────────────────────────────────────────────────────────────── */
+  var EXPORTS = {
+    "export-config": { path: "/api/export?what=config", file: "web-front-config.json", label: "配置（脱敏）" },
+    "export-secrets-go": { path: "/api/export?what=config&secrets=1", file: "web-front-config-secrets.json", label: "确定，导出明文" },
+    "export-metrics": { path: "/api/export?what=metrics", file: "web-front-metrics.csv", label: "指标 CSV" }
+  };
+
+  function download(blob, name) {
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 0);
+  }
+
+  function doExport(btn) {
+    var cfg = EXPORTS[btn.id];
+    if (!cfg) { return; }
+    hideAlert(el("export-alert"));
+    btn.removeAttribute("data-state");
+    setBusy(btn, true);
+    var restore = function () { setBusy(btn, false); btn.textContent = cfg.label; };
+    btn.textContent = "导出中…";
+
+    fetch(cfg.path, { headers: { "Accept": "application/octet-stream" } }).then(function (res) {
+      if (!res.ok) {
+        restore();
+        btn.setAttribute("data-state", "error");
+        var msg = "导出失败：服务端返回 " + res.status + "。";
+        if (res.status === 404) { msg += "这个服务端没有导出接口。"; }
+        if (res.status === 401) { msg += "会话过期了，请重新登录。"; }
+        showAlert(el("export-alert"), msg);
+        if (res.status === 401) {
+          stopPolling();
+          showAlert(el("login-notice"), "会话过期了，请重新登录。");
+          setView(VIEW_LOGIN);
+        }
+        return null;
+      }
+      return res.blob().then(function (blob) {
+        restore();
+        download(blob, cfg.file);
+        armSecrets(false);
+      });
+    }).catch(function (e) {
+      restore();
+      btn.setAttribute("data-state", "error");
+      showAlert(el("export-alert"), "导出失败：请求没能发出去（" + e + "）。");
+    });
+  }
+
+  /* 含凭据那份要二次确认，但确认是内联展开的一行，不是弹窗，也不是 confirm()
+     ——把明文凭据的后果讲清楚，比让人点掉一个对话框有用。 */
+  function armSecrets(on) {
+    show(el("export-arm"), on);
+    el("export-secrets").setAttribute("aria-expanded", on ? "true" : "false");
+    if (on) { el("export-secrets-go").focus(); }
+  }
+
+  /* ── 接线 ─────────────────────────────────────────────────────────────── */
+  el("login-form").addEventListener("submit", onLogin);
+  el("logout").addEventListener("click", onLogout);
+  el("error-retry").addEventListener("click", function () {
+    hideAlert(el("error-msg"));
+    setView(VIEW_BOOT);
+    refresh();
+  });
+
+  el("pw-open").addEventListener("click", function () { openPwForm(true); });
+  el("pw-cancel").addEventListener("click", function () { openPwForm(false); });
+  el("pw-form").addEventListener("submit", onChangePassword);
+
+  el("export-config").addEventListener("click", function () { doExport(el("export-config")); });
+  el("export-metrics").addEventListener("click", function () { doExport(el("export-metrics")); });
+  el("export-secrets").addEventListener("click", function () {
+    armSecrets(el("export-arm").hidden);
+  });
+  el("export-secrets-no").addEventListener("click", function () {
+    armSecrets(false);
+    el("export-secrets").focus();
+  });
+  el("export-secrets-go").addEventListener("click", function () { doExport(el("export-secrets-go")); });
+
+  /* 标签页不在前台就别轮询：一个开着不看的看板没必要一直花 /api/* 的配额，
+     切回来时立刻补一次。 */
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) { stopPolling(); }
+    else if (view === VIEW_DATA) { schedule(0); }
+  });
+
+  setView(VIEW_BOOT);
+  refresh();
+})();
+</script>
+</body>
+</html>

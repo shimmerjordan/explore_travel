@@ -327,7 +327,6 @@ impl Metrics {
     // The console's metrics endpoint is the only caller, and a binary crate
     // reports a `pub fn` that `main` cannot reach as dead code even when the
     // tests exercise it.
-    #[allow(dead_code)]
     pub fn snapshot_json(&self, uptime_secs: u64, rss_mb: u64) -> Value {
         // One acquisition for both halves; the JSON is built after it is
         // released.
