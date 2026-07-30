@@ -7,6 +7,8 @@ import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+import 'backup_credentials.dart';
 import '../../data/db/database.dart';
 import '../fog/fow_compat.dart'
     show tileIdToFilename, buildFowTile, fowBlocksFromFile,
@@ -184,8 +186,9 @@ class BackupService {
 
   /// Build the zip in memory and return its raw bytes.
   Future<Uint8List> exportToArchive(Set<String> selected,
-      {BackupProgress? onProgress}) async {
-    final files = await exportToFiles(selected, onProgress: onProgress);
+      {BackupProgress? onProgress, String? credentialsPassword}) async {
+    final files = await exportToFiles(selected,
+        onProgress: onProgress, credentialsPassword: credentialsPassword);
     final archive = Archive();
     for (final e in files.entries) {
       archive.addFile(ArchiveFile(e.key, e.value.length, e.value));
@@ -213,6 +216,12 @@ class BackupService {
     bool includeManifest = true,
     bool forceRequired = true,
     List<String>? manifestModules,
+    // Non-null (and non-empty) means "seal the credentials into this archive
+    // under this password". Only the EXPLICIT backup paths pass it: the sync
+    // engine runs unattended, and there is nobody there to type a password —
+    // so a synced archive keeps carrying no credentials at all, exactly as
+    // before. See BackupCredentials for the threat model.
+    String? credentialsPassword,
   }) async {
     // Force the required modules — caller can't opt out.
     final modules =
@@ -396,6 +405,23 @@ class BackupService {
         // fields that still live in app_settings_v1.
         final scrubbed = _scrubSettings(raw);
         addText('settings/app_settings.json', scrubbed);
+        // The credentials the scrub just removed, sealed under the user's
+        // password in a member of their own. Without this an export cannot
+        // actually restore the app: you land on the new device re-typing a
+        // WebDAV password, a GitHub token, an OneDrive session and several API
+        // keys by hand. With it, a stolen archive is worth exactly what it was
+        // worth before — the settings above still have every secret as null.
+        //
+        // No password → no member at all, rather than an empty envelope: an
+        // envelope announces "this backup has credentials" and costs the
+        // importer a password prompt for nothing.
+        if (credentialsPassword != null && credentialsPassword.isNotEmpty) {
+          final creds = _collectSecrets(raw);
+          if (creds.isNotEmpty) {
+            addText(BackupCredentials.fileName,
+                await BackupCredentials.seal(creds, credentialsPassword));
+          }
+        }
         // LWW sidecar — lets import keep the LOCAL settings when they are
         // newer than the archive's, instead of blindly overwriting.
         final ts = prefs.getString('settings_updated_at');
@@ -541,8 +567,10 @@ class BackupService {
   /// Write the archive bytes to a timestamped `.zip` under documents/ and
   /// return the file. Used by both local export and WebDAV upload — the
   /// archive bytes are identical, only the destination differs.
-  Future<File> exportToFile(Set<String> modules) async {
-    final bytes = await exportToArchive(modules);
+  Future<File> exportToFile(Set<String> modules,
+      {String? credentialsPassword}) async {
+    final bytes = await exportToArchive(modules,
+        credentialsPassword: credentialsPassword);
     final dir = await getApplicationDocumentsDirectory();
     final ts =
         DateTime.now().toIso8601String().replaceAll(':', '-').split('.').first;
@@ -559,6 +587,12 @@ class BackupService {
     bool clearBeforeImport = false,
     bool restore = false,
     BackupProgress? onProgress,
+    // Password for `settings/credentials.enc`, when the archive has one. Null
+    // (or wrong) leaves the archive's credentials sealed and the local ones
+    // untouched — a restore then behaves exactly as it did before sealed
+    // credentials existed. Callers can ask `BackupCredentials.isSealed` first
+    // so they only prompt when there is something to unlock.
+    String? credentialsPassword,
   }) async {
     final archive = ZipDecoder().decodeBytes(bytes);
     final files = <String, List<int>>{
@@ -571,6 +605,7 @@ class BackupService {
       clearBeforeImport: clearBeforeImport,
       restore: restore,
       onProgress: onProgress,
+      credentialsPassword: credentialsPassword,
     );
   }
 
@@ -584,6 +619,8 @@ class BackupService {
     bool clearBeforeImport = false,
     bool restore = false,
     BackupProgress? onProgress,
+    /// See [importFromArchive] — this is where it is actually consumed.
+    String? credentialsPassword,
   }) async {
     modules = {...modules, ...requiredModules};
     final summary = ImportSummary();
@@ -1602,6 +1639,40 @@ class BackupService {
           summary.skipped['settings'] = 1;
           return;
         }
+        // Sealed credentials, if the archive has them and the password opens
+        // them. These take precedence over the local values: carrying them is
+        // the entire reason the member exists, and a restore onto a fresh
+        // device has no local value to prefer anyway. On a device that DOES
+        // have credentials, note the LWW gate above has already decided the
+        // archive's settings are the ones being applied — so its credentials
+        // are the matching half of that decision, not a surprise.
+        //
+        // A wrong password is not an error here: it leaves `unsealed` empty and
+        // the local-backfill below then behaves exactly as it did before this
+        // feature existed. The caller is the one that can tell the user.
+        var unsealed = const <String, dynamic>{};
+        final sealed = readText(BackupCredentials.fileName);
+        if (sealed != null &&
+            credentialsPassword != null &&
+            credentialsPassword.isNotEmpty) {
+          unsealed =
+              await BackupCredentials.open(sealed, credentialsPassword) ??
+                  const {};
+          if (unsealed.isEmpty) {
+            summary.warnings.add(
+                '备份里的凭据没能解开（口令不对，或文件被改过）——已保留本机原有凭据');
+          }
+        } else if (sealed != null) {
+          summary.warnings.add(
+              '这份备份带着加密的凭据，但没有提供口令——已保留本机原有凭据');
+        }
+        for (final k in kVaultSecretKeys) {
+          final v = unsealed[k];
+          if (v == null) continue;
+          if (v is String && v.isEmpty) continue;
+          cloud[k] = v;
+        }
+
         final localRaw = prefs.getString('app_settings_v1');
         if (localRaw != null) {
           final local = jsonDecode(localRaw) as Map<String, dynamic>;
@@ -1759,11 +1830,69 @@ const kVaultSecretKeys = <String>{
   'sttApiKey',
   'ttsApiKey',
   'volcTtsToken',
+  // Group / P2P networking credentials. These reach a server the user controls
+  // and can be replayed by anyone holding them, so they belong here for the
+  // same reason `webdavPass` does.
+  'frpToken',
+  'frpDashboardPass',
+  'relayToken',
+  // Map provider API keys. Metered against the owner's account: a leaked key is
+  // someone else's quota (and bill) being spent. Not "secret" in the sense of
+  // granting access to data, which is why they were missed at first.
+  'amapApiKey',
+  'googleMapKey',
 };
+
+/// Deliberately NOT in [kVaultSecretKeys]: `leaderboardPrivateKey`.
+///
+/// It is the device's Ed25519 leaderboard identity, and a backup is the ONLY
+/// supported way to carry that identity to a new phone — scrubbing it would
+/// mean the new install signs as a stranger and the server refuses it under its
+/// TOFU rule (see docs/self-host-client-config.md). It is excluded from the
+/// roaming config payload for a different reason again; see
+/// `ConfigPayload.locatorKeys`.
 
 /// Returns a copy of the settings JSON with all credentials replaced
 /// by `null`. Keeps everything else intact so the user's preferences
 /// (map style, fog colour, etc.) survive the round-trip.
+/// Test seams for the two halves below.
+///
+/// They are exposed as a PAIR on purpose: the invariant worth testing is that
+/// `scrubSettingsForTest` removes exactly what `collectSecretsForTest` carries,
+/// and a test that reimplemented either half would stop testing that. Both read
+/// the same `raw` string the export reads.
+@visibleForTesting
+String scrubSettingsForTest(String raw) => _scrubSettings(raw);
+
+@visibleForTesting
+Map<String, dynamic> collectSecretsForTest(String raw) => _collectSecrets(raw);
+
+/// The credential half of the settings: exactly the keys `_scrubSettings`
+/// removes, and only those that actually have a value.
+///
+/// Reads the SAME `raw` string the scrub reads, on purpose — one source, so the
+/// two halves cannot disagree about what a credential is. Empty strings count
+/// as absent: sealing `""` would make the importer overwrite a real local value
+/// with nothing.
+Map<String, dynamic> _collectSecrets(String raw) {
+  try {
+    final j = jsonDecode(raw) as Map<String, dynamic>;
+    final out = <String, dynamic>{};
+    for (final k in kVaultSecretKeys) {
+      final v = j[k];
+      if (v == null) continue;
+      if (v is String && v.isEmpty) continue;
+      if (v is Map && v.isEmpty) continue;
+      out[k] = v;
+    }
+    return out;
+  } catch (_) {
+    // A settings blob we cannot parse has already made `_scrubSettings` emit
+    // its refusal stub; sealing nothing keeps the two consistent.
+    return const {};
+  }
+}
+
 String _scrubSettings(String raw) {
   try {
     final j = jsonDecode(raw) as Map<String, dynamic>;
@@ -1785,6 +1914,13 @@ class ImportSummary {
   final Map<String, int> skipped = {};
   final Map<String, String> errors = {};
 
+  /// Things that did not fail the import but that the user needs told —
+  /// currently only the sealed-credentials outcomes. Kept apart from [errors]
+  /// because an import that could not unlock the credentials still imported
+  /// everything else successfully, and reporting it as an error would send
+  /// people looking for data loss that did not happen.
+  final List<String> warnings = [];
+
   String describe() {
     final parts = <String>[];
     for (final k in {...imported.keys, ...skipped.keys}) {
@@ -1795,10 +1931,15 @@ class ImportSummary {
           ? '$label: $imp 应用 / $skip 本地已是最新'
           : '$label: $imp 应用');
     }
+    if (warnings.isNotEmpty) {
+      parts.addAll(warnings.map((w) => '⚠️ $w'));
+    }
     if (errors.isNotEmpty) {
       parts.add(
           '错误：${errors.entries.map((e) => "${e.key}=${e.value}").join("; ")}');
     }
+    // A run whose only outcome was a warning must not read as "nothing
+    // happened" — that is precisely the case where the user needs to see it.
     return parts.isEmpty
         ? '没有导入任何数据（云端与本地无差异，或所选模块在云端没有内容）'
         : parts.join('\n');

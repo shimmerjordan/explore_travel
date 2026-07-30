@@ -42,6 +42,17 @@ const SECRET_KEYS: &[&str] = &[
     "sttApiKey",
     "ttsApiKey",
     "volcTtsToken",
+    // Group / P2P networking credentials -- replayable by anyone holding them.
+    "frpToken",
+    "frpDashboardPass",
+    "relayToken",
+    // Map provider API keys. Metered against the owner's account, so a leaked
+    // one is someone else's quota being spent. These DO roam (the web build
+    // renders the same maps), which is exactly why scrubbing them here matters:
+    // they are the only credentials in this list that a normal config actually
+    // carries to the browser.
+    "amapApiKey",
+    "googleMapKey",
 ];
 
 /// Replace every credential value with `null`, at any depth.

@@ -9,6 +9,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:archive/archive.dart';
+import '../../services/backup/backup_credentials.dart';
 import '../../app/providers.dart';
 import '../../core/prefs.dart';
 import '../../services/backup/backup_service.dart';
@@ -434,7 +436,34 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
 
   /// Import an archive (no UI) — used inside [_withProgress]. Returns a status
   /// line and refreshes the map.
-  Future<String> _runImport(Uint8List bytes) async {
+  /// Peek into the archive for sealed credentials, and only then ask for a
+  /// password. Prompting unconditionally would train people to dismiss a dialog
+  /// that usually means nothing — and most archives (anything the sync engine
+  /// produced) carry no credentials at all.
+  ///
+  /// Returns `(proceed, password)`. `proceed == false` means the user cancelled
+  /// the prompt and the import should not run.
+  Future<(bool, String?)> _passwordForArchive(Uint8List bytes) async {
+    String? sealed;
+    try {
+      for (final f in ZipDecoder().decodeBytes(bytes).files) {
+        if (f.isFile && f.name == BackupCredentials.fileName) {
+          sealed = utf8.decode(f.content as List<int>, allowMalformed: true);
+          break;
+        }
+      }
+    } catch (_) {
+      // Not a readable zip — let the import itself produce the real error
+      // rather than failing here with a confusing one about credentials.
+      return (true, null);
+    }
+    if (!BackupCredentials.isSealed(sealed)) return (true, null);
+    final pw = await _askArchivePassword(forExport: false);
+    if (pw == null) return (false, null);
+    return (true, pw.isEmpty ? null : pw);
+  }
+
+  Future<String> _runImport(Uint8List bytes, {String? credentialsPassword}) async {
     final sum = await ref.read(backupServiceProvider).importFromArchive(
           bytes,
           modules: _selectedModules(ref.read(settingsProvider)),
@@ -442,6 +471,7 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
           // A user-picked backup is an authoritative RESTORE: bring back rows
           // even if the user deleted them locally after this backup was made.
           restore: true,
+          credentialsPassword: credentialsPassword,
         );
     ref.read(journalRefreshProvider.notifier).state++;
     ref.read(fogRefreshProvider.notifier).state++;
@@ -451,16 +481,87 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
     return '导入完成：\n${sum.describe()}';
   }
 
+  /// Ask for the password that seals (or unseals) the credentials in an archive.
+  ///
+  /// Returns `null` when the user cancels, `''` when they deliberately continue
+  /// without one. Those are different answers and the callers treat them
+  /// differently: cancel aborts the whole operation, empty means "export a
+  /// shareable backup with no credentials in it".
+  Future<String?> _askArchivePassword({required bool forExport}) async {
+    final ctrl = TextEditingController();
+    var obscure = true;
+    final result = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) => AlertDialog(
+          title: Text(forExport ? '给备份里的凭据加个口令' : '这份备份带着加密的凭据'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                forExport
+                    ? '备份里的凭据（WebDAV 口令、各家令牌与 API 密钥）会用这个口令'
+                        '加密后单独存放。不填就不带凭据——那样这份 zip 可以放心分享，'
+                        '但在新设备上恢复后要手动重填。\n\n'
+                        '口令不会被记住，也无法找回：忘了它，这份备份里的凭据就再也'
+                        '取不出来（数据本身不受影响）。'
+                    : '输入导出时设的口令来恢复凭据。不填或填错都不会影响其它数据的'
+                        '导入，只是凭据保持原样、需要手动重填。',
+                style: Theme.of(ctx).textTheme.bodyMedium,
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: ctrl,
+                obscureText: obscure,
+                autofocus: true,
+                autocorrect: false,
+                enableSuggestions: false,
+                decoration: InputDecoration(
+                  labelText: '口令',
+                  hintText: forExport ? '留空 = 不带凭据' : '',
+                  suffixIcon: IconButton(
+                    icon: Icon(obscure
+                        ? Icons.visibility_outlined
+                        : Icons.visibility_off_outlined),
+                    onPressed: () => setLocal(() => obscure = !obscure),
+                  ),
+                ),
+                onSubmitted: (v) => Navigator.of(ctx).pop(v),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(null),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(ctx).pop(ctrl.text),
+              child: Text(forExport ? '继续' : '恢复凭据'),
+            ),
+          ],
+        ),
+      ),
+    );
+    ctrl.dispose();
+    return result;
+  }
+
   Future<void> _exportAndShare() async {
     if (_selectedModules(ref.read(settingsProvider)).isEmpty) {
       setState(() => _status = '至少选一个模块');
       return;
     }
+    final pw = await _askArchivePassword(forExport: true);
+    if (pw == null || !mounted) return; // 取消
     final path = await _withProgress<String>('导出备份', (report, _) async {
-      report(null, '打包数据…');
-      final f = await ref
-          .read(backupServiceProvider)
-          .exportToFile(_selectedModules(ref.read(settingsProvider)));
+      report(null, pw.isEmpty ? '打包数据…' : '打包并加密凭据…');
+      final f = await ref.read(backupServiceProvider).exportToFile(
+            _selectedModules(ref.read(settingsProvider)),
+            credentialsPassword: pw.isEmpty ? null : pw,
+          );
       return f.path;
     });
     if (path == null || !mounted) return;
@@ -484,11 +585,12 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
     if (res == null || res.files.isEmpty) return;
     final picked = res.files.single;
     if (picked.bytes == null && picked.path == null) return;
+    final bytes = picked.bytes ?? await File(picked.path!).readAsBytes();
+    final (proceed, pw) = await _passwordForArchive(bytes);
+    if (!proceed || !mounted) return;
     final status = await _withProgress<String>('导入备份', (report, _) async {
-      report(null, '读取文件…');
-      final bytes = picked.bytes ?? await File(picked.path!).readAsBytes();
       report(null, '合并导入…');
-      return _runImport(bytes);
+      return _runImport(bytes, credentialsPassword: pw);
     });
     if (status != null && mounted) setState(() => _status = status);
   }
@@ -511,11 +613,14 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
       setState(() => _status = '至少选一个模块');
       return;
     }
+    final pw = await _askArchivePassword(forExport: true);
+    if (pw == null || !mounted) return; // 取消
     final status = await _withProgress<String>('上传到 WebDAV', (report, _) async {
-      report(null, '打包数据…');
-      final bytes = await ref
-          .read(backupServiceProvider)
-          .exportToArchive(_selectedModules(ref.read(settingsProvider)));
+      report(null, pw.isEmpty ? '打包数据…' : '打包并加密凭据…');
+      final bytes = await ref.read(backupServiceProvider).exportToArchive(
+            _selectedModules(ref.read(settingsProvider)),
+            credentialsPassword: pw.isEmpty ? null : pw,
+          );
       final ts = DateTime.now()
           .toIso8601String()
           .replaceAll(':', '-')
@@ -561,11 +666,21 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
       if (picked == null) return;
     }
     final chosen = picked;
-    final status = await _withProgress<String>('从 WebDAV 恢复', (report, _) async {
+    // Download and import are two progress passes rather than one, because the
+    // password prompt has to sit between them: it can only be asked once the
+    // archive is in hand (that is how we know whether it even HAS sealed
+    // credentials), and a dialog cannot open on top of the progress dialog.
+    final bytes = await _withProgress<List<int>>('从 WebDAV 下载', (report, _) async {
       report(null, '下载 $chosen…');
-      final bytes = await dav.downloadArchive(chosen);
+      return dav.downloadArchive(chosen);
+    });
+    if (bytes == null || !mounted) return;
+    final archive = Uint8List.fromList(bytes);
+    final (proceed, pw) = await _passwordForArchive(archive);
+    if (!proceed || !mounted) return;
+    final status = await _withProgress<String>('从 WebDAV 恢复', (report, _) async {
       report(null, '合并导入…');
-      return _runImport(Uint8List.fromList(bytes));
+      return _runImport(archive, credentialsPassword: pw);
     });
     if (status != null && mounted) setState(() => _status = status);
   }

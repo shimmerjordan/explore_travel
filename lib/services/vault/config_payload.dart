@@ -67,6 +67,12 @@ class ConfigPayload {
     'ttsApiKey',
     'volcTtsToken',
     'musicCredentials',
+    // Group / P2P networking. `group_service_stub.dart` is what the web build
+    // gets — there is no relay, no frp tunnel and no P2P on that platform, so
+    // these could only ever sit unused in the browser's memory.
+    'frpToken',
+    'frpDashboardPass',
+    'relayToken',
   };
 
   /// Config keys whose [AppSettings] field is a `Map`, not a `String`.
@@ -84,6 +90,13 @@ class ConfigPayload {
   static const mapKeys = <String>{};
 
   /// Non-secret config without which the secrets are unusable.
+  ///
+  /// Note what is NOT here but still roams: the map provider API keys
+  /// (`amapApiKey` / `googleMapKey`). They are credentials, so they live in
+  /// `kVaultSecretKeys` and reach the payload through the union — and they have
+  /// to reach it, because the web build renders the same maps, journals and
+  /// location pickers the phone does. That is the difference from the group /
+  /// P2P tokens above: those have no consumer in the browser at all.
   static const locatorKeys = <String>{
     // WebDAV
     'webdavUrl', 'webdavUser',
