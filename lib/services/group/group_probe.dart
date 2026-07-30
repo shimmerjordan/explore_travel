@@ -5,13 +5,14 @@ import 'group_probe_stub.dart'
 
 /// One line of a connectivity probe run.
 ///
-/// `info` and `skip` deliberately do NOT count towards pass/fail: the LAN probe
-/// reports how many peers answered as information (nobody else being online is
-/// not a configuration error), and steps that can't run on this platform — or
-/// can't be verified from one device at all, like "is the shared passphrase the
-/// same as everyone else's" — are honestly marked as unverified instead of
-/// silently omitted. A report that only shows green ticks for things it actually
-/// checked is worth more than one that looks complete.
+/// `info` and `skip` deliberately do NOT count towards pass/fail: `info` carries
+/// context that isn't a verdict (the LAN probe's interface list), and `skip`
+/// covers steps that can't run on this platform — or can't be verified from one
+/// device at all, like "is the shared passphrase the same as everyone else's" and
+/// "how many members are online". Those are honestly marked as unverified rather
+/// than silently omitted, and never reported as a zero the probe could not have
+/// beaten. A report that only shows green ticks for things it actually checked is
+/// worth more than one that looks complete.
 enum ProbeOutcome { pass, fail, skip, info }
 
 class ProbeStep {
@@ -20,7 +21,11 @@ class ProbeStep {
   final String detail;
   final Duration elapsed;
 
-  /// What to do about it. Only set for [ProbeOutcome.fail].
+  /// What to do about it, or — on a non-`fail` step — what this step could NOT
+  /// establish and what to watch for instead. Set on `fail`, `skip` and `info`
+  /// alike, so a renderer MUST colour it by [outcome] rather than assuming a
+  /// hint means something went wrong: a red line under a passing report reads
+  /// as a failure the user then goes looking for.
   final String? hint;
 
   const ProbeStep({
@@ -104,13 +109,11 @@ class ProbeConfig {
 class ProbeTimeouts {
   final Duration net;         // TCP connect / plain HTTP
   final Duration webdav;      // one WebDAV request
-  final Duration multicast;   // waiting for peer answers
   final Duration frpLogin;    // frpc login + proxy registration
   final Duration total;
   const ProbeTimeouts({
     this.net = const Duration(seconds: 5),
     this.webdav = const Duration(seconds: 8),
-    this.multicast = const Duration(seconds: 3),
     this.frpLogin = const Duration(seconds: 12),
     this.total = const Duration(seconds: 45),
   });
@@ -131,8 +134,18 @@ abstract class ProbeSocket {
   Future<void> close();
 }
 
-/// The relay refused the upgrade. `code` is the WebSocket close code (4401 =
-/// bad token in `backends/server/modules/group.js`).
+/// The relay refused the upgrade.
+///
+/// `code` is null in every path the io implementation can currently produce:
+/// `dart:io`'s `WebSocketException` carries only the text
+/// `Connection to '<uri>' was not upgraded to websocket` — no status code, and
+/// no close code either (the socket never became a WebSocket, so there is
+/// nothing to close). Our own relay answers a bad token with a bare
+/// `HTTP/1.1 401 Unauthorized` (see `backends/server/modules/group.js`), which
+/// is exactly the information that gets thrown away. Reading it back would take
+/// a hand-written upgrade handshake over `HttpClient` so the response
+/// `statusCode` survives; the field stays here for that day, and the probe
+/// reports "reason unavailable" rather than guessing.
 class WebSocketRejected implements Exception {
   final int? code;
   const WebSocketRejected(this.code);
@@ -199,8 +212,13 @@ class ProbeDeps {
   /// Defaults to a `RawDatagramSocket` bound to port 0 (an ephemeral port) in
   /// the io impl — deliberately NOT the discovery port, since that one may
   /// already be held by a running LAN group service and stealing it would
-  /// break real peer discovery mid-session.
+  /// break real peer discovery mid-session. That choice is also why the probe
+  /// can only verify the SEND direction; see [ProbeDatagram].
   final Future<ProbeDatagram> Function()? openDatagram;
+
+  /// Defaults to the Android `MulticastLock` platform channel in the io impl.
+  /// See [ProbeMulticastLock] for why this is injectable.
+  final ProbeMulticastLock? multicastLock;
 
   const ProbeDeps({
     this.timeouts = const ProbeTimeouts(),
@@ -212,6 +230,7 @@ class ProbeDeps {
     this.listInterfaces,
     this.bindMesh,
     this.openDatagram,
+    this.multicastLock,
   });
 }
 
@@ -225,11 +244,39 @@ class ProbeIface {
 
 /// Minimal UDP multicast surface the LAN probe needs. Real impl wraps
 /// `dart:io`'s `RawDatagramSocket`; tests supply a fake.
+///
+/// Send-only on purpose. There used to be a `countAnswers(window)` here and a
+/// "peer replies" step built on it, but the socket is bound to an EPHEMERAL
+/// port (it must not steal [kDiscoveryPort] from a running group service), and
+/// multicast delivery matches on destination port — so a peer's regular beacon,
+/// addressed to the discovery port, can never arrive here. The count was
+/// structurally always zero. Counting peers for real needs the group service to
+/// unicast a reply to `probe:1` datagrams, i.e. a protocol change.
 abstract class ProbeDatagram {
   bool joinMulticast();
   int send(List<int> data);
-  Future<int> countAnswers(Duration window);
   Future<void> close();
+}
+
+/// The Android `MulticastLock`, as the LAN probe sees it.
+///
+/// Injected for one reason: the native lock is **process-wide and not
+/// reference-counted**, and the running group service takes it in `start()`.
+/// A probe that blindly acquires and then releases it would silently switch off
+/// multicast reception for the live session — so the probe has to be able to
+/// ask who holds it, and tests have to be able to assert that it never releases
+/// a lock it did not take.
+abstract class ProbeMulticastLock {
+  /// False on platforms that don't need a lock at all (everything but Android),
+  /// which makes the step report `skip`.
+  bool get needed;
+
+  /// Whether the process-wide lock is already held — by the group service, or
+  /// by a previous run that failed to let go.
+  Future<bool> isHeld();
+
+  Future<void> acquire();
+  Future<void> release();
 }
 
 /// Every port in the mesh port range was already taken. Not necessarily a

@@ -91,12 +91,17 @@ services:
 ```bash
 sudo mkdir -p /share/Web/ej_data/backend
 sudo chown -R 1000:1000 /share/Web/ej_data/backend   # 容器以 node（UID 1000）运行
-cd /share/Web/ej_data
+cd /share/Web/ej_data/backend
 # 放好 docker-compose.ghcr.yml（改名 docker-compose.yml），把两个令牌填进它的
 # environment（openssl rand -hex 24 生成），然后：
 sudo docker compose up -d
 curl localhost:48081/healthz
 ```
+
+> compose 文件放在**这个服务自己的目录**里，别放到公共的 `/share/Web/ej_data`：
+> 兄弟服务 web-front 的部署指引长得一样，两份 `docker-compose.yml` 落到同一个目录会
+> 互相覆盖；而且 compose 用目录名当项目名，两个服务挤进一个 project 后，在那里
+> `docker compose up -d --remove-orphans` 会把另一个容器当孤儿删掉。
 
 那条 `chown` 是必须的：docker 会把不存在的挂载点自动建成 root 所有，排行榜就写不
 进去。这份 compose 刻意**不使用 `${变量}`**（也因此不需要 `.env`），所以它能整段

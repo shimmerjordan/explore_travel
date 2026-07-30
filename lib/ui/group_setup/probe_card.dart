@@ -89,10 +89,19 @@ class ProbeController extends StateNotifier<ProbeUiState> {
   }
 
   Future<void> cancel() async {
-    await _sub?.cancel();
-    _sub = null;
+    // Probe first, subscription second. `_sub.cancel()` waits for the generator
+    // to finish whatever step it's inside — up to the 12s frp login timeout —
+    // so awaiting it first threw away the early teardown `_probe.cancel()`
+    // exists to provide, and the 「停止」 button appeared dead for those 12s.
+    // Flipping the order lets the probe see `_cancelled` and bail out at once.
+    // Safe because the probe's `cleanUp` is idempotent: running it here and
+    // again from `run()`'s `finally` releases each resource exactly once, and
+    // anything acquired by an await still in flight is caught by that second
+    // pass.
     await _probe?.cancel();
     _probe = null;
+    await _sub?.cancel();
+    _sub = null;
     if (state.running) {
       state = ProbeUiState(
           running: false, steps: state.steps, transport: state.transport);
@@ -102,8 +111,11 @@ class ProbeController extends StateNotifier<ProbeUiState> {
   @override
   void dispose() {
     // autoDispose：离开页面即取消，临时 frpc 与 socket 都在探针的 cleanUp 里释放。
-    _sub?.cancel();
+    // 这里不能 await（dispose 是同步的），所以「取消落在某个 await 还在飞的时候」
+    // 是常态 —— 探针的 cleanUp 因此必须幂等：cancel() 与 run() 的 finally 各跑一遍，
+    // 后一遍才是真正释放「取消之后才拿到手的资源」的那一遍。
     _probe?.cancel();
+    _sub?.cancel();
     super.dispose();
   }
 }
@@ -201,7 +213,9 @@ class ProbeCard extends ConsumerWidget {
         GroupTransport.relay => '检查服务可达、组队模块是否启用、WebSocket 能否升级',
         GroupTransport.webrtc => '检查 WebDAV 信令目录能否读写（会写一个探针文件再删掉）',
         GroupTransport.frp => '检查 frps 可达、frpc 能否登录并注册 xtcp proxy',
-        _ => '检查本机多播与 mesh 端口，并统计能发现几个成员',
+        // 局域网只测「本机是否就绪」：对端在不在线单机测不出来（探测用临时端口，
+        // 收不到对端的常规信标），别在副标题里承诺做不到的事。
+        _ => '检查本机的网络接口、多播与 mesh 端口是否就绪',
       };
 
   static void _copy(
@@ -259,15 +273,17 @@ class _StepRow extends StatelessWidget {
                           .textTheme
                           .bodySmall
                           ?.copyWith(color: c.onSurfaceVariant)),
-                // 失败时 hint 直接展开 —— 失败的人要看的就是这个。
+                // hint 直接展开 —— 失败的人要看的就是这个。但颜色跟着 outcome 走：
+                // skip / info 也会带 hint（说明「这项测不出来，该看什么」），一律
+                // 涂红会让每次通过的报告底下都挂一条看着像错误的红字。
                 if (step.hint != null)
                   Padding(
                     padding: const EdgeInsets.only(top: 4),
                     child: Text('→ ${step.hint}',
-                        style: Theme.of(context)
-                            .textTheme
-                            .bodySmall
-                            ?.copyWith(color: c.error)),
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                            color: step.outcome == ProbeOutcome.fail
+                                ? c.error
+                                : c.onSurfaceVariant)),
                   ),
               ],
             ),

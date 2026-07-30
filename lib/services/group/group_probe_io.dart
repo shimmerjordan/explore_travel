@@ -33,22 +33,17 @@ GroupProbe createProbe(
 
 /// Shared plumbing: elapsed-time stamping and the total-budget guard. Each
 /// concrete probe is a sequence of named steps; this base runs them in order,
-/// stops feeding new ones once the budget is spent, and guarantees `cleanUp`
-/// runs exactly once — whether the run finishes normally, throws, or the
-/// consumer calls `cancel()` mid-run.
+/// stops feeding new ones once the budget is spent, and drives `cleanUp`
+/// whether the run finishes normally, throws, or the consumer calls `cancel()`
+/// mid-run.
 abstract class _BaseProbe implements GroupProbe {
   final ProbeConfig cfg;
   final ProbeDeps deps;
-  bool _cancelled = false;
 
-  /// Guards [cleanUp]: both the normal end-of-`run()` `finally` block and an
-  /// in-flight `cancel()` reach for teardown, and there's no ordering
-  /// guarantee between them (cancel can land just before or after the loop
-  /// notices `_cancelled` on its own). A concrete `cleanUp` that stops a
-  /// temporary frpc or deletes a probe file is not safe to run twice, so the
-  /// dedup lives here once rather than being a convention every subclass has
-  /// to remember.
-  bool _cleanedUp = false;
+  /// Set by [cancel]. Steps that are about to acquire something expensive
+  /// check it so a cancel that lands mid-run doesn't get followed by a fresh
+  /// frpc start or a 12-second login wait nobody is listening to.
+  bool _cancelled = false;
 
   _BaseProbe(this.cfg, this.deps);
 
@@ -56,15 +51,24 @@ abstract class _BaseProbe implements GroupProbe {
   List<Future<ProbeStep> Function()> steps();
 
   /// Best-effort teardown (stop a temporary frpc, delete a probe file, close
-  /// sockets). Always awaited, even on cancel. Subclasses override this —
-  /// not [_cleanUpOnce] — the once-only guarantee is enforced by the caller.
+  /// sockets). Called unconditionally from `run()`'s `finally` AND from
+  /// [cancel] — possibly twice, possibly concurrently, and possibly BEFORE the
+  /// resource exists.
+  ///
+  /// That last case is why there is no once-only guard here any more. `cancel()`
+  /// is routinely invoked without `await` (see `ProbeController.dispose`) while
+  /// an `await openDatagram()` / `await engine.start()` is still in flight: at
+  /// that instant the probe owns nothing, so teardown has nothing to do — and a
+  /// guard that recorded "cleanup already happened" would make the `finally`,
+  /// which runs after the acquire lands, skip the only teardown that could have
+  /// released it. A temporary frpc left running forever is the expensive
+  /// version of that leak.
+  ///
+  /// So: implementations must be IDEMPOTENT instead. Take the field into a
+  /// local, clear the field, then release the local — that is safe to run any
+  /// number of times, in any interleaving, and it still cleans up a resource
+  /// that only appeared after the first attempt.
   Future<void> cleanUp() async {}
-
-  Future<void> _cleanUpOnce() async {
-    if (_cleanedUp) return;
-    _cleanedUp = true;
-    await cleanUp();
-  }
 
   @override
   Stream<ProbeStep> run() async* {
@@ -84,14 +88,14 @@ abstract class _BaseProbe implements GroupProbe {
         yield await make();
       }
     } finally {
-      await _cleanUpOnce();
+      await cleanUp();
     }
   }
 
   @override
   Future<void> cancel() async {
     _cancelled = true;
-    await _cleanUpOnce();
+    await cleanUp();
   }
 
   /// Times a step body and turns any exception into a `fail` step rather than
@@ -117,7 +121,7 @@ abstract class _BaseProbe implements GroupProbe {
 }
 
 /// Test-only harness for [_BaseProbe]'s shared plumbing — step sequencing,
-/// the total-budget guard, and the cleanup-runs-once guarantee. `_BaseProbe`
+/// the total-budget guard, and the cleanup-always-runs guarantee. `_BaseProbe`
 /// is library-private on purpose (it's an implementation detail of the four
 /// concrete probes below, not something outside code should depend on), so a
 /// test file in a different library can't subclass it directly; this is the
@@ -257,15 +261,22 @@ class RelayProbe extends _BaseProbe {
               elapsed: sw.elapsed,
             );
           } on WebSocketRejected catch (e) {
+            // No branching on e.code: dart:io throws away the HTTP status (see
+            // WebSocketRejected), so there is nothing to branch on. Order the
+            // suspects by how often they're the answer instead — a wrong token
+            // is the common one, and our own relay answers it with a bare 401
+            // that never reaches us.
             return ProbeStep(
               title: 'WebSocket 升级',
               outcome: ProbeOutcome.fail,
-              detail: '被拒绝（close code ${e.code}）',
+              detail: e.code == null
+                  ? '被拒绝（dart:io 不提供拒绝时的状态码，拿不到具体原因）'
+                  : '被拒绝（状态码 ${e.code}）',
               elapsed: sw.elapsed,
-              hint: e.code == 4401
-                  ? '中继令牌不对：与服务端 compose 里的 GROUP_TOKEN 必须完全一致'
-                  : '升级被拒。经 Cloudflare 时确认 WebSocket 没被关；'
-                      '经 Nginx 时确认转发了 Upgrade / Connection 头',
+              hint: '最常见的原因是中继令牌不对：它必须与服务端 compose 里的 '
+                  'GROUP_TOKEN 完全一致（不一致时服务端直接回 401）。'
+                  '令牌确认没问题的话，经 Cloudflare 时确认 WebSocket 没被关；'
+                  '经 Nginx 时确认转发了 Upgrade / Connection 头',
             );
           } finally {
             await sock?.close();
@@ -329,15 +340,16 @@ Future<ProbeSocket> _defaultWsConnect(Uri url, Duration timeout) async {
   try {
     final ws = await WebSocket.connect(url.toString()).timeout(timeout);
     return _IoProbeSocket(ws);
-  } on WebSocketException catch (e) {
-    // dart:io 把 HTTP 层的拒绝塞进 message，close code 拿不到；用 -1 表示未知。
-    throw WebSocketRejected(_codeFromMessage(e.message));
+  } on WebSocketException {
+    // Deliberately code-less. `e.message` is
+    // `Connection to '<uri>' was not upgraded to websocket` — the HTTP status is
+    // never in there. Scraping digits out of it (which this used to do) picks
+    // them out of the URI instead: `peer=probe-48213` yields 4821 and `:48081`
+    // yields 192, so the UI printed a close code that was really a slice of its
+    // own query string. Worse, a URL that happens to contain 4401 (port 44010,
+    // say) would have been reported as "bad token" no matter the real cause.
+    throw const WebSocketRejected(null);
   }
-}
-
-int? _codeFromMessage(String m) {
-  final match = RegExp(r'(\d{3,4})').firstMatch(m);
-  return match == null ? null : int.tryParse(match.group(1)!);
 }
 
 class WebDavProbe extends _BaseProbe {
@@ -369,9 +381,14 @@ class WebDavProbe extends _BaseProbe {
     ];
   }
 
+  // Idempotent: clearing the flag before the remove means a second call (or a
+  // concurrent one from cancel()) is a no-op, while a call that arrives before
+  // _checkWrite finished leaves the flag alone so the later `finally` still
+  // deletes the file.
   @override
   Future<void> cleanUp() async {
     if (!_wrote) return;
+    _wrote = false;
     try {
       await _dav.remove(_probePath);
     } catch (_) {/* best effort */}
@@ -560,13 +577,18 @@ class FrpProbe extends _BaseProbe {
     ];
   }
 
+  // Idempotent, and deliberately keyed on _startedByUs rather than on _engine
+  // being non-null: the engine is a handle on a PROCESS-WIDE frpc, so stopping
+  // one we didn't start would take the real group's tunnel down with it.
   @override
   Future<void> cleanUp() async {
-    if (_startedByUs) {
-      try {
-        await _engine?.stop();
-      } catch (_) {}
-    }
+    if (!_startedByUs) return;
+    _startedByUs = false;
+    final engine = _engine;
+    _engine = null;
+    try {
+      await engine?.stop();
+    } catch (_) {}
   }
 
   Future<ProbeStep> _checkConfig() async {
@@ -630,18 +652,31 @@ class FrpProbe extends _BaseProbe {
 
           final engine = _engine = (deps.frpEngine ?? FrpEngine.create)();
 
-          // 正在组队：读现有状态，不碰它。「用着的时候想查为什么连不上」是最常见
-          // 的场景，那时把隧道断掉去测是最差的选择。
-          if (cfg.groupRunning) {
-            final running = await engine.isRunning();
+          // Something already running: read its state, don't touch it.
+          // "figure out why it won't connect WHILE I'm using it" is the common
+          // case, and tearing the tunnel down to measure it is the worst
+          // possible answer.
+          //
+          // Asking the ENGINE, not just cfg.groupRunning, is the load-bearing
+          // part. FrpEngine is a thin handle on a process-wide frpc where
+          // start() is effectively a reload, so starting a probe config evicts
+          // the real group's proxy/visitor set and cleanUp's stop() then kills
+          // it outright. cfg.groupRunning comes from a UI provider that only
+          // flips true AFTER GroupLifecycle.start() returns — port bind + frpc
+          // launch + first roster query, several seconds during which it reads
+          // false. Tapping "test connection" right after switching the group on
+          // landed exactly in that window. The engine is the ground truth, and
+          // it also covers an frpc nobody in this process started.
+          final alreadyRunning = await engine.isRunning();
+          if (cfg.groupRunning || alreadyRunning) {
             return ProbeStep(
               title: 'frpc 登录并注册 xtcp proxy',
-              outcome: running ? ProbeOutcome.pass : ProbeOutcome.fail,
-              detail: running
-                  ? '组队正在运行，frpc 在线（未重启，避免打断现有隧道）'
+              outcome: alreadyRunning ? ProbeOutcome.pass : ProbeOutcome.fail,
+              detail: alreadyRunning
+                  ? 'frpc 已在运行（未重启，避免打断现有隧道）'
                   : '组队标记为运行中，但 frpc 不在线',
               elapsed: sw.elapsed,
-              hint: running ? null : '先在组队页停止再重新开启，或看诊断日志里 frpc 的报错',
+              hint: alreadyRunning ? null : '先在组队页停止再重新开启，或看诊断日志里 frpc 的报错',
             );
           }
 
@@ -671,8 +706,20 @@ class FrpProbe extends _BaseProbe {
           try {
             await engine.start(builder.build(const []).toml);
             _startedByUs = true;
-            final outcome = await done.future
-                .timeout(deps.timeouts.frpLogin, onTimeout: () => ProbeOutcome.fail);
+            // A cancel that landed while start() was in flight: bail before
+            // sitting out the login timeout nobody is waiting for. cleanUp
+            // still stops the frpc we just brought up — it is idempotent and
+            // both `cancel()` and `run()`'s `finally` call it.
+            if (_cancelled) {
+              return ProbeStep(
+                title: 'frpc 登录并注册 xtcp proxy',
+                outcome: ProbeOutcome.skip,
+                detail: '已取消',
+                elapsed: sw.elapsed,
+              );
+            }
+            final outcome = await done.future.timeout(deps.timeouts.frpLogin,
+                onTimeout: () => ProbeOutcome.fail);
             final loginFailed = lines.any((l) =>
                 l.toLowerCase().contains('login') &&
                 l.toLowerCase().contains('fail'));
@@ -754,20 +801,26 @@ Future<void> _defaultTcpConnect(String host, int port, Duration timeout) async {
   s.destroy();
 }
 
-/// LAN has no server to shake hands with — only the other member. Whether a
-/// peer is online is not a configuration problem on THIS device, so the
-/// judgment is deliberately split in two:
-///   - the first four steps (interfaces / MulticastLock / mesh port bind /
-///     send multicast) check whether this device is READY, and produce
-///     pass/fail/skip;
-///   - the last step ("peer replies") only reports a count and is always
-///     `info` — zero peers is not a failure, just a nudge to check the other
-///     side.
+/// LAN has no server to shake hands with — only the other member. Everything
+/// this probe can honestly establish is about THIS device: interfaces,
+/// MulticastLock, mesh port, and that a multicast datagram actually leaves.
+/// Whether a peer is online is not answerable from here — the probe's socket
+/// sits on an ephemeral port and a peer's beacon goes to [kDiscoveryPort], so
+/// the last step says so instead of reporting a zero it could never beat (see
+/// [ProbeDatagram]).
 class LanProbe extends _BaseProbe {
   LanProbe(super.cfg, super.deps);
 
   ProbeDatagram? _dg;
+
+  /// True only when THIS probe acquired the MulticastLock. Stays false when the
+  /// lock was already held, because the native lock is process-wide and not
+  /// reference-counted: releasing someone else's would silently kill multicast
+  /// reception for the live group session.
   bool _lockHeld = false;
+
+  ProbeMulticastLock get _lock =>
+      deps.multicastLock ?? const _PlatformMulticastLock();
 
   @override
   List<Future<ProbeStep> Function()> steps() => [
@@ -775,17 +828,23 @@ class LanProbe extends _BaseProbe {
         _mcastLock,
         _meshPort,
         _sendMulticast,
-        _countPeers,
+        _peersUnverifiable,
       ];
 
+  // Idempotent (take-then-release), so it's safe to run from both cancel() and
+  // run()'s finally, in either order, and it still releases a socket that only
+  // got assigned after the first attempt.
   @override
   Future<void> cleanUp() async {
+    final dg = _dg;
+    _dg = null;
     try {
-      await _dg?.close();
+      await dg?.close();
     } catch (_) {}
     if (_lockHeld) {
+      _lockHeld = false;
       try {
-        await MulticastLock.release();
+        await _lock.release();
       } catch (_) {}
     }
   }
@@ -805,7 +864,8 @@ class LanProbe extends _BaseProbe {
 
   Future<ProbeStep> _mcastLock() => _BaseProbe.timed('MulticastLock', () async {
         final sw = Stopwatch()..start();
-        if (!Platform.isAndroid) {
+        final lock = _lock;
+        if (!lock.needed) {
           return ProbeStep(
             title: 'MulticastLock',
             outcome: ProbeOutcome.skip,
@@ -813,7 +873,24 @@ class LanProbe extends _BaseProbe {
             elapsed: sw.elapsed,
           );
         }
-        await MulticastLock.acquire();
+        // Held already? Then the answer to "is multicast reception enabled" is
+        // yes, and the correct action is to touch nothing. Same shape as the frp
+        // step: check state first, never disturb a live session. Acquiring here
+        // would be a no-op that nonetheless made us believe we owned the lock,
+        // and the release in cleanUp would drop the REAL service's lock —
+        // _LanGroupService acquires once in start() and never again, so it would
+        // quietly stop seeing beacons for the rest of the session while its
+        // existing TCP connections stayed up. Silent, and precisely in the
+        // scenario this feature exists for.
+        if (await lock.isHeld()) {
+          return ProbeStep(
+            title: 'MulticastLock',
+            outcome: ProbeOutcome.pass,
+            detail: '已持有（锁由组队服务持有，未重复获取，也不会在测试结束时释放）',
+            elapsed: sw.elapsed,
+          );
+        }
+        await lock.acquire();
         _lockHeld = true;
         return ProbeStep(
           title: 'MulticastLock',
@@ -847,7 +924,8 @@ class LanProbe extends _BaseProbe {
           return ProbeStep(
             title: '绑定 mesh 端口',
             outcome: ProbeOutcome.fail,
-            detail: '$kMeshPortBase..${kMeshPortBase + kMeshPortProbeCount - 1} 全部不可用',
+            detail:
+                '$kMeshPortBase..${kMeshPortBase + kMeshPortProbeCount - 1} 全部不可用',
             elapsed: sw.elapsed,
             hint: '有别的程序占了这段端口。先关掉它，或重启 App 释放残留监听',
           );
@@ -881,23 +959,27 @@ class LanProbe extends _BaseProbe {
         );
       });
 
-  Future<ProbeStep> _countPeers() =>
-      _BaseProbe.timed('对端应答', () async {
-        final sw = Stopwatch()..start();
-        final n = await (_dg?.countAnswers(deps.timeouts.multicast) ??
-            Future.value(0));
-        return ProbeStep(
-          title: '对端应答',
-          outcome: ProbeOutcome.info,
-          detail: n > 0
-              ? '$n 个成员应答'
-              : '未发现成员（本机已就绪）',
-          elapsed: sw.elapsed,
-          hint: n > 0
-              ? null
-              : '让对方也打开组队、填同一个群组 ID，并确认两台在同一网段',
-        );
-      });
+  /// Honest non-answer, in the same spirit as the relay probe's
+  /// "shared passphrase" step.
+  ///
+  /// This used to count peers, and it could only ever count zero: the probe
+  /// socket is bound to an ephemeral port (it must not steal [kDiscoveryPort]
+  /// from a running group service), multicast delivery matches on destination
+  /// port, and every real beacon is addressed to [kDiscoveryPort] — so no peer
+  /// traffic can reach this socket. The real service has no unicast reply path
+  /// either: a `probe:1` datagram lacks the `p` field, so `_onDatagram` logs one
+  /// warning and returns. Reporting "no members found" with a hint telling the
+  /// user to go check the other phone was therefore worse than saying nothing:
+  /// it sent people chasing a problem the tool had invented. Counting peers for
+  /// real means teaching the group service to unicast a reply — a protocol
+  /// change, not a probe change.
+  Future<ProbeStep> _peersUnverifiable() async => const ProbeStep(
+        title: '对端应答',
+        outcome: ProbeOutcome.skip,
+        detail: '探测用的是临时端口，收不到对端发往 $kDiscoveryPort 的常规信标，'
+            '「有几个成员在线」这一项单机测不出来',
+        elapsed: Duration.zero,
+      );
 }
 
 Future<List<ProbeIface>> _defaultIfaces() async {
@@ -926,10 +1008,12 @@ Future<int> _defaultBindMesh(int base, int count) async {
 
 class _IoDatagram implements ProbeDatagram {
   final RawDatagramSocket _s;
-  int _answers = 0;
   _IoDatagram(this._s) {
+    // Drain only. Nothing addressed to a peer can land here (see
+    // [ProbeDatagram]); the listener exists so anything that does arrive —
+    // our own loopback copy, a stray sender — doesn't sit in the socket buffer.
     _s.listen((e) {
-      if (e == RawSocketEvent.read && _s.receive() != null) _answers++;
+      if (e == RawSocketEvent.read) _s.receive();
     });
   }
 
@@ -948,12 +1032,6 @@ class _IoDatagram implements ProbeDatagram {
       _s.send(data, InternetAddress(kMcastGroup), kDiscoveryPort);
 
   @override
-  Future<int> countAnswers(Duration window) async {
-    await Future<void>.delayed(window);
-    return _answers;
-  }
-
-  @override
   Future<void> close() async => _s.close();
 }
 
@@ -963,4 +1041,20 @@ Future<ProbeDatagram> _defaultDatagram() async {
   s.multicastLoopback = false;
   s.multicastHops = 8;
   return _IoDatagram(s);
+}
+
+/// Production [ProbeMulticastLock]: the same platform channel
+/// `_LanGroupService.start()` uses, plus the `status` query that tells the probe
+/// whether the (process-wide, non-reference-counted) lock is already someone
+/// else's.
+class _PlatformMulticastLock implements ProbeMulticastLock {
+  const _PlatformMulticastLock();
+  @override
+  bool get needed => Platform.isAndroid;
+  @override
+  Future<bool> isHeld() => MulticastLock.isHeld();
+  @override
+  Future<void> acquire() => MulticastLock.acquire();
+  @override
+  Future<void> release() => MulticastLock.release();
 }

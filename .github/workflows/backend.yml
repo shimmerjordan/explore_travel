@@ -208,10 +208,12 @@ jobs:
           \`\`\`bash
           sudo mkdir -p /share/Web/ej_data/backend
           sudo chown -R 1000:1000 /share/Web/ej_data/backend
-          cd /share/Web/ej_data
+          cd /share/Web/ej_data/backend
           \`\`\`
 
           docker 会把不存在的挂载点自动建成 root 所有，而服务以 \`node\`（UID 1000）运行。注意兄弟服务 web-front 的 UID 是 **65532**，两个目录的 \`chown\` 值不一样。
+
+          compose 文件就放在**这个服务自己的目录**里（上面那个 \`cd\` 已经进去了），别放到公共的 \`/share/Web/ej_data\`：web-front 的部署指引长得一样，两份 \`docker-compose.yml\` 落到同一个目录会互相覆盖；而且 compose 用目录名当项目名，两个服务挤进一个 project 后，在那里 \`docker compose up -d --remove-orphans\` 会把另一个容器当孤儿删掉。
 
           **② 写 compose 文件**（整段复制执行。**不需要 .env**——这份文件刻意不使用 \`\${变量}\`）
 

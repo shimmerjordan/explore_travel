@@ -25,11 +25,16 @@
 ```bash
 sudo mkdir -p /share/Web/ej_data/front
 sudo chown -R 65532:65532 /share/Web/ej_data/front   # 容器以 UID 65532 运行
-cd /share/Web/ej_data
+cd /share/Web/ej_data/front
 # 把 web-front/docker-compose.ghcr.yml 放到这里，然后：
 sudo docker compose up -d
 curl localhost:48080/healthz        # {"status":"ok"}
 ```
+
+> compose 文件放在**这个服务自己的目录**里，别放到公共的 `/share/Web/ej_data`：
+> 兄弟服务 `ej-backend` 的部署指引长得一样，两份 `docker-compose.yml` 落到同一个目录会
+> 互相覆盖；而且 compose 用目录名当项目名，两个服务挤进一个 project 后，在那里
+> `docker compose up -d --remove-orphans` 会把另一个容器当孤儿删掉。
 
 那条 `chown` 是必须的：docker 会把不存在的挂载点自动建成 root 所有，而服务以
 nonroot 运行——不改权限的话第一行日志就是 `admin file error`。

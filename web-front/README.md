@@ -121,7 +121,7 @@ BUILD=1 ./scripts/docker-smoke.sh
 | `EJ_TOKEN_TTL_SECS` | `token_ttl_secs` | `3600` | 会话有效期，**每次使用都滑动续期** |
 | `EJ_PROXY_ENABLED` | `proxy_enabled` | `false` | 打开 WebDAV 代理与图片读代理 |
 | `EJ_PROXY_ALLOW_HOSTS` | `proxy_allow_hosts` | — | `/proxy/url` 的精确主机白名单 |
-| `EJ_TRUST_PROXY` | `trust_proxy_header` | `false` | 信任转发头（`CF-Connecting-IP` 优先，回退 `X-Forwarded-For` 最左项）。**经 frp / Cloudflare 暴露时必须开**，否则所有访客共享一个限流桶；**没有反代却开着**则限流桶由调用方自选，等于没有限流 |
+| `EJ_TRUST_PROXY` | `trust_proxy_header` | `false` | 信任转发头（`CF-Connecting-IP` 优先，回退 `X-Forwarded-For` **最右项** —— Cloudflare、Caddy 的 `reverse_proxy` 与 Nginx 常见的 `$proxy_add_x_forwarded_for` 都是**追加**，最右项才是上一跳真正写进去的，左边全是调用方自己填的文本）。**经 frp / Cloudflare 暴露时必须开**，否则所有访客共享一个限流桶；**没有反代却开着**则限流桶由调用方自选，等于没有限流 |
 | `EJ_METRICS_INTERVAL_SECS` | `metrics_interval_secs` | `60` | 采样间隔（上限 86400）。落盘是每 10 个采样点一次 |
 | `EJ_WORKERS` | `workers` | `8` | 工作线程数。**注意**：服务是 thread-per-request 的，见下方威胁模型里关于慢连接的那段 |
 

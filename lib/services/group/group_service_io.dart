@@ -258,10 +258,11 @@ class _LanGroupService implements GroupService {
     this.scanCidrBits = 24,
   });
 
-  static String _safeId(String s) =>
-      s.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '').padRight(1, 'g');
-
-  String get _safeGroup => _safeId(groupId);
+  /// Shared with the frp transport and the connectivity probes. This was the
+  /// fourth byte-identical copy of the same normalization; a beacon whose `g`
+  /// field is computed differently from the one the peer compares against is a
+  /// silent no-discovery bug, which is the reason group_wire.dart exists.
+  String get _safeGroup => wire.groupSafeId(groupId);
 
   @override
   Future<void> start() async {
