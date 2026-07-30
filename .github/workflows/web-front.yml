@@ -75,9 +75,19 @@ jobs:
       # Flutter 只构建一次，两个架构共用：web 产物是纯静态资源，与架构无关。
       # 放在这里（Rust 测试之后、镜像构建之前）是因为 docker build 的 context
       # 需要 web-dist/ 里已经有产物；Dockerfile 的 COPY 不是可选的。
+      # flutter-version 必须钉住，不能只写 channel: stable。裸 stable 会取
+      # 「当时最新」的 stable，于是这条流水线的红绿由上游发版时间决定，而不是由
+      # 本仓库的提交决定 —— 实际发生过一次：stable 走到 3.44.8 时，Flutter 给
+      # TextInputClient 加了 onFocusReceived，而 flutter_quill 11.5.0 是用
+      # `implements TextInputClient` 接入的（implements 不继承默认实现体），
+      # 于是少一个必须的 override，dart2js 直接编译失败。没有任何一次提交碰过
+      # 这里，构建却自己坏了。
+      # 版本与 deploy-web.yml、本地开发环境保持一致；升级 Flutter 是一次独立的、
+      # 需要连 flutter_quill 一起动的改动，不该由 CI 悄悄替我们决定什么时候做。
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
+          flutter-version: '3.32.1' # 与 deploy-web.yml / 本地一致
           cache: true
       - name: 构建 Flutter web 产物
         run: |

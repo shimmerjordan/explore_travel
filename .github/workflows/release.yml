@@ -42,9 +42,12 @@ on:
         type: boolean
         default: true
       flutter_version:
+        # 与 web-front.yml / deploy-web.yml / 本地开发环境一致。这是发版产物的
+        # 工具链版本，改它等于改交付给用户的那个 APK/IPA 是用什么编出来的，
+        # 所以三处必须同版本 —— 否则 CI 绿、发版包却是另一套 SDK 编的。
         description: 'Flutter SDK version'
         required: true
-        default: '3.32.0'
+        default: '3.32.1'
 
 concurrency:
   # One release build at a time per tag — avoids racing artifact uploads.
