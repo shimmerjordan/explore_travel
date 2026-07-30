@@ -63,8 +63,12 @@ class ProbeController extends StateNotifier<ProbeUiState> {
               case ProbeOutcome.skip:
                 groupDiagnostics.trace('probe', line);
             }
+            // running 沿用当前值，不要硬写 true：`cancel()` 先把 running 翻成
+            // false，之后那个还在飞的步骤仍会把结果送到这里（生成器要先跑完当前
+            // 步骤才停），硬写 true 会把「测试中…」和「停止」按钮又点亮回来。
+            // 这一步的结果照常追加 —— 它是真测出来的，该给用户看。
             state = ProbeUiState(
-                running: true,
+                running: state.running,
                 steps: [...state.steps, step],
                 transport: transport);
           },
@@ -89,11 +93,26 @@ class ProbeController extends StateNotifier<ProbeUiState> {
   }
 
   Future<void> cancel() async {
-    // Probe first, subscription second. `_sub.cancel()` waits for the generator
-    // to finish whatever step it's inside — up to the 12s frp login timeout —
-    // so awaiting it first threw away the early teardown `_probe.cancel()`
-    // exists to provide, and the 「停止」 button appeared dead for those 12s.
-    // Flipping the order lets the probe see `_cancelled` and bail out at once.
+    // UI first, teardown second — the button and the 「测试中…」 spinner are both
+    // bound to `st.running`, and teardown is not bounded by anything the user can
+    // see. Some steps have no cancellation point inside them: `await done.future
+    // .timeout(frpLogin)` in the frp login step keeps waiting for up to 12s, and
+    // `await _sub.cancel()` cannot return until the generator finishes the step
+    // it is inside. So as long as the state flip sat after these two awaits,
+    // pressing 「停止」 during frp login changed nothing on screen for up to 12
+    // seconds — indistinguishable from a frozen page. Acknowledging the press
+    // immediately is the honest thing to render: the run IS over as far as the
+    // user is concerned, and nothing below will emit another step into the UI.
+    if (state.running) {
+      state = ProbeUiState(
+          running: false, steps: state.steps, transport: state.transport);
+    }
+
+    // Teardown still runs in exactly the order finding 10 established, just
+    // without the UI waiting on it. Probe first, subscription second:
+    // `_sub.cancel()` waits out the current step, so awaiting it first threw
+    // away the early teardown `_probe.cancel()` exists to provide. This order
+    // lets the probe see `_cancelled` and bail at the next opportunity.
     // Safe because the probe's `cleanUp` is idempotent: running it here and
     // again from `run()`'s `finally` releases each resource exactly once, and
     // anything acquired by an await still in flight is caught by that second
@@ -102,10 +121,6 @@ class ProbeController extends StateNotifier<ProbeUiState> {
     _probe = null;
     await _sub?.cancel();
     _sub = null;
-    if (state.running) {
-      state = ProbeUiState(
-          running: false, steps: state.steps, transport: state.transport);
-    }
   }
 
   @override
