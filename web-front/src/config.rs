@@ -2,11 +2,24 @@ use serde::Deserialize;
 use std::env;
 use std::fs;
 
-/// Config: an optional JSON file (EJ_CONFIG, default /data/config.json) that is
-/// then OVERRIDDEN by environment variables. Edit the file on the NAS volume +
-/// restart the container to reconfigure — no rebuild. (Plan §3.2.)
+/// Server settings: an optional JSON file (EJ_CONFIG, default
+/// `/data/server.json`) that is then OVERRIDDEN by environment variables. Edit
+/// the file on the NAS volume + restart the container to reconfigure — no
+/// rebuild.
+///
+/// The default used to be `/data/config.json`, which is **the same path
+/// `config_store` writes the encrypted user config to**. The collision was
+/// silent in the worst way: `serde(default)` makes every field below optional,
+/// so the encrypted envelope `{v, nonce_b64, ct_b64}` parsed *successfully*
+/// into an all-defaults `Config`. An operator who had set `proxy_enabled` or
+/// `proxy_allow_hosts` in that file lost it the moment a config was pushed from
+/// the phone, with nothing in the log to say why.
+///
+/// Two changes keep it from coming back: the default name no longer collides,
+/// and `deny_unknown_fields` means pointing `EJ_CONFIG` at the wrong file (or
+/// misspelling a key) is a startup error instead of a silent set of defaults.
 #[derive(Clone, Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Config {
     /// Directory holding `admin.json` and the encrypted config blob
     /// `config.json`. Single flat data directory — no SQLite file.
@@ -59,11 +72,21 @@ impl Config {
     pub fn load() -> Result<Config, String> {
         let mut cfg = Config::default();
 
-        let path = env::var("EJ_CONFIG").unwrap_or_else(|_| "/data/config.json".into());
+        let path = env::var("EJ_CONFIG").unwrap_or_else(|_| "/data/server.json".into());
         match fs::read_to_string(&path) {
             Ok(text) => {
-                cfg = serde_json::from_str(&text)
-                    .map_err(|e| format!("parse {path}: {e}"))?;
+                cfg = serde_json::from_str(&text).map_err(|e| {
+                    let hint = if text.contains("ct_b64") {
+                        " — this looks like the ENCRYPTED USER CONFIG, not the \
+server settings file. They are different files: the envelope lives at \
+<data_dir>/config.json and is written by PUT /api/config; server settings \
+default to <data_dir>/server.json. Point EJ_CONFIG at the latter (or unset it)."
+                    } else {
+                        " — unknown keys are rejected on purpose, so a typo \
+fails loudly instead of being silently ignored"
+                    };
+                    format!("parse {path}: {e}{hint}")
+                })?;
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(format!("read {path}: {e}")),
@@ -94,6 +117,11 @@ impl Config {
         if let Ok(v) = env::var("EJ_TOKEN_TTL_SECS") {
             if let Ok(n) = v.parse::<u64>() {
                 cfg.token_ttl_secs = n;
+            }
+        }
+        if let Ok(v) = env::var("EJ_WORKERS") {
+            if let Ok(n) = v.parse::<usize>() {
+                cfg.workers = n;
             }
         }
         if let Ok(v) = env::var("EJ_TRUST_PROXY") {

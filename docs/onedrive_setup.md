@@ -61,9 +61,17 @@ App 通过**微软登录授权**直接读写你 OneDrive 里的一个 App 专属
    而不是 Web/移动平台**，否则浏览器侧的 token 交换会被拒绝
    （`AADSTS9002326`）。重定向 URI 按你的部署填（可多个）：
    ```
-   http://localhost:48082/auth.html          ← 本地测试
-   https://<你的域名>/app/auth.html          ← 线上（build-site.sh 的 /app/ 部署）
+   http://<NAS 或本机>:48080/auth.html       ← web-front 自托管（应用在根路径）
+   https://<你的域名>/app/auth.html          ← 线上宣传站（build-site.sh 的 /app/ 部署）
    ```
+
+   > 两条都要加，因为项目有两个 web 部署形态、回调路径不同：**web-front 镜像**把
+   > 应用托管在根路径，所以回调是 `/auth.html`；**宣传站**把应用放在 `/app/` 下，
+   > 所以回调是 `/app/auth.html`。重定向 URI 必须与页面实际所在的 origin + 路径
+   > 逐字一致，Azure 不做前缀匹配。
+   >
+   > 早先文档里写的 `48082` 是那个已经不存在的独立静态服务的端口——现在 web 由
+   > web-front 自己在 **48080** 上托管。
 4. **Register** 后，在「**概述（Overview）**」复制 **应用程序(客户端) ID**。
 
 ### 第 4 步：权限 + 公共客户端

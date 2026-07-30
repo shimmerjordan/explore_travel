@@ -17,7 +17,7 @@ services:
     restart: unless-stopped
     # High host port. NEVER use 80 / 443 / 8080: consumer ISPs block inbound
     # traffic on those, which makes a home/NAS deployment unreachable from the
-    # internet. Siblings: backend 48081, web display 48082.
+    # internet. Sibling: ej-backend on 48081. (There is no separate static-web service any more — this image serves the web build itself.)
     ports:
       - "${EJ_PORT:-48080}:48080"
     volumes:

@@ -1,21 +1,25 @@
 name: web-front 镜像（GHCR）
 
 # ════════════════════════════════════════════════════════════════════════
-# 编译、验证并发布 web-front/ 的镜像 —— web-front（鉴权 + 零知识保险箱 +
-# 读代理），Rust + distroless，NAS 上一键部署的那个服务。
+# 编译、验证并发布 web-front/ 的镜像：单 admin 登录 + 加密配置保管 + 运维看板
+# + Flutter web 静态托管 + 只读 WebDAV 代理。Rust + distroless，NAS 上一键部署
+# 的那个服务。
 #
 # 这条流水线做什么：
-#   1. cargo test（proxy 的 SSRF 判定、auth、store 的乐观并发）
-#   2. 用与线上完全同一份 Dockerfile 交叉编译出 amd64 与 arm64 两个镜像
-#   3. 对 amd64 与 arm64 两个镜像都打完整 API 冒烟（注册/会话/保险箱往返/
-#      ETag/409/重启持久化/注册关闭/代理默认关闭），arm64 在 QEMU 下跑并额外
-#      核对镜像架构确实是 arm64（防止交叉编译静默产出宿主架构产物）
-#   4. 把双架构 manifest 推到 GHCR
-#   5. 把「镜像地址 + NAS 上怎么一键部署」写进运行摘要页
+#   1. cargo test（SSRF 的两个谓词、Argon2 与密钥域分离、配置密文信封、
+#      路径穿越、限流分桶）
+#   2. 构建一次 Flutter web 产物拷进 web-front/web-dist/ —— 它会被 COPY 进镜像。
+#      只构建一次，两个架构共用（纯静态资源与架构无关）
+#   3. 用与线上完全同一份 Dockerfile 交叉编译出 amd64 与 arm64 两个镜像
+#   4. 对两个镜像都打完整 API 冒烟（登录 / 未鉴权 401 / 配置往返 / 导出脱敏 /
+#      改密后配置仍可读 / 重启持久化 / 代理的两种姿态），arm64 在 QEMU 下跑并
+#      额外核对镜像架构确实是 arm64（防止交叉编译静默产出宿主架构产物）
+#   5. 把双架构 manifest 推到 GHCR
+#   6. 把「镜像地址 + NAS 上怎么一键部署」写进运行摘要页
 #
-# 为什么是交叉编译而不是 QEMU 模拟编译：rusqlite 的 bundled 特性要现编
-# SQLite 的 C 源码，在 QEMU 下编译 Rust + SQLite 单架构就要 40 分钟以上；
-# 交叉编译在原生速度下跑，几分钟完事。见 web-front/Dockerfile。
+# 为什么是交叉编译而不是 QEMU 模拟编译：在 QEMU 下编译 Rust 单架构就要 40 分钟
+# 以上（ring 还要现编 C 与汇编），交叉编译在原生速度下跑几分钟完事。
+# 见 web-front/Dockerfile。
 #
 # PR 只验证不推送；只有 main 上的 push 才会发布 latest。
 # ════════════════════════════════════════════════════════════════════════
@@ -56,7 +60,7 @@ jobs:
       - uses: actions/checkout@v4
 
       # SSRF 判定（回环/私网/链路本地/ULA/IPv4-mapped/元数据地址全拒）、
-      # Argon2 验证、保险箱版本冲突 —— 都是纯逻辑，跑得很快。
+      # Argon2 校验与域分离、配置密文信封、路径穿越 —— 都是纯逻辑，跑得很快。
       - name: Rust 单元测试
         working-directory: web-front
         run: cargo test --locked
@@ -178,7 +182,7 @@ jobs:
 
           cat >> "$S" <<'HEADER'
 
-          **发布对象**：`web-front/` —— web-front（账号鉴权 + 零知识保险箱 + 读代理），Rust 编译进 distroless 镜像，以非 root（UID 65532）运行，无 shell。
+          **发布对象**：`web-front/` —— 单 admin 登录 + 加密配置保管 + 运维看板 + Flutter web 静态托管 + 只读 WebDAV 代理。Rust 编译进 distroless 镜像，以非 root（UID 65532）运行，无 shell，镜像里带着本次构建的 web 产物。
 
           HEADER
 
@@ -206,9 +210,9 @@ jobs:
 
           ### 本次验证了什么
 
-          - **单元测试** —— SSRF 判定（回环 / 私网 / 链路本地 / ULA / IPv4-mapped / 云元数据地址全拒）、Argon2 校验、保险箱版本冲突
-          - **完整 API 冒烟 · amd64 与 arm64 各一遍** —— 注册 → 会话 → 保险箱写入/读回字节一致 → ETag 304 → 过期 `If-Match` 得 409（不会丢更新）→ 同凭据登录成功、错凭据 401 → `docker restart` 后密文仍在 → 关闭注册后新账号被拒 → 读代理默认关闭
-          - **为什么 arm64 也要打全套** —— ring 有 aarch64 专用汇编、Argon2 有架构相关路径、bundled SQLite 是交叉编译出来的 C 代码，「能链接」不等于「算得对」；同时核对镜像架构确为 `arm64`，防止交叉编译静默产出宿主架构的产物
+          - **单元测试** —— SSRF 判定的两个谓词（请求侧拒私网、配置侧允私网但仍拒环回与云元数据）、Argon2 校验与密钥派生的域分离、配置密文信封、路径穿越（字面 / `%2f` / `%252f` 三种）、限流分桶与过期驱逐、指标路由白名单
+          - **完整 API 冒烟 · amd64 与 arm64 各一遍** —— 默认口令 `admin`/`admin` 能登录且自报 `is_default_password` → 未鉴权时配置/指标/导出全部 401 → 配置往返字节一致 → 导出默认脱敏而 `secrets=1` 才出明文 → 看板页免 session 可取 → 无 web 产物时根路径给说明页、带扩展名的路径给 JSON 404 → **改密后用新口令仍能读出配置（验证重加密真的发生了）** → `docker restart` 后会话消失而口令与密文都还在 → 代理关闭时连功能存在都不暴露、打开后写动词 405 且穿越 403
+          - **为什么 arm64 也要打全套** —— ring 有 aarch64 专用汇编、Argon2 有架构相关路径，「能链接」不等于「算得对」；同时核对镜像架构确为 `arm64`，防止交叉编译静默产出宿主架构的产物
 
           VERIFIED
 
@@ -248,18 +252,14 @@ jobs:
 
           cat >> "$S" <<HOWTO2
 
-          **③ 生成配置**（密钥自动生成，别手填；\`EJ_CORS_ORIGINS\` 换成你 web 展示版的实际来源）
+          **③ 指定数据位置**（**没有任何必填的密钥**——早先那个必填的 JWT secret 已经不存在了）
 
           \`\`\`bash
-          cat > .env <<EOF
-          EJ_JWT_SECRET=\$(openssl rand -base64 48)
-          EJ_DATA_PATH=/volume1/docker/web-front/data
-          EJ_CORS_ORIGINS=http://localhost:48082
-          EOF
+          printf 'EJ_DATA_PATH=/volume1/docker/web-front/data\\n' > .env
           sudo chown -R 65532:65532 /volume1/docker/web-front/data
           \`\`\`
 
-          最后那条 \`chown\` 是必须的：容器以 UID 65532 运行，而 bind mount 不会继承镜像里的目录所有权，不改权限数据库就写不进去。
+          那条 \`chown\` 是必须的：容器以 UID 65532 运行，而 bind mount 不会继承镜像里的目录所有权，不改权限服务起不来。
 
           **④ 起服务并自检**
 
@@ -267,6 +267,12 @@ jobs:
           sudo docker compose up -d
           curl localhost:48080/healthz          # → {"status":"ok"}
           \`\`\`
+
+          **⑤ 立刻改掉默认口令**
+
+          浏览器打开 \`http://<NAS>:48080/admin\`，用 \`admin\` / \`admin\` 登录——顶部会挂一条红色横幅，改密表单就内联在里面。**任何能连到这个端口的人都能用默认口令登录并读走你全部云凭据。**
+
+          之后在手机 App 的 **备份 → 「Web 前端 · 配置推送」** 里把配置推上来，浏览器打开 \`http://<NAS>:48080/\` 就能看数据了。
 
           ### 之后的运维
 
@@ -277,18 +283,20 @@ jobs:
           # 钉到本次这个版本（可复现、可回滚）
           echo 'EJ_WEB_FRONT_IMAGE=${IMAGE}:sha-${GITHUB_SHA:0:7}' >> .env && sudo docker compose up -d
 
-          # 备份（保险箱密文全在这一个文件里）
+          # 备份（三个小文件：口令哈希、配置密文、指标）
           sudo tar czf web-front-backup-\$(date +%F).tgz -C /volume1/docker/web-front/data .
 
-          # 建好账号后关掉注册，避免别人注册进来
-          echo 'EJ_ALLOW_REGISTRATION=false' >> .env && sudo docker compose up -d
+          # WebDAV 用户需要打开只读代理（浏览器无法直连 WebDAV）
+          # 在 compose 的 environment 里加 EJ_PROXY_ENABLED: "1"
           \`\`\`
 
           ### 几个容易踩的点
 
-          - **端口**：\`48080\` 是刻意选的高端口。家宽运营商封 \`80\` / \`443\` / \`8080\` 的入方向，配到那三个上从公网连不上。同项目其他服务：ej-backend \`48081\`、web 展示 \`48082\`。
-          - **数据别放网络盘**：\`EJ_DATA_PATH\` 必须指向 NAS 本地文件系统。指到 NFS/SMB 上，SQLite 的 WAL 和 POSIX 锁不可靠，会静默损坏数据库。
-          - **CORS 要精确匹配**：\`EJ_CORS_ORIGINS\` 得和浏览器打开 web 的来源完全一致（协议+主机+端口，结尾不要 \`/\`）。\`http://localhost:48082\` 和 \`http://127.0.0.1:48082\` 是两个不同来源。
-          - **口令派生需要安全上下文**：web 用 \`http://<局域网IP>\` 打开时浏览器不给 \`crypto.subtle\`，派生密钥会直接抛错。用 \`localhost\` 或给 web 配 https。
+          - **端口**：\`48080\` 是刻意选的高端口。家宽运营商封 \`80\` / \`443\` / \`8080\` 的入方向，配到那三个上从公网连不上。同项目另一个服务 ej-backend 用 \`48081\`。
+          - **数据别放网络盘**：\`EJ_DATA_PATH\` 必须指向 NAS 本地文件系统。落盘用「写临时文件 → fsync → 原子改名 → fsync 目录」，NFS/SMB 对这套语义不可靠。
+          - **忘记 admin 口令 = 已存的配置永久读不出来**。配置是用口令派生的密钥加密的，没有恢复通道。出路是从手机端重推一份覆盖它。
+          - **地理定位与 PWA 安装需要安全上下文**：用 \`http://<局域网IP>:48080\` 打开时浏览器不给这些能力。在 NAS 本机用 \`localhost\`，或前面套个带证书的反代。
+          - **必须置于带超时的反代之后**：服务是 thread-per-request 的，8 个慢速连接就能把全部 worker 占死。反代需要**同时**有读超时与响应写超时（或做响应缓冲）。
+          - **OneDrive 重定向 URI**：Azure 应用注册里要加 SPA 平台的 \`http://<NAS>:48080/auth.html\`（早先文档里的 \`48082\` 是那个已不存在的独立静态服务的端口）。
           - **镜像可见性**：本仓库是公开的，经 Actions 用 \`GITHUB_TOKEN\` 推送的包会关联到仓库并随之公开 —— 实测 \`web-front\` 与 \`ej-backend\` 都能**匿名** \`docker pull\`，NAS 上**不需要** \`docker login\`。万一哪天 \`pull\` 报 \`denied\`/\`unauthorized\`，说明那个包是 private，两条路：① NAS 上 \`docker login ghcr.io -u <你的用户名>\`，密码填带 \`read:packages\` 的 PAT，一次就够；② 把包改成公开 —— 包页 → 右侧齿轮 **Package settings** → **滚到页面最底部的 Danger Zone** → **Change visibility**（入口藏得深，容易找不到）。注意公开后**不能再改回私有**。
           HOWTO2

@@ -59,6 +59,29 @@ curl http://localhost:48081/api/status      # 模块状态/内存/在线人数
 | `GROUP_MSGS_PER_SEC` / `GROUP_BYTES_PER_SEC` | 50 / 512K | 单连接限速（PTT 语音 ~4 条/秒也远够用） |
 | `LOG_LEVEL` | info | trace/info/warn/error |
 
+### 只跑一半的两个例子
+
+```yaml
+# 只要排行榜
+services:
+  backend:
+    environment:
+      EJ_MODULE_GROUP: "0"
+# /entries /monthly /index 正常；WebSocket 升级被拒；/api/status 里只有 leaderboard
+```
+
+```yaml
+# 只要组队中继
+services:
+  backend:
+    environment:
+      EJ_MODULE_LEADERBOARD: "0"
+# /group/v1/ws 正常；/entries /monthly /index 返回 404
+```
+
+启动日志会报告实际启用了哪些模块（`modules=leaderboard+group`），
+`GET /api/status` 的 `modules` 字段里也只会出现启用的那些。
+
 ## 部署
 
 **推荐：用 GHCR 上编好的镜像**（不需要源码，不需要在目标机器上编译）。CI 每次

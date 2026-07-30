@@ -7,7 +7,8 @@ services:
     # High host port (left side) — change it freely if 48080 is taken on your NAS,
     # but NEVER to 80 / 443 / 8080: consumer ISPs block inbound traffic on those,
     # so a home/NAS deployment becomes unreachable from the internet. Sibling
-    # services use the adjacent high ports (backend 48081, web display 48082).
+    # service uses the adjacent high port 48081. There is no separate static-web
+    # service any more: this image serves the Flutter web build itself.
     ports:
       - "48080:48080"
     volumes:

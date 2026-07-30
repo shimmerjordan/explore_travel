@@ -7,7 +7,7 @@
 >
 > **同一套 Flutter 代码**还构建出一个**只读的 Web「回忆版」**，在浏览器里重温旅程；
 > 可选用一个极小的自建 **NAS 后端（Rust + Docker）**做登录/多用户隔离——它只把你的
-> **设置**存进**零知识加密保险箱**，永远不碰你的原始旅行数据。
+> **设置**由自建服务加密保管（密钥来自你的 admin 口令），永远不碰你的原始旅行数据。
 
 ![flutter](https://img.shields.io/badge/Flutter-3.32+-02569B?logo=flutter)
 ![平台](https://img.shields.io/badge/平台-Android%20%7C%20iOS%20%7C%20Linux%20%7C%20Web-success)
@@ -41,7 +41,7 @@
 | 🐞 调试模式 | 隐藏入口（首页版本号连点 10 次）· 1000 条环形日志缓冲 + 过滤 / 分享 · 迷雾 / 记录诊断 · 模拟行走面板（Release 版也可用） |
 | 🔒 安全 | 密钥（PAT / 令牌 / WebDAV 密码 / 同行口令）存 `flutter_secure_storage`（Android Keystore / iOS Keychain）· 备份导出**剔除密钥** · 运行时 HTTP 守卫拒绝**明文连公网**（局域网 HTTP 仍可）· 无埋点、无遥测、无第三方分析 SDK |
 | 💾 数据可迁移 | 全部数据 = 一个 SQLite（全表 UUID、FTS5）+ 一个 `journal_media/` 目录 · 标准 GPX / KML / GeoJSON · 无任何厂商绑定 |
-| 🌐 Web 回忆版 | 同一套代码构建到浏览器，作为**只读**展示/回忆版 · drift `WasmDatabase`（IndexedDB）· 导入备份 zip → 重温地图/迷雾/手账/3D 地球 · 可选**登录**：自建 Rust+Docker **NAS 后端**只存**设置**于**零知识保险箱**（你的数据仍在自己的 WebDAV/GitHub）· 支持 **PWA 安装** · 调试模式后门可解锁编辑 · [部署指南](docs/web-display-deploy.md) |
+| 🌐 Web 回忆版 | 同一套代码构建到浏览器，作为**只读**展示/回忆版 · drift `WasmDatabase`（IndexedDB）· 导入备份 zip → 重温地图/迷雾/手账/3D 地球 · 可选**登录**：自建 Rust+Docker **web-front** 只保管一份**加密的设置**（你的数据仍在自己的 WebDAV/GitHub）· 支持 **PWA 安装** · 调试模式后门可解锁编辑 · [部署指南](docs/web-display-deploy.md) |
 
 ---
 
@@ -114,14 +114,14 @@ App 不依赖任何中心服务器，发现 / 连接同伴有四条独立通道�
          web 构建（只读） ┄┄┄ 可选 ┄┄┄┐
 ┌─────────────────────────────────────────────────────────────┐
 │  NAS 后端（Rust + Docker，自建，极小）                      │
-│  • argon2 登录 + JWT   • 只存零知识保险箱（看不到你的设置）  │
+│  • argon2 单 admin 登录  • 只保管一份加密的设置（不存你的数据）│
 │  • SSRF 防护的 WebDAV 代理        （永不接触你的原始数据）   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 **默认零自建后端。** 移动/桌面端唯一的"服务器"是你自己的 WebDAV
 （坚果云 / Nextcloud / AList / Seafile / infinicloud / 自建 dav.sh …）。
-**NAS 后端是可选的**，只为 Web 版做登录、并把*用户的设置*记在零知识保险箱里——
+**web-front 是可选的**，只为 Web 版做登录、并把*用户的设置*加密保管一份——
 你真正的旅行数据从不落在它上面。详见下方 [Web 回忆版](#web-回忆版) 一节。
 
 ---
@@ -142,7 +142,7 @@ App 不依赖任何中心服务器，发现 / 连接同伴有四条独立通道�
 
 登录与多用户隔离由一个极小的自建后端 [`web-front/`](web-front/) 提供
 （tiny_http + rusqlite + argon2 + JWT）。它**唯一**的职责是把每个用户的*设置*
-（同步地址、各家密钥）记在**零知识加密保险箱**里：
+（同步地址、各家密钥）**加密保管**一份：
 
 - 密码 → PBKDF2-HMAC-SHA256（60 万轮）→ HKDF → 内存中的 `vaultKey`（永不上传）
   + `authVerifier`（仅登录用）。设置上传前用 AES-GCM-256 封装。
@@ -153,7 +153,7 @@ App 不依赖任何中心服务器，发现 / 连接同伴有四条独立通道�
 
 ```bash
 cd web-front
-cp .env.example .env          # 设置 EJ_JWT_SECRET（≥32 字节）和端口
+# 不需要任何必填的环境变量
 docker compose up -d          # 默认监听 :48080
 ```
 
@@ -256,7 +256,7 @@ cd build/web && python3 -m http.server 8000
 
 # 或整合站点（落地页在 /、App 在 /app/）→ ./dist：
 bash scripts/build-site.sh
-cd dist && python3 -m http.server 48082
+cd dist && python3 -m http.server 8080   # 打开根路径，不是 /app/
 ```
 
 ### 4. 首次配置
@@ -438,7 +438,7 @@ lib/
 │   ├── p2p/                      AES-GCM 加密 + 线协议
 │   ├── security/                 安全存储 · HTTP 明文守卫
 │   ├── sync/                     SyncStorage 抽象：WebDAV·GitHub·OneDrive·NAS
-│   ├── vault/                    零知识设置保险箱（PBKDF2→HKDF→AES-GCM）
+│   ├── vault/                    admin 登录 + 配置载荷 + 配置同步控制器
 │   ├── backup/backup_service.dart 分块 zip 备份 / 恢复
 │   └── webdav/webdav_service.dart
 └── ui/                           home · map · globe · layers · journal ·
@@ -446,7 +446,7 @@ lib/
     group_setup · imghost · backup · settings · permissions · debug · about ·
     auth（Web 登录/注册）
 
-web-front/                        可选 Rust + Docker 后端（登录 + 保险箱 + WebDAV 代理）
+web-front/                        可选 Rust + Docker 服务（登录 + 加密配置 + 看板 + 静态托管 + 只读 WebDAV 代理）
 ```
 
 单一功能模块单一目录。
@@ -471,7 +471,7 @@ web-front/                        可选 Rust + Docker 后端（登录 + 保险�
 - [x] 地图瓦片离线缓存
 - [x] Quill 富文本内嵌图片
 - [x] 只读 Web「回忆版」（导入 → 展示，支持 PWA）
-- [x] 零知识设置保险箱 + 可选 Rust/Docker NAS 后端
+- [x] 加密的设置保管 + 可选 Rust/Docker web-front（看板 / 导出 / 只读 WebDAV 代理）
 - [x] CI：推送即构建 Web → `web-build` 分支 → Vercel / Cloudflare Pages
 - [ ] 移动端「把设置推送到 NAS」的 UI（Web 端拉取闭环已就绪）
 - [ ] Apple Watch / Wear OS 配套

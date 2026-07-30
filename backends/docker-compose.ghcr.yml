@@ -19,7 +19,7 @@ services:
     container_name: ej-backend
     restart: unless-stopped
     # 高端口。绝不要用 80 / 443 / 8080——家宽运营商封这三个的入方向，
-    # 家里/NAS 部署会从公网完全连不上。兄弟服务：web-front 48080、web 展示 48082。
+    # 家里/NAS 部署会从公网完全连不上。兄弟服务：web-front 48080（它自己托管 web 产物）。
     ports:
       - "${EJ_BACKEND_PORT:-48081}:48081"
     volumes:

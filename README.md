@@ -203,18 +203,27 @@ Login & per-user isolation are served by a tiny self-hosted backend in [`web-fro
 (tiny_http + rusqlite + argon2 + JWT). Its **only** job is to remember each user's *settings*
 — sync URLs, provider keys — inside a **zero-knowledge encrypted vault**:
 
-- Password → PBKDF2-HMAC-SHA256 (600k iters) → HKDF → an in-memory `vaultKey` (never sent) +
-  an `authVerifier` (sent for login). Settings are sealed with AES-GCM-256 before upload.
-- The server stores only ciphertext + an auth verifier; it **cannot read your settings**, and
-  it **never stores your raw travel data** (that stays on your WebDAV/GitHub/OneDrive).
-- It also exposes an **SSRF-guarded WebDAV proxy** so the browser can reach a WebDAV host that
-  lacks CORS, without the server being usable to probe your LAN.
+- **One admin account, no signup.** Argon2id verifies the password; the session is a table in
+  the server's memory (a restart invalidates every session), not a JWT.
+- The phone pushes up the subset of settings needed to reach *your own* cloud. The server keeps
+  that **encrypted at rest** (ChaCha20-Poly1305, key derived from the admin password) and hands
+  it to the web client after login. It **never stores your raw travel data** — that stays on your
+  WebDAV/GitHub/OneDrive.
+- **The server can decrypt that config.** This is a deliberate change from the project's earlier
+  zero-knowledge design: the confidentiality boundary is now the admin password, and what it buys
+  is a browser that holds no cloud credential at all. Forgetting the admin password means the
+  stored config is unrecoverable — push a fresh one from the phone.
+- It also serves the Flutter web build, an operator console at `/admin`, and a **read-only,
+  SSRF-guarded WebDAV proxy** so the browser can reach a WebDAV host that lacks CORS. Write verbs
+  are refused outright: one XSS must not be able to wipe your cloud backup.
 
 ```bash
 cd web-front
-cp .env.example .env          # set EJ_JWT_SECRET (≥32 bytes) and a port
-docker compose up -d          # listens on :48080 by default
+docker compose up -d          # listens on :48080 — no required env vars
 ```
+
+The default password is `admin`/`admin` and **must be changed immediately**; the console shows a
+banner with an inline change-password form until it is.
 
 ### Deploying the web build
 
@@ -279,7 +288,7 @@ cd build/web && python3 -m http.server 8000
 
 # Or the integrated site (promo landing at /, app at /app/) → ./dist :
 bash scripts/build-site.sh
-cd dist && python3 -m http.server 48082
+cd dist && python3 -m http.server 8080   # open the ROOT path, not /app/
 ```
 
 Linux desktop:

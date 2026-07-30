@@ -239,6 +239,24 @@ jobs:
 
           那条 \`chown\` 是必须的：容器以 \`node\`（UID 1000）运行，bind mount 不继承镜像里的目录所有权，不改权限排行榜就写不进去。把生成的两个令牌填进 App：排行榜页「配置社区服务器」填 \`LB_WRITE_TOKEN\`，组队设置「中继令牌」填 \`GROUP_TOKEN\`。
 
+          ### 只想跑一半
+
+          两个模块相互独立。关掉的那个**不会被构造** —— 不注册路由、不开文件、不起定时器：
+
+          \`\`\`yaml
+          # 只要排行榜
+          environment:
+            EJ_MODULE_GROUP: "0"
+          # /entries /monthly /index 正常；WebSocket 升级被拒
+
+          # 只要组队中继
+          environment:
+            EJ_MODULE_LEADERBOARD: "0"
+          # /group/v1/ws 正常；/entries /monthly /index 返回 404
+          \`\`\`
+
+          两个都关会**拒绝启动并以非零码退出**：带零个模块占着端口会通过所有健康检查，却对一切真实请求返回 404，那是最难定位的一类故障。值拼错时模块保持启用并告警 —— 「你想关的还在跑」比「你想要的悄悄没了」容易发现。启动日志与 \`/api/status\` 都会报告实际启用了哪些模块。
+
           ### 之后的运维
 
           \`\`\`bash

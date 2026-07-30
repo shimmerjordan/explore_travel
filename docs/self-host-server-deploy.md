@@ -7,10 +7,15 @@ Explore Journal 的排行榜与组队（位置共享 / 聊天 / 对讲 / 音乐�
 后端代码在仓库 `backends/` 目录：**一个 Node 进程、一个端口、零依赖**，
 同时提供两个模块：
 
-| 模块 | 协议 | 端点 |
-|---|---|---|
-| 排行榜 | HTTP JSON | `/entries` `/monthly/{yyyy-MM}` `/index` |
-| 组队中继 | WebSocket | `/group/v1/ws` |
+| 模块 | 协议 | 端点 | 开关 |
+|---|---|---|---|
+| 排行榜 | HTTP JSON | `/entries` `/monthly/{yyyy-MM}` `/index` | `EJ_MODULE_LEADERBOARD` |
+| 组队中继 | WebSocket | `/group/v1/ws` | `EJ_MODULE_GROUP` |
+
+> **另有一个独立服务 `web-front`（端口 48080）**，用于「在浏览器里回看足迹」：
+> 它托管 web 产物、保管一份加密的配置、并替浏览器读 WebDAV。它与本文说的
+> `ej-backend`（48081）**没有任何关系**，可以只装一个。部署见
+> [web-display-deploy.md](web-display-deploy.md) 与 [web-front/README.md](../web-front/README.md)。
 
 资源占用极小：常驻内存 ~40 MB、空闲 CPU≈0、闲时每成员带宽 ~10 B/s，
 最低配 ECS（1核1G 甚至更小）即可长期运行。
@@ -50,11 +55,37 @@ curl http://localhost:48081/api/status   # 模块状态 / 内存 / 在线人数
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
+| `EJ_MODULE_LEADERBOARD` / `EJ_MODULE_GROUP` | 都开 | 设 `0`（或 `false`/`no`/`off`）只跑其中一半。见下方「只跑一半」 |
 | `LB_WRITE_TOKEN` | 空 | 设置后提交成绩需令牌；读取始终公开 |
 | `GROUP_TOKEN` | 空 | 设置后组队连接需令牌 |
 | `GROUP_MAX_ROOM_SIZE` | 32 | 单房间人数上限 |
 | `TRUST_PROXY` | `1`（compose 内） | 经 frp/CF 暴露时信任转发头做限流分桶 |
 | `LOG_LEVEL` | info | trace / info / warn / error |
+
+### 只跑一半
+
+两个模块相互独立，可以只启用需要的那个。关掉的模块**不会被构造**——不注册路由、
+不开文件、不起定时器，而不只是被路由绕过。
+
+```yaml
+# 只要排行榜（不需要组队中继）
+environment:
+  EJ_MODULE_GROUP: "0"
+# 结果：/entries /monthly /index 正常；WebSocket 升级被拒；/api/status 里只有 leaderboard
+```
+
+```yaml
+# 只要组队中继（不需要排行榜）
+environment:
+  EJ_MODULE_LEADERBOARD: "0"
+# 结果：/group/v1/ws 正常；/entries /monthly /index 返回 404
+```
+
+两个都关会**拒绝启动并以非零码退出**：带零个模块占着端口会通过所有健康检查，却对
+一切真实请求返回 404，那是最难定位的一类故障。
+
+值拼错（比如 `flase`）时模块**保持启用**并在日志里告警——「你想关的还在跑」是吵闹
+且可恢复的，「你想要的服务悄悄没了」才难发现。
 
 ## 三、暴露到公网（三选一，可叠加）
 
