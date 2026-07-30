@@ -11,7 +11,8 @@ class ProbeUiState {
   final bool running;
   final List<ProbeStep> steps;
   final GroupTransport? transport;
-  const ProbeUiState({this.running = false, this.steps = const [], this.transport});
+  const ProbeUiState(
+      {this.running = false, this.steps = const [], this.transport});
 
   ProbeReport? get report => transport == null
       ? null
@@ -49,39 +50,42 @@ class ProbeController extends StateNotifier<ProbeUiState> {
     state = ProbeUiState(running: true, steps: const [], transport: transport);
     final probe = _probe = GroupProbe.forTransport(transport, cfg);
     _sub = probe.run().listen(
-      (step) {
-        // 同步进诊断日志：诊断页天然就有记录，不需要第二套持久化。
-        final line = '${step.title} — ${step.outcome.name} — ${step.detail}';
-        switch (step.outcome) {
-          case ProbeOutcome.fail:
-            groupDiagnostics.error('probe', line);
-          case ProbeOutcome.pass:
-          case ProbeOutcome.info:
-            groupDiagnostics.info('probe', line);
-          case ProbeOutcome.skip:
-            groupDiagnostics.trace('probe', line);
-        }
-        state = ProbeUiState(
-            running: true, steps: [...state.steps, step], transport: transport);
-      },
-      onDone: () => state = ProbeUiState(
-          running: false, steps: state.steps, transport: transport),
-      onError: (Object e) {
-        state = ProbeUiState(
-          running: false,
-          transport: transport,
-          steps: [
-            ...state.steps,
-            ProbeStep(
-              title: '探测中断',
-              outcome: ProbeOutcome.fail,
-              detail: '$e',
-              elapsed: Duration.zero,
-            ),
-          ],
+          (step) {
+            // 同步进诊断日志：诊断页天然就有记录，不需要第二套持久化。
+            final line =
+                '${step.title} — ${step.outcome.name} — ${step.detail}';
+            switch (step.outcome) {
+              case ProbeOutcome.fail:
+                groupDiagnostics.error('probe', line);
+              case ProbeOutcome.pass:
+              case ProbeOutcome.info:
+                groupDiagnostics.info('probe', line);
+              case ProbeOutcome.skip:
+                groupDiagnostics.trace('probe', line);
+            }
+            state = ProbeUiState(
+                running: true,
+                steps: [...state.steps, step],
+                transport: transport);
+          },
+          onDone: () => state = ProbeUiState(
+              running: false, steps: state.steps, transport: transport),
+          onError: (Object e) {
+            state = ProbeUiState(
+              running: false,
+              transport: transport,
+              steps: [
+                ...state.steps,
+                ProbeStep(
+                  title: '探测中断',
+                  outcome: ProbeOutcome.fail,
+                  detail: '$e',
+                  elapsed: Duration.zero,
+                ),
+              ],
+            );
+          },
         );
-      },
-    );
   }
 
   Future<void> cancel() async {
@@ -161,8 +165,7 @@ class ProbeCard extends ConsumerWidget {
                   child: Row(
                     children: [
                       Icon(report.passed ? Icons.check_circle : Icons.error,
-                          size: 18,
-                          color: report.passed ? Colors.green : c.error),
+                          size: 18, color: report.passed ? c.primary : c.error),
                       const SizedBox(width: 6),
                       Expanded(
                           child: Text(report.summary,
@@ -222,10 +225,13 @@ class _StepRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = Theme.of(context).colorScheme;
     final (icon, color) = switch (step.outcome) {
-      ProbeOutcome.pass => (Icons.check, Colors.green),
+      // pass 用品牌青绿 primary（DESIGN.md：primary 就是「点睛/成功」色）；
+      // info 换成 secondary，跟 pass 的 primary 区分开——它是附带信息，不是结果，
+      // 视觉权重要比「通过」低；skip 维持最低权重的 onSurfaceVariant。
+      ProbeOutcome.pass => (Icons.check, c.primary),
       ProbeOutcome.fail => (Icons.close, c.error),
       ProbeOutcome.skip => (Icons.remove, c.onSurfaceVariant),
-      ProbeOutcome.info => (Icons.info_outline, c.primary),
+      ProbeOutcome.info => (Icons.info_outline, c.secondary),
     };
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
