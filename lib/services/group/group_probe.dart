@@ -115,10 +115,50 @@ class ProbeTimeouts {
   });
 }
 
+class ProbeHttpResponse {
+  final int status;
+  final String body;
+  const ProbeHttpResponse(this.status, this.body);
+}
+
+/// Minimal WebSocket surface the relay probe needs. Real impl wraps
+/// `dart:io`'s `WebSocket`; tests supply a fake.
+abstract class ProbeSocket {
+  /// First inbound frame, or null if the socket closed / nothing arrived.
+  Future<String?> firstFrame(Duration timeout);
+  int? get closeCode;
+  Future<void> close();
+}
+
+/// The relay refused the upgrade. `code` is the WebSocket close code (4401 =
+/// bad token in `backends/server/modules/group.js`).
+class WebSocketRejected implements Exception {
+  final int? code;
+  const WebSocketRejected(this.code);
+  @override
+  String toString() => 'WebSocketRejected(code: $code)';
+}
+
 /// Injectable dependencies. Defaults are the production ones; tests pass fakes.
 class ProbeDeps {
   final ProbeTimeouts timeouts;
-  const ProbeDeps({this.timeouts = const ProbeTimeouts()});
+
+  /// Defaults to `guardedDio()`-backed GET in the io impl. Injected so tests
+  /// don't need a server, and so the probe uses the SAME HTTP stack (including
+  /// the plaintext-to-public-internet guard) the app uses everywhere else.
+  final Future<ProbeHttpResponse> Function(
+    Uri url, {
+    Map<String, String>? headers,
+    Duration timeout,
+  })? httpGet;
+
+  final Future<ProbeSocket> Function(Uri url, Duration timeout)? wsConnect;
+
+  const ProbeDeps({
+    this.timeouts = const ProbeTimeouts(),
+    this.httpGet,
+    this.wsConnect,
+  });
 }
 
 abstract class GroupProbe {

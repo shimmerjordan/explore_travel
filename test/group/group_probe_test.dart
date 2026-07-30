@@ -168,4 +168,97 @@ void main() {
       expect(cleanUpCalls, 1);
     });
   });
+
+  group('RelayProbe', relayTests);
+}
+
+class _FakeSocket implements ProbeSocket {
+  final String? frame;
+  @override
+  int? closeCode;
+  bool closed = false;
+  // closeCode isn't set by any current test but is part of the real
+  // ProbeSocket surface; keep it constructible for future cases.
+  // ignore: unused_element_parameter
+  _FakeSocket({this.frame, this.closeCode});
+  @override
+  Future<String?> firstFrame(Duration timeout) async => frame;
+  @override
+  Future<void> close() async => closed = true;
+}
+
+ProbeDeps _deps({
+  Map<String, ProbeHttpResponse>? http,
+  Future<ProbeSocket> Function(Uri, Duration)? ws,
+}) =>
+    ProbeDeps(
+      httpGet: (url, {headers, timeout = const Duration(seconds: 5)}) async {
+        final r = http?[url.path];
+        if (r == null) throw StateError('no fake for ${url.path}');
+        return r;
+      },
+      wsConnect: ws,
+    );
+
+Future<List<ProbeStep>> _run(GroupProbe p) => p.run().toList();
+
+void relayTests() {
+  const cfg = ProbeConfig(
+      groupId: 'g', relayServerUrl: 'https://ej-backend.example.org');
+
+  test('健康 + 模块开 + WS 升级成功 → 通过，口令一致性标 skip', () async {
+    final steps = await _run(RelayProbe(
+      cfg,
+      _deps(
+        http: {
+          '/healthz': const ProbeHttpResponse(200, 'ok'),
+          '/api/status': const ProbeHttpResponse(
+              200, '{"modules":["leaderboard","group"]}'),
+        },
+        ws: (u, t) async => _FakeSocket(frame: '{"type":"hello"}'),
+      ),
+    ));
+    final report = ProbeReport(transport: GroupTransport.relay, steps: steps);
+    expect(report.passed, isTrue);
+    expect(steps.any((s) => s.outcome == ProbeOutcome.skip), isTrue,
+        reason: '共享口令一致性单机测不出来，必须标 skip');
+  });
+
+  test('服务端关掉 group 模块 → 该步 fail 并给出 EJ_MODULE_GROUP 提示', () async {
+    final steps = await _run(RelayProbe(
+      cfg,
+      _deps(
+        http: {
+          '/healthz': const ProbeHttpResponse(200, 'ok'),
+          '/api/status': const ProbeHttpResponse(200, '{"modules":["leaderboard"]}'),
+        },
+        ws: (u, t) async => _FakeSocket(frame: null),
+      ),
+    ));
+    final bad = steps.firstWhere((s) => s.outcome == ProbeOutcome.fail);
+    expect(bad.hint, contains('EJ_MODULE_GROUP'));
+  });
+
+  test('令牌错导致 WS 被关 → 升级步 fail 并提示查中继令牌', () async {
+    final steps = await _run(RelayProbe(
+      cfg,
+      _deps(
+        http: {
+          '/healthz': const ProbeHttpResponse(200, 'ok'),
+          '/api/status': const ProbeHttpResponse(200, '{"modules":["group"]}'),
+        },
+        ws: (u, t) async => throw const WebSocketRejected(4401),
+      ),
+    ));
+    final bad = steps.firstWhere((s) => s.outcome == ProbeOutcome.fail);
+    expect(bad.title, contains('WebSocket'));
+    expect(bad.hint, contains('令牌'));
+  });
+
+  test('地址没配 → 第一步就 fail，不发任何请求', () async {
+    final steps = await _run(RelayProbe(
+        const ProbeConfig(groupId: 'g'), const ProbeDeps()));
+    expect(steps.first.outcome, ProbeOutcome.fail);
+    expect(steps.length, 1);
+  });
 }
