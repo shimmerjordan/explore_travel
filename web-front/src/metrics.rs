@@ -365,7 +365,6 @@ impl Metrics {
     /// stranger.
     // No caller in `main` yet -- the export endpoint is what will use it -- and
     // a binary crate lints an unreachable `pub fn` as dead code.
-    #[allow(dead_code)]
     pub fn snapshot_shareable_json(&self, uptime_secs: u64, rss_mb: u64) -> Value {
         shareable_doc(&self.copy_persisted(), uptime_secs, rss_mb)
     }

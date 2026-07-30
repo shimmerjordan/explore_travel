@@ -4,6 +4,7 @@ mod auth;
 mod config;
 mod config_store;
 mod dashboard;
+mod export;
 mod metrics;
 mod proxy;
 mod session;
@@ -629,6 +630,7 @@ fn route(state: &AppState, req: &Request, method: &str, path: &str, query: &str,
         ("GET", "/api/config") => handle_get_config(state, req),
         ("PUT", "/api/config") => handle_put_config(state, req, body),
         ("GET", "/api/metrics") => handle_metrics(state, req),
+        ("GET", "/api/export") => handle_export(state, req, query),
         // The console is a page, so it deliberately does NOT require a session
         // to be served -- it renders its own login form and then talks to the
         // session-gated endpoints. Serving the shell unauthenticated leaks
@@ -1103,6 +1105,97 @@ fn handle_metrics(state: &AppState, req: &Request) -> Out {
         obj.insert("is_default_password".into(), json!(is_default));
     }
     no_store(Out::json(200, doc))
+}
+
+/// `GET /api/export`: hand the operator their own data back as a download.
+///
+/// Three artifacts, selected by `what`, all behind a session. The one decision
+/// that matters here is that `secrets=1` is the ONLY way to get cleartext
+/// credentials out -- see `export::wants_secrets`. That path is also the only
+/// one that logs, because "someone pulled every cloud credential off this box"
+/// is exactly the line an operator wants to find afterwards, and the access log
+/// alone cannot distinguish it from the scrubbed download.
+fn handle_export(state: &AppState, req: &Request, query: &str) -> Out {
+    let key = match session_token(req).and_then(|t| state.sessions.get_key(&t)) {
+        Some(k) => k,
+        None => return no_store(Out::json(401, json!({"error":"unauthorized"}))),
+    };
+    let what = match export::what(query) {
+        Some(w) => w,
+        None => {
+            return no_store(Out::json(
+                400,
+                json!({"error":"what must be one of config, metrics, all"}),
+            ))
+        }
+    };
+    let secrets = export::wants_secrets(query);
+
+    // Reading the config is the expensive/failable half, so only do it for the
+    // two artifacts that contain one.
+    let config = if what == "config" || what == "all" {
+        match config_store::load(Path::new(&state.cfg.data_dir), &key) {
+            Ok(bytes) => {
+                let mut doc = export::config_doc(bytes);
+                if !secrets {
+                    export::scrub(&mut doc);
+                }
+                Some(doc)
+            }
+            Err(e) if e == config_store::DECRYPT_ERR => {
+                return no_store(Out::json(500, json!({"error": e})))
+            }
+            Err(e) => return server_error("export: load config", &e),
+        }
+    } else {
+        None
+    };
+
+    if secrets && config.is_some() {
+        eprintln!(
+            "AUDIT: cleartext credential export (what={what}) served to a valid session from {}",
+            client_ip(state, req)
+        );
+    }
+
+    // `snapshot_shareable_json`, never `snapshot_json`: the latter carries the
+    // recent-access ring, and that ring carries client IPs. An export is by
+    // definition a file that leaves this machine.
+    let metrics = || {
+        state
+            .metrics
+            .snapshot_shareable_json(state.started.elapsed().as_secs(), metrics::rss_mb())
+    };
+
+    let (body, mime) = match what.as_str() {
+        "config" => (
+            serde_json::to_vec_pretty(&config.unwrap_or_else(|| json!({}))).unwrap_or_default(),
+            "application/json; charset=utf-8",
+        ),
+        "metrics" => (
+            export::metrics_csv(&metrics()).into_bytes(),
+            "text/csv; charset=utf-8",
+        ),
+        "all" => (
+            serde_json::to_vec_pretty(&export::bundle(
+                config.unwrap_or_else(|| json!({})),
+                metrics(),
+            ))
+            .unwrap_or_default(),
+            "application/json; charset=utf-8",
+        ),
+        _ => {
+            return no_store(Out::json(
+                400,
+                json!({"error":"what must be one of config, metrics, all"}),
+            ))
+        }
+    };
+
+    no_store(Out::bytes(200, mime, body)).with(
+        "Content-Disposition",
+        &export::attachment(export::filename(&what, secrets)),
+    )
 }
 
 fn no_store(out: Out) -> Out {
