@@ -100,7 +100,7 @@ class _LeaderboardScreenState extends ConsumerState<LeaderboardScreen> {
                     await _shareSelfId();
                     break;
                   case 'guide':
-                    if (mounted) await openServerGuide(context, client: true);
+                    if (mounted) await openServerGuide(context);
                     break;
                 }
               },

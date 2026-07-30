@@ -39,32 +39,22 @@
 - 手机端「备份 → Web 前端 · 配置推送」也会显示同一条提醒。
 - 服务端只在改密时校验长度（≥ 8 位），别把它当成口令强度策略。
 
-## 在 NAS 上用现成镜像部署（推荐）
+## 在 NAS 上部署
 
 CI 每次推 `main` 都会在容器级 smoke 通过之后，把双架构（amd64 + arm64）镜像推到
-GHCR。NAS 上不需要源码、不需要编译器：
+GHCR，所以 NAS 上不需要源码、不需要编译器：拿本目录的 `docker-compose.ghcr.yml`
+（默认把数据放在宿主目录 `/share/Web/ej_data/front`，首次启动前要
+`chown -R 65532:65532` 它），`docker compose up -d` 即可。它刻意不使用
+`${变量}`，因此也能整段粘进 QNAP Container Station / 群晖 Container Manager 的
+YAML 框。**不需要任何必填的环境变量**——早先那个必填的 JWT secret 已经不存在了。
 
-```bash
-sudo mkdir -p /volume1/docker/web-front/data && cd /volume1/docker/web-front
-# 把本目录的 docker-compose.ghcr.yml 拿过来，然后：
-cat > .env <<'EOF'
-EJ_DATA_PATH=/volume1/docker/web-front/data
-EOF
-sudo chown -R 65532:65532 /volume1/docker/web-front/data   # 容器以 UID 65532 运行
-sudo docker compose up -d
-curl localhost:48080/healthz          # {"status":"ok"}
-# 浏览器打开 http://<NAS>:48080/ 看数据，/admin 是运维看板
-```
+逐步的部署、反代、排错、以及 OneDrive/WebDAV 那些云侧配置，都在
+[docs/web-display-deploy.md](../docs/web-display-deploy.md)，这里不重复。
+「web-front 镜像（GHCR）」这条 workflow 的**运行摘要**还会把同一套步骤连同那次提交
+的确切镜像 tag 一起打出来，从那里复制最省事。
 
-**不需要任何必填的环境变量**——早先那个必填的 JWT secret 已经不存在了。
-
-「web-front 镜像（GHCR）」这条 workflow 的**运行摘要**会把同样的步骤、compose
-文件内容、以及那次提交的确切镜像 tag 一起打出来，从那里复制就是真正的一键部署。
-
-### 端口为什么是 48080
-
-家宽运营商普遍封禁**入方向**的 80 / 443 / 8080。改回这三个端口，家里/NAS 部署
-会从公网完全连不上。兄弟服务 `ej-backend` 用 48081。
+端口 **48080** 是刻意选的高端口：家宽运营商普遍封禁**入方向**的 80 / 443 / 8080，
+改回那三个，家里/NAS 部署会从公网完全连不上。兄弟服务 `ej-backend` 用 48081。
 
 ## 从源码构建
 
@@ -82,12 +72,10 @@ EJ_DATA_DIR=/tmp/ejdata EJ_LISTEN=127.0.0.1:48080 ./target/release/web-front
 
 ## 数据放在哪
 
-`EJ_DATA_PATH` 选存储位置，两个 compose 文件里是同一个变量：
-
-| `EJ_DATA_PATH` | 结果 |
-|---|---|
-| 不设（默认） | Docker **命名卷** —— 零宿主配置，继承镜像里 nonroot 拥有的 `/data` |
-| 绝对路径 | **bind mount** —— 数据在你自己的目录里；首次启动前先 `chown -R 65532:65532 <path>`，否则容器起不来 |
+`/data`（`EJ_DATA_DIR`）。它挂到哪儿由 compose 决定：NAS 那份默认是宿主目录
+`/share/Web/ej_data/front`，源码构建那份默认是 Docker 命名卷 `ej-web-front-data`
+（本地开发不落到你的文件系统上）。两者的取舍、备份与互相迁移见
+[docs/web-display-deploy.md](../docs/web-display-deploy.md) 的「数据放哪」。
 
 里面有三个文件，都很小（总计通常不到 1 MB）：
 
@@ -133,7 +121,7 @@ BUILD=1 ./scripts/docker-smoke.sh
 | `EJ_TOKEN_TTL_SECS` | `token_ttl_secs` | `3600` | 会话有效期，**每次使用都滑动续期** |
 | `EJ_PROXY_ENABLED` | `proxy_enabled` | `false` | 打开 WebDAV 代理与图片读代理 |
 | `EJ_PROXY_ALLOW_HOSTS` | `proxy_allow_hosts` | — | `/proxy/url` 的精确主机白名单 |
-| `EJ_TRUST_PROXY` | `trust_proxy_header` | `false` | 信任 `X-Forwarded-For`。**经 frp / Cloudflare 暴露时必须开**，否则所有访客共享一个限流桶 |
+| `EJ_TRUST_PROXY` | `trust_proxy_header` | `false` | 信任转发头（`CF-Connecting-IP` 优先，回退 `X-Forwarded-For` 最左项）。**经 frp / Cloudflare 暴露时必须开**，否则所有访客共享一个限流桶；**没有反代却开着**则限流桶由调用方自选，等于没有限流 |
 | `EJ_METRICS_INTERVAL_SECS` | `metrics_interval_secs` | `60` | 采样间隔（上限 86400）。落盘是每 10 个采样点一次 |
 | `EJ_WORKERS` | `workers` | `8` | 工作线程数。**注意**：服务是 thread-per-request 的，见下方威胁模型里关于慢连接的那段 |
 
