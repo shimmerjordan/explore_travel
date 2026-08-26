@@ -25,6 +25,14 @@ class AppSettings {
   /// default tile.openstreetmap.org server is unreachable (it often is
   /// from China). Supports {z}/{x}/{y} placeholders.
   final String? customOsmTileUrl;
+
+  /// 奥维 WEB 瓦片服务的 URL 模板（{z}/{x}/{y}，也接受奥维自家的 {$z} 写法）。
+  /// 空 = 未配置，选奥维底图时回落到 OSM 瓦片。
+  final String? ovitalTileUrl;
+
+  /// 奥维瓦片是否为 GCJ-02（奥维大陆境内底图默认 GCJ-02；若接的是
+  /// WGS-84 源可关掉，否则轨迹会偏几百米）。
+  final bool ovitalGcj02;
   final String? aiBaseUrl;
   final String? aiApiKey;
   final String aiModel;
@@ -275,6 +283,8 @@ class AppSettings {
     this.amapApiKey,
     this.googleMapKey,
     this.customOsmTileUrl,
+    this.ovitalTileUrl,
+    this.ovitalGcj02 = true,
     this.aiBaseUrl = 'https://api.siliconflow.cn/v1',
     this.aiApiKey,
     this.aiModel = 'Qwen/Qwen2.5-7B-Instruct',
@@ -380,6 +390,8 @@ class AppSettings {
     String? amapApiKey,
     String? googleMapKey,
     String? customOsmTileUrl,
+    String? ovitalTileUrl,
+    bool? ovitalGcj02,
     String? aiBaseUrl,
     String? aiApiKey,
     String? aiModel,
@@ -483,6 +495,8 @@ class AppSettings {
         amapApiKey: amapApiKey ?? this.amapApiKey,
         googleMapKey: googleMapKey ?? this.googleMapKey,
         customOsmTileUrl: customOsmTileUrl ?? this.customOsmTileUrl,
+        ovitalTileUrl: ovitalTileUrl ?? this.ovitalTileUrl,
+        ovitalGcj02: ovitalGcj02 ?? this.ovitalGcj02,
         aiBaseUrl: aiBaseUrl ?? this.aiBaseUrl,
         aiApiKey: aiApiKey ?? this.aiApiKey,
         aiModel: aiModel ?? this.aiModel,
@@ -602,6 +616,8 @@ class AppSettings {
         'amapApiKey': amapApiKey,
         'googleMapKey': googleMapKey,
         'customOsmTileUrl': customOsmTileUrl,
+        'ovitalTileUrl': ovitalTileUrl,
+        'ovitalGcj02': ovitalGcj02,
         'aiBaseUrl': aiBaseUrl,
         'aiApiKey': aiApiKey,
         'aiModel': aiModel,
@@ -693,10 +709,21 @@ class AppSettings {
         'volcTtsVoice': volcTtsVoice,
       };
 
+  /// Enum-by-index read that survives a value this build doesn't know (a
+  /// newer build added one, then the user downgraded). Out of range used to
+  /// throw RangeError here, and the try/catch around fromJson then reset the
+  /// ENTIRE settings blob to defaults — fog colour, AI keys, sync backend…
+  static T _enumAt<T extends Enum>(List<T> values, Object? raw, T fallback) {
+    if (raw is int && raw >= 0 && raw < values.length) return values[raw];
+    return fallback;
+  }
+
   factory AppSettings.fromJson(Map<String, dynamic> j) => AppSettings(
-        mapProvider: MapProvider.values[j['mapProvider'] ?? 0],
-        mapStyle: MapStyle.values[j['mapStyle'] ?? 0],
-        recordingMode: RecordingMode.values[j['recordingMode'] ?? 1],
+        mapProvider:
+            _enumAt(MapProvider.values, j['mapProvider'], MapProvider.amap),
+        mapStyle: _enumAt(MapStyle.values, j['mapStyle'], MapStyle.standard),
+        recordingMode: _enumAt(
+            RecordingMode.values, j['recordingMode'], RecordingMode.balanced),
         fogColor: j['fogColor'] ?? 0xFF101820,
         fogOpacity: (j['fogOpacity'] ?? 0.78).toDouble(),
         fogPenRadius: (j['fogPenRadius'] ?? 50).toDouble(),
@@ -705,6 +732,8 @@ class AppSettings {
         amapApiKey: j['amapApiKey'],
         googleMapKey: j['googleMapKey'],
         customOsmTileUrl: j['customOsmTileUrl'],
+        ovitalTileUrl: j['ovitalTileUrl'],
+        ovitalGcj02: (j['ovitalGcj02'] ?? true) as bool,
         aiBaseUrl: j['aiBaseUrl'] ?? 'https://api.siliconflow.cn/v1',
         aiApiKey: j['aiApiKey'],
         aiModel: j['aiModel'] ?? 'Qwen/Qwen2.5-7B-Instruct',

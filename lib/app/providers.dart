@@ -28,6 +28,7 @@ import '../services/sync/webdav_sync_storage.dart';
 import '../services/vault/config_sync_controller.dart';
 import '../services/imghost/upload_queue.dart';
 import '../services/backup/backup_service.dart';
+import '../services/geo/coord_converter.dart';
 import '../services/geo/geocoding_service.dart';
 import '../services/geo/learned_regions.dart';
 import '../services/leaderboard/leaderboard_service.dart';
@@ -67,10 +68,12 @@ class SettingsNotifier extends StateNotifier<AppSettings> {
     // can hold rendering until real values are in — otherwise the first
     // frames flash the default veil colour / 14 m trail width.
     state = loaded.copyWith(loaded: true);
+    CoordConverter.ovitalUsesGcj02 = state.ovitalGcj02;
   }
 
   Future<void> update(AppSettings Function(AppSettings) f) async {
     state = f(state);
+    CoordConverter.ovitalUsesGcj02 = state.ovitalGcj02;
     await store.save(state);
   }
 

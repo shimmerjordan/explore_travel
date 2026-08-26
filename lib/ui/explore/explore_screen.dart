@@ -545,6 +545,7 @@ class _LitMapTabState extends ConsumerState<_LitMapTab>
                 amapKey: s.amapApiKey,
                 googleKey: s.googleMapKey,
                 customOsmUrl: s.customOsmTileUrl,
+                ovitalUrl: s.ovitalTileUrl,
               ),
             ),
             PolygonLayer(
@@ -609,20 +610,14 @@ class _LitMapTabState extends ConsumerState<_LitMapTab>
             children: [
               FilledButton.tonal(
                 onPressed: () => setState(() {
-                  _providerOverride = switch (provider) {
-                    MapProvider.amap => MapProvider.google,
-                    MapProvider.google => MapProvider.osm,
-                    MapProvider.osm => MapProvider.amap,
-                  };
+                  // Cycle in enum order so a newly added provider joins
+                  // the rotation without another hand-written chain.
+                  _providerOverride = MapProvider.values[
+                      (provider.index + 1) % MapProvider.values.length];
                 }),
                 style: FilledButton.styleFrom(
                     padding: const EdgeInsets.symmetric(horizontal: 12)),
-                child: Text(
-                    switch (provider) {
-                      MapProvider.amap => '高德',
-                      MapProvider.google => 'Google',
-                      MapProvider.osm => 'OSM',
-                    },
+                child: Text(provider.label,
                     style: const TextStyle(fontSize: 12)),
               ),
               const SizedBox(width: 8),

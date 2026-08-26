@@ -697,6 +697,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                   amapKey: settings.amapApiKey,
                   googleKey: settings.googleMapKey,
                   customOsmUrl: settings.customOsmTileUrl,
+                  ovitalUrl: settings.ovitalTileUrl,
                 ),
                 // Explored-area fog, baked into real map tiles so it pans/zooms
                 // pixel-for-pixel with the base map (fixed thickness, no custom
@@ -941,6 +942,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                     MapProvider.osm => 'OSM',
                     MapProvider.amap => '高德',
                     MapProvider.google => 'G',
+                    MapProvider.ovital => '奥维',
                   },
                   onTap: () {
                     final providers = MapProvider.values;

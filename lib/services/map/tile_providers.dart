@@ -3,6 +3,30 @@ import 'package:flutter_map/flutter_map.dart';
 import '../../models/models.dart';
 import 'cached_tile_provider.dart';
 
+/// Fallback when 奥维 is selected but no tile URL has been configured. Ovital
+/// has no public tile endpoint (see [MapProvider.ovital]), so the only honest
+/// default is a working public map plus the "未配置" hint in settings.
+const String _kOsmStandardUrl = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
+
+/// Normalise a user-entered tile template to flutter_map's placeholders.
+/// Ovital's own dialog writes `{$z}/{$x}/{$y}` and `{$serverpart}`; people
+/// paste those verbatim. Returns null when nothing usable remains.
+String? normalizeTileTemplate(String? raw) {
+  if (raw == null) return null;
+  var s = raw.trim();
+  if (s.isEmpty) return null;
+  s = s
+      .replaceAll(r'{$z}', '{z}')
+      .replaceAll(r'{$x}', '{x}')
+      .replaceAll(r'{$y}', '{y}')
+      .replaceAll(r'{$serverpart}', '{s}')
+      .replaceAll(r'{$s}', '{s}');
+  if (!s.contains('{z}') || !s.contains('{x}') || !s.contains('{y}')) {
+    return null;
+  }
+  return s;
+}
+
 /// Returns a TileLayer for the requested provider + style.
 TileLayer buildTileLayer({
   required MapProvider provider,
@@ -12,6 +36,8 @@ TileLayer buildTileLayer({
   /// Optional override for the OSM raster URL. Useful from China where
   /// tile.openstreetmap.org is often unreachable.
   String? customOsmUrl,
+  /// 奥维 WEB 瓦片服务 template (AppSettings.ovitalTileUrl).
+  String? ovitalUrl,
 }) {
   final ua = kIsWeb ? '' : 'com.explorejournal.app';
 
@@ -77,16 +103,22 @@ TileLayer buildTileLayer({
         subdomains: const ['0', '1', '2', '3'],
       );
     case MapProvider.osm:
-      final url = (customOsmUrl != null && customOsmUrl.trim().isNotEmpty)
-          ? customOsmUrl.trim()
-          : switch (style) {
-              MapStyle.standard =>
-                'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-              MapStyle.satellite =>
-                'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-              MapStyle.hybrid =>
-                'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-            };
+      final url = normalizeTileTemplate(customOsmUrl) ??
+          switch (style) {
+            MapStyle.standard => _kOsmStandardUrl,
+            MapStyle.satellite =>
+              'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+            MapStyle.hybrid =>
+              'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+          };
       return make(url);
+    case MapProvider.ovital:
+      // One template serves every style: which Ovital map it shows is the
+      // `getomap_<mapId>` segment the user put in the URL.
+      final url = normalizeTileTemplate(ovitalUrl);
+      if (url == null) return make(_kOsmStandardUrl);
+      // Ovital's `{s}` (if any) is the user's own server list; we can only
+      // hand it one host, so keep a single-element pool.
+      return make(url, subdomains: url.contains('{s}') ? const ['a'] : const []);
   }
 }

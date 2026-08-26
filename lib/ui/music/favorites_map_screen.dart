@@ -70,6 +70,7 @@ class FavoritesMapScreen extends ConsumerWidget {
                   amapKey: s.amapApiKey,
                   googleKey: s.googleMapKey,
                   customOsmUrl: s.customOsmTileUrl,
+                  ovitalUrl: s.ovitalTileUrl,
                 );
               }(),
               MarkerLayer(

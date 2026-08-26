@@ -1942,6 +1942,7 @@ class _LocationMapStrip extends ConsumerWidget {
                   amapKey: s.amapApiKey,
                   googleKey: s.googleMapKey,
                   customOsmUrl: s.customOsmTileUrl,
+                  ovitalUrl: s.ovitalTileUrl,
                 ),
                 MarkerLayer(markers: [
                   Marker(

@@ -23,12 +23,20 @@ void main() {
     return PrefsStore().load();
   }
 
-  test('a wrong-typed field degrades to defaults instead of throwing', () async {
+  test('a wrong-typed enum field degrades to ITS default, keeping the rest',
+      () async {
     // A string where an enum index is expected — the exact shape that threw.
     final s = await loadWith({'mapStyle': 'dark', 'displayName': '小明'});
     expect(s.mapStyle, const AppSettings().mapStyle);
-    // Everything falls back together: a partially-applied AppSettings would be
-    // harder to reason about than a clean default.
+    // Enum indices are read defensively (an unknown/foreign value falls back
+    // per field), so the rest of the blob survives — this is what protects a
+    // user who downgrades after a newer build stored a provider index this
+    // build doesn't know: their fog colour / keys / sync backend stay put.
+    expect(s.displayName, '小明');
+  });
+
+  test('a wrong-typed non-enum field still degrades the whole blob', () async {
+    final s = await loadWith({'fogOpacity': 'high', 'displayName': '小明'});
     expect(s.displayName, const AppSettings().displayName);
   });
 

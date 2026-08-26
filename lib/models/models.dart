@@ -22,7 +22,23 @@ extension RecordingModeX on RecordingMode {
       };
 }
 
-enum MapProvider { osm, amap, google }
+/// Base-map raster sources. Persisted by INDEX in AppSettings — only ever
+/// append new values, never reorder or insert.
+///
+/// [ovital] is 奥维互动地图's "WEB 瓦片服务": Ovital publishes no public tile
+/// endpoint, so the user's own Ovital instance serves
+/// `http://IP:port/getomap_{mapId}_{z}_{x}_{y}_{ext}_{time}.png` and the app
+/// points at that template (see AppSettings.ovitalTileUrl).
+enum MapProvider { osm, amap, google, ovital }
+
+extension MapProviderX on MapProvider {
+  String get label => switch (this) {
+        MapProvider.osm => 'OSM',
+        MapProvider.amap => '高德',
+        MapProvider.google => 'Google',
+        MapProvider.ovital => '奥维',
+      };
+}
 
 enum MapStyle { standard, satellite, hybrid }
 

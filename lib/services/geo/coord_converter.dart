@@ -85,8 +85,16 @@ class CoordConverter {
     return (lat: wLat, lng: wLng);
   }
 
+  /// Whether the user's Ovital tile service is GCJ-02 (AppSettings.ovitalGcj02).
+  /// Mirrored here by SettingsNotifier so the six coordinate boundaries that
+  /// call [needsGcj02] (map, journal, picker, fog tile shift…) don't each
+  /// need the settings object threaded through.
+  static bool ovitalUsesGcj02 = true;
+
   /// Returns whether a given [MapProvider] uses GCJ-02 tiles.
-  static bool needsGcj02(MapProvider provider) {
-    return provider == MapProvider.amap || provider == MapProvider.google;
-  }
+  static bool needsGcj02(MapProvider provider) => switch (provider) {
+        MapProvider.amap || MapProvider.google => true,
+        MapProvider.ovital => ovitalUsesGcj02,
+        MapProvider.osm => false,
+      };
 }

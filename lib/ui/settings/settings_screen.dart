@@ -17,9 +17,12 @@ class SettingsScreen extends ConsumerWidget {
     final s = ref.watch(settingsProvider);
     final n = ref.read(settingsProvider.notifier);
 
-    final keyCount = [s.customOsmTileUrl, s.amapApiKey, s.googleMapKey]
-        .where((v) => (v ?? '').isNotEmpty)
-        .length;
+    final keyCount = [
+      s.customOsmTileUrl,
+      s.ovitalTileUrl,
+      s.amapApiKey,
+      s.googleMapKey
+    ].where((v) => (v ?? '').isNotEmpty).length;
 
     return Scaffold(
       body: ResponsiveContent(
@@ -107,24 +110,26 @@ class SettingsScreen extends ConsumerWidget {
                     n.update((p) => p.copyWith(fogPenRadius: v)),
               ),
               const _SectionHeader('地图'),
-              _SegmentedTile<MapProvider>(
-                icon: Icons.map_rounded,
-                // 短标题：与右侧三段选择器同行时"地图提供商"会被挤成两行。
-                title: '提供商',
-                segments: const [
-                  ButtonSegment(
-                      value: MapProvider.osm,
-                      label: Text('OSM', style: TextStyle(fontSize: 11))),
-                  ButtonSegment(
-                      value: MapProvider.amap,
-                      label: Text('高德', style: TextStyle(fontSize: 11))),
-                  ButtonSegment(
-                      value: MapProvider.google,
-                      label: Text('Google', style: TextStyle(fontSize: 11))),
-                ],
-                selected: s.mapProvider,
-                onChanged: (v) =>
-                    n.update((p) => p.copyWith(mapProvider: v)),
+              // 四家提供商放不进一行分段选择器（窄屏必溢出），改下拉。
+              ListTile(
+                leading: const Icon(Icons.map_rounded),
+                title: const Text('地图提供商'),
+                subtitle: s.mapProvider == MapProvider.ovital &&
+                        (s.ovitalTileUrl ?? '').trim().isEmpty
+                    ? const Text('奥维未配置瓦片地址，暂用 OSM 显示',
+                        style: TextStyle(color: Colors.orange))
+                    : null,
+                trailing: DropdownButton<MapProvider>(
+                  value: s.mapProvider,
+                  underline: const SizedBox.shrink(),
+                  items: [
+                    for (final p in MapProvider.values)
+                      DropdownMenuItem(value: p, child: Text(p.label)),
+                  ],
+                  onChanged: (v) {
+                    if (v != null) n.update((p) => p.copyWith(mapProvider: v));
+                  },
+                ),
               ),
               SwitchListTile(
                 secondary: const Icon(Icons.screen_rotation_rounded),
@@ -499,7 +504,9 @@ class _MapKeysSheet extends ConsumerWidget {
             '瓦片源与 API Key',
             note: '高德 / Google 的栅格瓦片是公共直连，不填 Key 也能正常显示地图。'
                 'Key 只用于离线缓存配额、地名搜索与 POI 检索。\n'
-                'tile.openstreetmap.org 国内访问常超时，建议用高德或填一个国内可达的 OSM 镜像。',
+                'tile.openstreetmap.org 国内访问常超时，建议用高德或填一个国内可达的 OSM 镜像。\n'
+                '奥维没有公开瓦片服务：在奥维 PC 版「系统设置 → 高级 → 第三方接口 → Web 接口」'
+                '启用 HTTP 瓦块服务后，把它的地址填到下面（{z}/{x}/{y} 或奥维的 {\$z}/{\$x}/{\$y} 都行）。',
           ),
           _SheetField(
             Icons.link_rounded,
@@ -507,6 +514,20 @@ class _MapKeysSheet extends ConsumerWidget {
             s.customOsmTileUrl ?? '',
             (v) => n.update((p) => p.copyWith(customOsmTileUrl: v)),
             hint: '留空用默认；占位符 {z}/{x}/{y}',
+          ),
+          _SheetField(
+            Icons.link_rounded,
+            '奥维 WEB 瓦片服务 URL',
+            s.ovitalTileUrl ?? '',
+            (v) => n.update((p) => p.copyWith(ovitalTileUrl: v)),
+            hint: 'http://192.168.1.2:9999/getomap_202_{z}_{x}_{y}_0_0.png',
+          ),
+          SwitchListTile(
+            secondary: const Icon(Icons.gps_fixed_rounded),
+            title: const Text('奥维瓦片为 GCJ-02'),
+            subtitle: const Text('大陆境内底图默认开；接 WGS-84 源时关掉，否则轨迹偏移'),
+            value: s.ovitalGcj02,
+            onChanged: (v) => n.update((p) => p.copyWith(ovitalGcj02: v)),
           ),
           _SheetField(
             Icons.key_rounded,

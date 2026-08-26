@@ -205,6 +205,7 @@ class TripMiniMapCard extends ConsumerWidget {
                         amapKey: s.amapApiKey,
                         googleKey: s.googleMapKey,
                         customOsmUrl: s.customOsmTileUrl,
+                        ovitalUrl: s.ovitalTileUrl,
                       ),
                       PolylineLayer(polylines: [
                         Polyline(

@@ -89,6 +89,7 @@ class _LocationPickerScreenState extends ConsumerState<_LocationPickerScreen> {
           amapKey: s.amapApiKey,
           googleKey: s.googleMapKey,
           customOsmUrl: s.customOsmTileUrl,
+          ovitalUrl: s.ovitalTileUrl,
         ),
       ],
     );
