@@ -11,6 +11,7 @@ import '../../data/db/database.dart';
 import '../../models/models.dart';
 import '../fog/fog_engine.dart';
 import '../geo/coord_converter.dart';
+import 'tile_providers.dart' show kNativeTileKeepBuffer, kNativeTilePanBuffer;
 
 /// Renders the explored "fog of war" as ordinary Web-Mercator map tiles, so it
 /// is drawn by flutter_map's tile pipeline exactly like the base map: it pans,
@@ -317,13 +318,11 @@ Future<ui.Image> _bakeTileMasked(
 /// White-where-set alpha image from a byte mask.
 Future<ui.Image> _maskToImage(Uint8List mask, int mdim) {
   final rgba = Uint8List(mdim * mdim * 4);
-  for (int i = 0, o = 0; i < mask.length; i++, o += 4) {
-    if (mask[i] != 0) {
-      rgba[o] = 0xFF;
-      rgba[o + 1] = 0xFF;
-      rgba[o + 2] = 0xFF;
-      rgba[o + 3] = 0xFF;
-    }
+  // One 32-bit store per set pixel instead of four byte stores. Opaque white
+  // is 0xFF in every byte, so endianness can't matter.
+  final px = Uint32List.view(rgba.buffer);
+  for (int i = 0; i < mask.length; i++) {
+    if (mask[i] != 0) px[i] = 0xFFFFFFFF;
   }
   return _decode(rgba, mdim);
 }
@@ -386,11 +385,19 @@ Future<ui.Image> _bakeTileSmooth(
   if (byMax > _maxBlockIndex) byMax = _maxBlockIndex;
 
   if (!snap.windowOutsideExtent(bxMin, bxMax, byMin, byMax)) {
+    // Every explored cell is one round-capped point of diameter 2r — the
+    // same anti-aliased disc drawCircle produced, but the whole tile goes to
+    // the GPU as ONE draw call instead of up to 16k (z15 over a dense FOW
+    // import), which is what made a pinch past z14 stutter.
     final disk = ui.Paint()
       ..color = const ui.Color(0xFFFFFFFF)
-      ..isAntiAlias = true;
+      ..isAntiAlias = true
+      ..strokeCap = ui.StrokeCap.round
+      ..strokeWidth = r * 2;
     final lo = -padPx, hi = dimD + padPx;
+    final centres = _PointBuffer();
     void drawDiscs({int? layerId}) {
+      centres.clear();
       snap.forEachBlockInWindow(bxMin, bxMax, byMin, byMax, (t) {
         final bm = t.bitmap;
         final baseGx = t.tileX * w, baseGy = t.tileY * w;
@@ -406,11 +413,14 @@ Future<ui.Image> _bakeTileSmooth(
               final gx = baseGx + byteCol * 8 + bit;
               final cx = (gx + 0.5 - txPpt) * scale + shiftX;
               if (cx < lo || cx > hi) continue;
-              canvas.drawCircle(ui.Offset(cx, cy), r, disk);
+              centres.add(cx, cy);
             }
           }
         }
       }, layerId: layerId);
+      if (centres.length > 0) {
+        canvas.drawRawPoints(ui.PointMode.points, centres.view(), disk);
+      }
     }
 
     if (mode == FogTileMode.mask) {
@@ -433,6 +443,28 @@ Future<ui.Image> _bakeTileSmooth(
     }
   }
   return rec.endRecording().toImage(dim, dim);
+}
+
+/// Growable flat (x,y,x,y…) buffer for [ui.Canvas.drawRawPoints].
+class _PointBuffer {
+  Float32List _buf = Float32List(2048);
+  int _n = 0; // floats used
+
+  int get length => _n >> 1;
+
+  void clear() => _n = 0;
+
+  void add(double x, double y) {
+    if (_n + 2 > _buf.length) {
+      final grown = Float32List(_buf.length * 2);
+      grown.setRange(0, _n, _buf);
+      _buf = grown;
+    }
+    _buf[_n++] = x;
+    _buf[_n++] = y;
+  }
+
+  Float32List view() => Float32List.sublistView(_buf, 0, _n);
 }
 
 /// Per-row bake accelerators, keyed by row object identity (delta updates
@@ -562,25 +594,37 @@ bool _fillMask(FogSnapshot snap, Uint8List mask, int tx, int ty, int z,
       }
       return;
     }
-    for (int py = 0; py < w; py++) {
-      final gy = baseGy + py;
-      final y0 = ((gy - tyPpt) * scale + shiftY).floor() + pad;
-      final y1 = ((gy + 1 - tyPpt) * scale + shiftY).floor() + pad;
-      final rowBase = py * 8;
-      for (int byteCol = 0; byteCol < 8; byteCol++) {
-        final bval = bm[rowBase + byteCol];
-        if (bval == 0) continue;
-        for (int bit = 0; bit < 8; bit++) {
-          if (((bval >> (7 - bit)) & 1) == 0) continue;
-          final gx = baseGx + byteCol * 8 + bit;
-          any = _maskSpan(
-                  mask,
-                  ((gx - txPpt) * scale + shiftX).floor() + pad,
-                  ((gx + 1 - txPpt) * scale + shiftX).floor() + pad,
-                  y0,
-                  y1,
-                  mdim) ||
-              any;
+    // Per-cell tier (z12–14). Walk 8×8 sub-blocks through the same occupancy
+    // memo the sub-block tier uses, so the 512-byte bitmap is only read where
+    // something is set: a typical GPS corridor lights a handful of the 64
+    // sub-blocks, and z12 used to test all 4096 bits of every block in the
+    // window — the 64× cost cliff between z11 and z12 that pinches always
+    // crossed.
+    final sub = _sub8Of(t);
+    for (int sy = 0; sy < 8; sy++) {
+      final bits = sub[sy];
+      if (bits == 0) continue;
+      for (int py = sy << 3; py < (sy << 3) + 8; py++) {
+        final gy = baseGy + py;
+        final y0 = ((gy - tyPpt) * scale + shiftY).floor() + pad;
+        final y1 = ((gy + 1 - tyPpt) * scale + shiftY).floor() + pad;
+        final rowBase = py * 8;
+        for (int byteCol = 0; byteCol < 8; byteCol++) {
+          if ((bits >> byteCol) & 1 == 0) continue;
+          final bval = bm[rowBase + byteCol];
+          if (bval == 0) continue;
+          for (int bit = 0; bit < 8; bit++) {
+            if (((bval >> (7 - bit)) & 1) == 0) continue;
+            final gx = baseGx + byteCol * 8 + bit;
+            any = _maskSpan(
+                    mask,
+                    ((gx - txPpt) * scale + shiftX).floor() + pad,
+                    ((gx + 1 - txPpt) * scale + shiftX).floor() + pad,
+                    y0,
+                    y1,
+                    mdim) ||
+                any;
+          }
         }
       }
     }
@@ -667,9 +711,23 @@ class FogTileLayer extends StatefulWidget {
 
   @override
   State<FogTileLayer> createState() => _FogTileLayerState();
+
+  /// Tell the fog layer whether a map gesture is in progress; live-recording
+  /// re-bakes are deferred while it is. Wire to the map's pointer listener.
+  static void setGestureActive(bool active) {
+    if (_FogTileLayerState.gestureActive.value != active) {
+      _FogTileLayerState.gestureActive.value = active;
+    }
+  }
 }
 
 class _FogTileLayerState extends State<FogTileLayer> {
+  /// True while a finger is on the map (set by the map screen's pointer
+  /// listener). A live-recording publish re-bakes every retained fog tile;
+  /// doing that mid-pinch is the worst possible moment, so publishes are
+  /// held until the gesture ends (see [_applyDelta]).
+  static final ValueNotifier<bool> gestureActive = ValueNotifier(false);
+
   /// Monotonic base across ALL FogTileLayer instances in this process. The
   /// baked-tile ImageCache key is (x,y,z,dim,generation) — if every state
   /// started again at generation 0, leaving and re-entering the map would
@@ -750,20 +808,34 @@ class _FogTileLayerState extends State<FogTileLayer> {
       _deltaDirty = true;
       return;
     }
+    if (gestureActive.value) {
+      // Never re-bake the whole pyramid under a moving finger — hold it and
+      // let the throttle expiry retry once the gesture is over.
+      _deltaDirty = true;
+      _armDeltaThrottle();
+      return;
+    }
     _publish();
     _armDeltaThrottle();
   }
 
   /// While the throttle window is armed, deltas only mark [_deltaDirty];
-  /// each expiry flushes at most one publish and re-arms until quiet.
+  /// each expiry flushes at most one publish and re-arms until quiet. An
+  /// expiry that lands mid-gesture re-arms (shorter) without publishing.
   void _armDeltaThrottle() {
-    _deltaThrottle = Timer(const Duration(seconds: 3), () {
+    final wait = gestureActive.value
+        ? const Duration(milliseconds: 500)
+        : const Duration(seconds: 3);
+    _deltaThrottle = Timer(wait, () {
       if (!mounted) return;
-      if (_deltaDirty) {
-        _deltaDirty = false;
-        _publish();
+      if (!_deltaDirty) return;
+      if (gestureActive.value) {
         _armDeltaThrottle();
+        return;
       }
+      _deltaDirty = false;
+      _publish();
+      _armDeltaThrottle();
     });
   }
 
@@ -816,6 +888,50 @@ class _FogTileLayerState extends State<FogTileLayer> {
     });
   }
 
+  /// Fog tile updates during a gesture. Every MapEvent (one per pinch FRAME)
+  /// used to run load+prune, so the moment `zoom.round()` crossed a .5
+  /// boundary mid-pinch a whole new pyramid level was baked on the UI
+  /// isolate, in the gesture frame. This coalesces: nothing happens while
+  /// events keep coming, ONE pass fires 120 ms after they stop (fingers
+  /// lifted / fling settled), and a long continuous gesture still gets a
+  /// pass at least every 400 ms so a slow pan never runs out of tiles.
+  /// Meanwhile the retained tiles are simply rescaled — the same thing the
+  /// reference WebGL fog does through a zoom animation.
+  static final TileUpdateTransformer _coalesced = _coalescedTransformer(
+    quiet: const Duration(milliseconds: 120),
+    maxWait: const Duration(milliseconds: 400),
+  );
+
+  static TileUpdateTransformer _coalescedTransformer(
+      {required Duration quiet, required Duration maxWait}) {
+    Timer? quietTimer, maxTimer;
+    TileUpdateEvent? pending;
+    return StreamTransformer.fromHandlers(
+      handleData: (event, sink) {
+        if (event.wasTriggeredByTap()) return;
+        pending = event;
+        void emit() {
+          quietTimer?.cancel();
+          maxTimer?.cancel();
+          quietTimer = null;
+          maxTimer = null;
+          final e = pending;
+          pending = null;
+          if (e != null) sink.add(e);
+        }
+
+        quietTimer?.cancel();
+        quietTimer = Timer(quiet, emit);
+        maxTimer ??= Timer(maxWait, emit);
+      },
+      handleDone: (sink) {
+        quietTimer?.cancel();
+        maxTimer?.cancel();
+        sink.close();
+      },
+    );
+  }
+
   TileLayer _tiles(FogTileProvider provider, String kind) => TileLayer(
         // Remount when the snapshot flips empty↔non-empty. The in-place
         // reload below only re-bakes TileImages that ALREADY exist — on a
@@ -830,6 +946,12 @@ class _FogTileLayerState extends State<FogTileLayer> {
         additionalOptions: {'gen': '$_generation'},
         tileSize: 256,
         maxNativeZoom: _kFogMaxNativeZoom, // smooth-baked past the native res
+        // Same off-screen ring as the base map (see tile_providers.dart) —
+        // with fewer fog tiles kept than base tiles, the base stayed while
+        // the fog was pruned and the strip showed veil over visible imagery.
+        keepBuffer: kNativeTileKeepBuffer,
+        panBuffer: kNativeTilePanBuffer,
+        tileUpdateTransformer: _coalesced,
         // Instant (no fade) so the veil never flashes semi-transparent while
         // panning or after a data refresh.
         tileDisplay: const TileDisplay.instantaneous(),
@@ -890,26 +1012,45 @@ class _RenderFogCompositor extends RenderProxyBox {
 
   Color get veil => _veil;
 
-  // The dstOut trick needs the child rasterised into THIS canvas's layer —
-  // never let the child subtree get its own compositing layer.
+  // The mask must rasterise into THIS canvas's layer for the colour filter
+  // below to see it — never let the child subtree get its own compositing
+  // layer.
   @override
   bool get alwaysNeedsCompositing => false;
+
+  /// 5×4 colour matrix that turns the composited corridor masks into the
+  /// veil itself: constant veil RGB, alpha = veilAlpha · (1 − maskAlpha).
+  /// Mask-free pixels (nothing baked, camera jumped, tile still loading)
+  /// therefore come out as full veil — the cover can never vanish — and
+  /// erasing stays idempotent: overlapping white tiles composite (srcOver)
+  /// to a1 + a2(1−a1), so the veil left is (1−a1)(1−a2), exactly what two
+  /// successive dstOut erases produced.
+  static List<double> veilMatrix(Color veil) {
+    final a = veil.a;
+    return <double>[
+      0, 0, 0, 0, veil.r * 255.0, //
+      0, 0, 0, 0, veil.g * 255.0, //
+      0, 0, 0, 0, veil.b * 255.0, //
+      0, 0, 0, -a, a * 255.0,
+    ];
+  }
 
   @override
   void paint(PaintingContext context, Offset offset) {
     final rect = offset & size;
-    final canvas = context.canvas;
-    // Outer group carries the fog opacity, so the veil rect + mask tiles
-    // inside can stay fully opaque (idempotent under overlap).
-    canvas.saveLayer(
-        rect,
-        ui.Paint()
-          ..color = ui.Color.fromARGB(
-              (_veil.a * 255.0).round().clamp(0, 255), 0, 0, 0));
-    canvas.drawRect(rect, ui.Paint()..color = _veil.withValues(alpha: 1.0));
-    canvas.saveLayer(rect, ui.Paint()..blendMode = ui.BlendMode.dstOut);
+    // ONE full-screen offscreen group instead of the previous two (an
+    // opacity group holding an opaque veil rect + a dstOut group for the
+    // masks). Both approaches yield identical pixels; the extra saveLayer was
+    // a fixed per-frame raster-thread cost the whole time the map moved.
+    context.canvas.saveLayer(
+        rect, ui.Paint()..colorFilter = ui.ColorFilter.matrix(veilMatrix(_veil)));
     super.paint(context, offset);
-    canvas.restore();
-    canvas.restore();
+    context.canvas.restore();
   }
 }
+
+/// Test seam: the veil compositor around an arbitrary child, so a test can
+/// paint a known mask and check the resulting veil pixels.
+@visibleForTesting
+Widget fogCompositorForTest({required Color veil, required Widget child}) =>
+    _FogCompositor(veil: veil, child: child);

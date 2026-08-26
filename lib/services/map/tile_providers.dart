@@ -3,6 +3,24 @@ import 'package:flutter_map/flutter_map.dart';
 import '../../models/models.dart';
 import 'cached_tile_provider.dart';
 
+/// Off-screen tile ring shared by the base map AND the fog layers. They must
+/// match: when the fog layer kept fewer tiles than the base map, a pinch or
+/// fast pan pruned the fog first and the exposed strip showed solid veil over
+/// still-visible imagery ("走过的路被雾吞掉又回来").
+///
+/// 3/2 instead of the old 5/3: that ring made the working set ~6.6× the
+/// viewport (≈99 tiles decoded + laid out per layer), which is what panning
+/// paid for every frame.
+const int kNativeTileKeepBuffer = 3;
+const int kNativeTilePanBuffer = 2;
+
+/// Tile updates are driven by MapEvents — one per gesture FRAME by default,
+/// each running a full load + prune pass. Throttling (with the trailing event
+/// preserved, so the final camera is always served) cuts that to ~12/s with
+/// no visible difference.
+final _baseTileUpdates =
+    TileUpdateTransformers.throttle(const Duration(milliseconds: 80));
+
 /// Fallback when 奥维 is selected but no tile URL has been configured. Ovital
 /// has no public tile endpoint (see [MapProvider.ovital]), so the only honest
 /// default is a working public map plus the "未配置" hint in settings.
@@ -41,10 +59,6 @@ TileLayer buildTileLayer({
 }) {
   final ua = kIsWeb ? '' : 'com.explorejournal.app';
 
-  // Retain more off-screen / previous-zoom tiles so panning and pinch-zoom
-  // don't expose blank blocks before the new tiles arrive. `keepBuffer`
-  // holds tiles after they scroll out (and old-zoom tiles during a zoom);
-  // `panBuffer` pre-loads a ring of tiles around the viewport.
   TileLayer make(String url, {List<String> subdomains = const []}) =>
       TileLayer(
         urlTemplate: url,
@@ -55,11 +69,19 @@ TileLayer buildTileLayer({
         // plain NetworkTileProvider (the browser HTTP-caches anyway). Native
         // keeps the persistent on-disk CachedTileProvider.
         tileProvider: kIsWeb ? NetworkTileProvider() : CachedTileProvider(),
-        // Native pre-loads/keeps a generous ring of tiles for buttery panning.
-        // On web every extra tile is another canvaskit composite op per frame,
-        // so keep the working set small — much smoother zoom/pan in a browser.
-        keepBuffer: kIsWeb ? 1 : 5,
-        panBuffer: kIsWeb ? 0 : 3,
+        // On web every extra tile is another canvaskit composite op per
+        // frame, so keep the working set small there.
+        keepBuffer: kIsWeb ? 1 : kNativeTileKeepBuffer,
+        panBuffer: kIsWeb ? 0 : kNativeTilePanBuffer,
+        tileUpdateTransformer: _baseTileUpdates,
+        // No fade-in: old-zoom tiles stay underneath until the new ones are
+        // decoded anyway, and the 100 ms alpha ramp over the beige backdrop
+        // (then multiplied by the dark veil) was the "缩放时底图闪一下". It
+        // also delayed pruning by duration+50 ms.
+        tileDisplay: const TileDisplay.instantaneous(),
+        // Explicit: these sources have no @2x tiles; leaving it unset makes
+        // flutter_map warn and guess.
+        retinaMode: false,
         // A tile that failed (subdomain hiccup, brief offline) must be
         // re-requested when it scrolls back in — the default keeps the error
         // placeholder alive for the whole session, a permanent "hole" that

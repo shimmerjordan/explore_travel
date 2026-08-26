@@ -44,6 +44,10 @@ void main() {
   // once; the 100 MB default thrashes during pinch-zoom and every eviction
   // is a re-decode flash. Modern phones can afford a bigger working set.
   PaintingBinding.instance.imageCache.maximumSizeBytes = 256 << 20;
+  // The ENTRY cap (default 1000) is the one that actually bit: base map +
+  // fog mask + fog tint pyramids plus pin thumbnails evicted each other by
+  // count long before the byte budget, and every eviction is a re-bake.
+  PaintingBinding.instance.imageCache.maximumSize = 4000;
   // Capture every debugPrint into an in-memory ring so the debug log
   // viewer can show them.
   LogBuffer.install();

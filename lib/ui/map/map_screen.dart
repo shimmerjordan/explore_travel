@@ -124,6 +124,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
 
   void _onPointerDown(PointerDownEvent e) {
     _ptrs[e.pointer] = e.position;
+    FogTileLayer.setGestureActive(true);
     if (_ptrs.length == 2) {
       _pinchStartDist = _twoPtrDist();
       _pinchCounted = false;
@@ -145,6 +146,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
 
   void _onPointerUp(PointerEvent e) {
     _ptrs.remove(e.pointer);
+    if (_ptrs.isEmpty) FogTileLayer.setGestureActive(false);
     if (_ptrs.length < 2) {
       _pinchStartDist = null;
       _pinchCounted = false;
@@ -644,7 +646,14 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                       e is MapEventRotateEnd ||
                       e is MapEventMoveEnd) {
                     if (!mounted) return;
-                    setState(() => _mapRotation = e.camera.rotation);
+                    // Only when the compass actually needs to turn: with
+                    // rotation off this fired a full MapScreen rebuild
+                    // (Scaffold, FABs, every map layer) at the end of EVERY
+                    // pan and pinch, to redraw an unchanged north arrow.
+                    final rot = e.camera.rotation;
+                    if (rot != _mapRotation) {
+                      setState(() => _mapRotation = rot);
+                    }
                   }
                   // Track whether we're pressed against the zoom floor; that's
                   // the only time pinch-in attempts count toward the 3D globe.
@@ -1812,9 +1821,14 @@ class _MapScreenState extends ConsumerState<MapScreen> {
               if (mounted) setState(_reloadJournalPins);
             },
             onLongPress: () => _showPinHideMenu(j),
-            child: FittedBox(
-              fit: BoxFit.contain,
-              child: _JournalPin(entry: j),
+            // Each pin is a blurred shadow + anti-aliased circular clip +
+            // photo: cache its raster so panning only translates the layer
+            // instead of re-painting every visible pin per frame.
+            child: RepaintBoundary(
+              child: FittedBox(
+                fit: BoxFit.contain,
+                child: _JournalPin(entry: j),
+              ),
             ),
           ),
         );
@@ -2764,6 +2778,10 @@ class _JournalPin extends StatelessWidget {
               : Image.file(
                   File(firstImage),
                   fit: BoxFit.cover,
+                  // A 40 px bubble; without this the full-resolution photo
+                  // was decoded into the ImageCache (and evicted fog tiles).
+                  cacheWidth: 120,
+                  cacheHeight: 120,
                   errorBuilder: (_, __, ___) => Container(
                     color: const Color(0xFFFF8A65),
                     alignment: Alignment.center,

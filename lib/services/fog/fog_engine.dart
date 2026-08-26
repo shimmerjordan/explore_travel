@@ -44,7 +44,12 @@ class FogEngine {
   /// after a FOW import) on every recording tick. Bulk import does NOT emit —
   /// importers bump the global fog refresh once at the end instead.
   final _changes = StreamController<List<FogTile>>.broadcast();
-  Stream<List<FogTile>> get changes => _changes.stream;
+
+  /// Stored once: a broadcast controller's `.stream` getter returns a NEW
+  /// wrapper object on every read, so consumers comparing streams by
+  /// identity (FogTileLayer.didUpdateWidget) re-subscribed on every parent
+  /// rebuild and dropped any delta that landed between cancel and listen.
+  late final Stream<List<FogTile>> changes = _changes.stream;
 
   void _emitChanged(List<FogTile> rows) {
     if (rows.isNotEmpty && _changes.hasListener) _changes.add(rows);
