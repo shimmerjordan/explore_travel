@@ -227,7 +227,6 @@ class _LanGroupService implements GroupService {
   Timer? _heartbeatTimer;
   Timer? _discoverTimer;
   Timer? _scanTimer;
-  Timer? _triedFlushTimer;
 
   /// Hosts we've already TCP-poked this scan cycle. Cleared periodically so
   /// reachable peers that came online later get a fresh chance.
@@ -325,17 +324,50 @@ class _LanGroupService implements GroupService {
     _discoverTimer =
         Timer.periodic(_discoveryInterval, (_) => _broadcastBeacon());
     // Active subnet scan as a belt-and-suspenders for networks where
-    // multicast is silently dropped. Runs once now, then every 60s.
-    _scanTimer = Timer.periodic(
-        const Duration(seconds: 60), (_) => _scanLan());
-    // Forget who we tried every 5 minutes so peers that came online later
-    // get rediscovered.
-    _triedFlushTimer = Timer.periodic(
-        const Duration(minutes: 5), (_) => _triedHosts.clear());
+    // multicast is silently dropped. Runs once now, then on an adaptive
+    // schedule (see [_scheduleScan]).
+    _scanBackoff = _kScanMin;
     _broadcastBeacon();
     _broadcastHello();
     // Kick off the first scan a beat after start so the server is fully up.
-    Future.delayed(const Duration(seconds: 1), _scanLan);
+    _scanTimer = Timer(const Duration(seconds: 1), _scanTick);
+  }
+
+  static const _kScanMin = Duration(seconds: 60);
+  static const _kScanMax = Duration(minutes: 10);
+  Duration _scanBackoff = _kScanMin;
+
+  /// A /24 sweep is ~1270 TCP connects with 32 workers — the single most
+  /// expensive periodic thing the app does, and it used to run every 60 s
+  /// (with the tried-host memory wiped every 5 min) for as long as a group
+  /// was configured, whoever was or wasn't on the network. Now: while
+  /// nobody has been found the interval doubles 1 → 2 → 4 → 8 → 10 min;
+  /// once a peer is connected we only re-sweep every 10 min for latecomers
+  /// (multicast handles the normal case). Losing every peer drops back to
+  /// the 1-minute cadence.
+  Future<void> _scanTick() async {
+    if (_server == null) return;
+    // Rare sweeps should retry hosts the earlier sweeps gave up on.
+    if (_scanBackoff >= const Duration(minutes: 5)) _triedHosts.clear();
+    try {
+      await _scanLan();
+    } catch (_) {}
+    if (_server == null) return;
+    _scheduleScan();
+  }
+
+  void _scheduleScan() {
+    _scanTimer?.cancel();
+    final Duration next;
+    if (_peerByConn.isNotEmpty) {
+      next = _kScanMax;
+      _scanBackoff = _kScanMin;
+    } else {
+      next = _scanBackoff;
+      final doubled = _scanBackoff * 2;
+      _scanBackoff = doubled > _kScanMax ? _kScanMax : doubled;
+    }
+    _scanTimer = Timer(next, _scanTick);
   }
 
   @override
@@ -343,7 +375,7 @@ class _LanGroupService implements GroupService {
     _heartbeatTimer?.cancel();
     _discoverTimer?.cancel();
     _scanTimer?.cancel();
-    _triedFlushTimer?.cancel();
+    _scanTimer = null;
     _triedHosts.clear();
     try {
       _udp?.close();

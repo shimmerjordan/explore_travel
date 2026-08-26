@@ -48,6 +48,22 @@ class _LocationTaskHandler extends TaskHandler {
   /// Last time we refreshed the notification line (最后定位 HH:mm).
   DateTime _lastNotifUpdate = DateTime.fromMillisecondsSinceEpoch(0);
 
+  /// Stationary detection. `distanceFilter` silences the passive stream
+  /// when the user stops moving, which the stall watchdog then read as a
+  /// dead stream and answered with an active fix every 10–60 s — standing
+  /// still cost MORE battery than walking. Track the last fix that actually
+  /// moved; after [_kStationaryAfter] without movement the watchdog backs
+  /// off to [_kStationaryPoll].
+  Position? _lastMovedPos;
+  DateTime _lastMovedAt = DateTime.fromMillisecondsSinceEpoch(0);
+  static const double _kMoveMeters = 25;
+  static const Duration _kStationaryAfter = Duration(minutes: 3);
+  static const Duration _kStationaryPoll = Duration(minutes: 2);
+
+  bool get _stationary =>
+      _lastMovedAt.millisecondsSinceEpoch != 0 &&
+      DateTime.now().difference(_lastMovedAt) >= _kStationaryAfter;
+
   @override
   Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
     // If the OS auto-restarted us (boot / app-update / low-memory) but the
@@ -106,6 +122,14 @@ class _LocationTaskHandler extends TaskHandler {
   void _emit(Position pos) {
     _lastFixAt = DateTime.now();
     _stallPolls = 0;
+    final prev = _lastMovedPos;
+    if (prev == null ||
+        Geolocator.distanceBetween(prev.latitude, prev.longitude,
+                pos.latitude, pos.longitude) >=
+            _kMoveMeters) {
+      _lastMovedPos = pos;
+      _lastMovedAt = _lastFixAt;
+    }
     final sample = <String, dynamic>{
       'lat': pos.latitude,
       'lng': pos.longitude,
@@ -155,13 +179,18 @@ class _LocationTaskHandler extends TaskHandler {
     // and the user is moving, this never fires (the stream keeps _lastFixAt
     // fresh); it only kicks in when updates have actually stopped.
     final now = DateTime.now();
-    final stallFor = Duration(
-        milliseconds:
-            math.max(_mode.interval.inMilliseconds * 2, 10000));
+    final stationary = _stationary;
+    final stallFor = stationary
+        ? _kStationaryPoll
+        : Duration(
+            milliseconds:
+                math.max(_mode.interval.inMilliseconds * 2, 10000));
     if (now.difference(_lastFixAt) >= stallFor) {
       _activePoll();
       // 流"假活"（订阅在、回调停）也要治：stall 期间每 30s 重订一次。
-      if (now.difference(_lastResub) >= const Duration(seconds: 30)) {
+      // 静止时流本来就该沉默，不算假活，不重订。
+      if (!stationary &&
+          now.difference(_lastResub) >= const Duration(seconds: 30)) {
         _lastResub = now;
         _startStream();
       }
@@ -177,7 +206,8 @@ class _LocationTaskHandler extends TaskHandler {
       FlutterForegroundTask.updateService(
         notificationTitle: 'Explore Journal 正在记录',
         notificationText:
-            '${_mode.label} 模式 · $fix${_forceLm ? ' · GPS 直连' : ''}',
+            '${_mode.label} 模式 · $fix${_forceLm ? ' · GPS 直连' : ''}'
+            '${stationary ? ' · 静止省电' : ''}',
       );
     }
   }
@@ -300,7 +330,9 @@ class BackgroundLocation {
         // firing while the screen is off — without this the foreground
         // service stays alive but its CPU work is deferred during Doze.
         allowWakeLock: true,
-        allowWifiLock: true,
+        // No Wi-Fi lock: GPS recording needs no network, and holding the
+        // radio out of its power-save state all night was pure drain.
+        allowWifiLock: false,
       ),
     );
   }

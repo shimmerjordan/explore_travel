@@ -49,7 +49,8 @@ class MapScreen extends ConsumerStatefulWidget {
   ConsumerState<MapScreen> createState() => _MapScreenState();
 }
 
-class _MapScreenState extends ConsumerState<MapScreen> {
+class _MapScreenState extends ConsumerState<MapScreen>
+    with WidgetsBindingObserver {
   final _mapCtrl = MapController();
   LatLng _center = const LatLng(30.6586, 104.0648);
   _EditMode _editMode = _EditMode.none;
@@ -88,6 +89,18 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   Timer? _locWatchdog;
   Timer? _locRestart;
   int _locBackoffMs = 2000;
+
+  /// While recording, the map mirrors the recording pipeline's accepted
+  /// points instead of running its own GPS stream (see
+  /// [_startLocationStream]); this is that mirror.
+  StreamSubscription? _liveSub;
+  ProviderSubscription<bool>? _recSub;
+
+  /// App is backgrounded / screen off: every location source on this screen
+  /// is torn down until [AppLifecycleState.resumed]. MapScreen is the
+  /// resident home route and is never disposed, so without this the
+  /// high-accuracy stream + watchdog ran all night behind the lock screen.
+  bool _lifecycleSuspended = false;
 
   /// Last reported fix accuracy in metres. Drives the signal-strength
   /// chip top-center on the map. `null` = we've never received a fix
@@ -211,6 +224,11 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    // Recording start/stop swaps the map's position source (own stream ↔
+    // pipeline mirror).
+    _recSub = ref.listenManual<bool>(
+        recordingActiveProvider, (_, __) => _startLocationStream());
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) setState(_reloadJournalPins);
     });
@@ -239,10 +257,13 @@ class _MapScreenState extends ConsumerState<MapScreen> {
           _groupPeerSub = g.peers.listen((peers) {
             ref.read(groupPeersProvider.notifier).state = peers;
           });
-          // Trigger marker re-render every 10s so "stale > 30s" visuals update
-          // even when no new peer message arrives.
-          _peerRefreshTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+          // Re-render peer markers so "stale > 30s" visuals update even when
+          // no new peer message arrives. Only when there IS someone to
+          // redraw: the old unconditional 10 s tick rebuilt the whole
+          // MapScreen forever, peers or not.
+          _peerRefreshTimer = Timer.periodic(const Duration(seconds: 30), (_) {
             final cur = ref.read(groupPeersProvider);
+            if (cur.isEmpty || !mounted) return;
             ref.read(groupPeersProvider.notifier).state = [...cur];
           });
           // Hook group sync controller (music + voice).
@@ -310,14 +331,78 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     );
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    switch (state) {
+      case AppLifecycleState.resumed:
+        if (!_lifecycleSuspended) return;
+        _lifecycleSuspended = false;
+        _startLocationStream();
+      case AppLifecycleState.paused:
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.detached:
+        if (_lifecycleSuspended) return;
+        _lifecycleSuspended = true;
+        _posSub?.cancel();
+        _posSub = null;
+        _liveSub?.cancel();
+        _liveSub = null;
+        _locRestart?.cancel();
+        _locWatchdog?.cancel();
+        _locWatchdog = null;
+      case AppLifecycleState.inactive:
+        break;
+    }
+  }
+
+  /// The map's own (not-recording) stream: this only feeds the blue dot the
+  /// user is looking at, so it asks the fused provider half as often as the
+  /// old hard-coded `high + distanceFilter 3` did (that spelling left the
+  /// interval at geolocator's 5 s default — verified on-device as
+  /// `ProviderRequest[@+5s0ms]`) and delivers a callback — hence a MapScreen
+  /// rebuild — only every 10 m instead of every 3 m.
+  LocationSettings _idleLocationSettings() {
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+      return AndroidSettings(
+        accuracy: LocationAccuracy.high,
+        distanceFilter: 10,
+        intervalDuration: const Duration(seconds: 10),
+      );
+    }
+    return const LocationSettings(
+        accuracy: LocationAccuracy.high, distanceFilter: 10);
+  }
+
   void _startLocationStream() {
     _posSub?.cancel();
+    _posSub = null;
+    _liveSub?.cancel();
+    _liveSub = null;
+    if (_lifecycleSuspended) return; // resumed() will call us again
+    if (ref.read(recordingActiveProvider)) {
+      // Recording: the pipeline already owns a GPS stream (the foreground
+      // service on Android, LocationService elsewhere). Mirror the points
+      // it accepts instead of opening a second, hungrier stream alongside
+      // — that duplicate was the biggest single drain while recording.
+      _liveSub = ref.read(recordingControllerProvider).livePoints.listen((p) {
+        if (!mounted || _simActive) return;
+        setState(() {
+          _wgsLat = p.lat;
+          _wgsLng = p.lng;
+          _accuracyMeters = p.accuracy ?? _accuracyMeters;
+          _accuracyAt = DateTime.now();
+        });
+        _publishDisplayPos();
+        _maybeFollowCamera();
+      });
+      // The pipeline has its own watchdog; ours would only duplicate polls.
+      _locWatchdog?.cancel();
+      _locWatchdog = null;
+      return;
+    }
     try {
       _posSub = Geolocator.getPositionStream(
-        locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.high,
-          distanceFilter: 3,
-        ),
+        locationSettings: _idleLocationSettings(),
       ).listen(
         (pos) {
           _locBackoffMs = 2000; // 有数据 = 健康，重置退避
@@ -352,13 +437,14 @@ class _MapScreenState extends ConsumerState<MapScreen> {
       _warnGeoOnceWeb(null);
       _scheduleLocRestart();
     }
-    // 常驻看门狗：流“假活”（订阅还在但再无回调）时兜底。90s 无 fix →
-    // 重订流 + 主动补一发 currentOnce，让 pin 立刻回来。
-    _locWatchdog ??= Timer.periodic(const Duration(seconds: 30), (_) async {
-      if (!mounted || _simActive || kIsWeb) return;
+    // 看门狗：流“假活”（订阅还在但再无回调）时兜底。3 分钟无 fix →
+    // 重订流 + 主动补一发 currentOnce，让 pin 立刻回来。（只在前台、
+    // 非录制时存在；静止 3 分钟内不动作，别把“人没动”当成“流死了”。）
+    _locWatchdog ??= Timer.periodic(const Duration(seconds: 60), (_) async {
+      if (!mounted || _simActive || kIsWeb || _lifecycleSuspended) return;
       final stale = _accuracyAt == null ||
           DateTime.now().difference(_accuracyAt!) >
-              const Duration(seconds: 90);
+              const Duration(minutes: 3);
       if (!stale) return;
       _startLocationStream();
       final pos = await ref.read(locationServiceProvider).currentOnce();
@@ -386,6 +472,9 @@ class _MapScreenState extends ConsumerState<MapScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _recSub?.close();
+    _liveSub?.cancel();
     _posSub?.cancel();
     _locWatchdog?.cancel();
     _locRestart?.cancel();
@@ -2466,7 +2555,7 @@ class _CenterRecFabState extends State<_CenterRecFab>
   late final AnimationController _pulse = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 1100),
-  )..repeat(reverse: true);
+  );
 
   @override
   void dispose() {
@@ -2474,8 +2563,23 @@ class _CenterRecFabState extends State<_CenterRecFab>
     super.dispose();
   }
 
+  /// The pulse ticker only runs while recording. It used to `repeat()`
+  /// unconditionally from construction — the home map (this widget's host)
+  /// therefore never had an idle frame, and every one of those 60 frames/s
+  /// re-composited the full-screen fog veil underneath.
+  void _syncPulse(BuildContext context) {
+    final want = widget.recording && !MediaQuery.of(context).disableAnimations;
+    if (want && !_pulse.isAnimating) {
+      _pulse.repeat(reverse: true);
+    } else if (!want && _pulse.isAnimating) {
+      _pulse.stop();
+      _pulse.value = 0;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    _syncPulse(context);
     final color =
         widget.recording ? Colors.red.shade700 : const Color(0xFF26A69A);
     return SizedBox(

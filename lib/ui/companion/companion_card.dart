@@ -842,8 +842,7 @@ class _PhaseBeacon extends StatefulWidget {
 class _PhaseBeaconState extends State<_PhaseBeacon>
     with SingleTickerProviderStateMixin {
   late final AnimationController _ctrl = AnimationController(
-      vsync: this, duration: const Duration(milliseconds: 1100))
-    ..repeat();
+      vsync: this, duration: const Duration(milliseconds: 1100));
 
   @override
   void dispose() {
@@ -854,8 +853,11 @@ class _PhaseBeaconState extends State<_PhaseBeacon>
   @override
   Widget build(BuildContext context) {
     if (MediaQuery.of(context).disableAnimations) {
+      // Stop the ticker too — the early return alone left it running.
+      if (_ctrl.isAnimating) _ctrl.stop();
       return Icon(widget.icon, size: 22, color: widget.color);
     }
+    if (!_ctrl.isAnimating) _ctrl.repeat();
     return AnimatedBuilder(
       animation: _ctrl,
       builder: (context, _) => CustomPaint(
