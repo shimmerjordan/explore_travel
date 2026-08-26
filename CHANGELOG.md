@@ -3,6 +3,87 @@
 All notable changes to Explore Journal are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow SemVer once releases start.
 
+## [Unreleased] — 2026-08-26
+
+### 新增
+
+- **奥维地图底图**（[tile_providers.dart](lib/services/map/tile_providers.dart)）：
+  `MapProvider.ovital`（枚举末尾追加，存量设置索引不漂移）。奥维没有公开
+  瓦片端点，接的是用户自己奥维实例开启的「WEB 瓦片服务」
+  `http://IP:端口/getomap_{地图ID}_{z}_{x}_{y}_{ext}_{time}.png`；设置页
+  「瓦片源与 API Key」抽屉新增 URL 与「GCJ-02」开关，模板自动兼容奥维自家
+  的 `{$z}/{$x}/{$y}` 写法，未配置时回落 OSM 并在设置页提示。提供商选择由
+  三段选择器改为下拉（四家放不进一行）。
+- **回放多选合并 + 导出视频**（[playback_screen.dart](lib/ui/playback/playback_screen.dart)、
+  [services/playback/](lib/services/playback/)）：列表可勾选多段记录合并回放；
+  各轨迹各画各的线（按图层颜色），共用一条**去掉空档的时间轴**（同时段
+  的并行播放、隔天的首尾相接），游标从「第几个点」改为真实时间 ×N 倍率，
+  头部在采样点之间插值；新增相机跟随。「导出视频」按 15/30/60 秒把整段
+  回放压成 30 fps H.264 mp4（`flutter_quick_video_encoder`，MediaCodec 硬编，
+  Unlicense），逐帧抓取地图 RepaintBoundary，完成后可 SAF 保存到本地或分享。
+  分段改为**按图层分别切段**（此前两图层同时段记录会被混成一段、距离
+  在两条轨迹间来回跳），回放页底图坐标补上 GCJ-02 纠偏。
+
+### 性能（缩放 / 滑动）
+
+- 迷雾两层 TileLayer 加**手势合并更新器**：手势中不再逐帧 load+prune，
+  停手 120 ms 后一次到位（长手势至少每 400 ms 一次）；录制增量发布在
+  手指按下期间挂起。参考 fog.vicc.wang 的做法：缩放动画期间只缩放已有
+  栅格，重活推到手势结束。
+- `_FogCompositor` 两次全屏 saveLayer 合成一次（颜色矩阵把白色走廊掩膜
+  直接变成带孔的雾幕，像素结果与原 dstOut 方案一致，有测试钉住）。
+- 迷雾烘焙：z12–14 逐格档改走 8×8 子块占位 memo（消除 z11→z12 的 64 倍
+  成本断崖）；z15–17 逐格 `drawCircle` 改为一次 `drawRawPoints`；掩膜→RGBA
+  改 32 位写入。
+- 底图/迷雾瓦片缓冲对齐为 keep 3 / pan 2（此前 5/3 vs 默认 2/1，工作集
+  约 6.6× 视口，且迷雾先被修剪露出雾幕）；底图更新 throttle 80 ms、去掉
+  淡入、显式 `retinaMode: false`；ImageCache 条目上限 1000→4000。
+- 首页：`MapEventMoveEnd` 只在旋转角真正变化时 setState（此前每次平移/
+  缩放结束整屏重建）；手账图钉加 `cacheWidth` + `RepaintBoundary`；
+  `FogEngine.changes` 改为固定字段（广播流每次 getter 都是新对象，曾使
+  地图每次重建都重新订阅并丢增量）。
+
+### 功耗
+
+- **首页地图定位流**：录制中改为镜像录制管线的点（不再与前台服务并开
+  第二路 high/3 m 流）；非录制时 high/10 m + 10 s 间隔（旧写法没设间隔，
+  真机实测落在 geolocator 默认的 `ProviderRequest[@+5s0ms]`，等于请求频率
+  减半、回调频率降到 1/3）；退后台/锁屏时全部停掉（流、看门狗、重订），
+  回前台恢复。看门狗 30 s/90 s → 60 s/3 min。
+- **静止检测**（后台服务）：3 分钟内位移 < 25 m 视为静止，主动补定位
+  从每 10–60 s 放宽到每 2 分钟，不再重订流，通知栏标「静止省电」。
+  去掉 `allowWifiLock`。
+- **组队局域网扫描**：60 s 全子网 TCP 扫描改为自适应（无人 1→2→4→8→10 min
+  退避；已连上队友每 10 min 一次）。
+- 中央录制按钮的脉冲动画只在录制时跑（此前不录制也 60 fps tick，让
+  首页永无空闲帧）；队友刷新定时器 10 s→30 s 且无队友不触发重建；
+  旅伴卡的相位灯在 `disableAnimations` 时真正停掉控制器。
+
+### 修复
+
+- `AppSettings.fromJson` 枚举索引越界不再抛 RangeError——此前会让整份设置
+  回落默认（升级后选了新底图再降级=丢所有设置），现在只该字段回默认。
+- 回放播放器顶栏加渐变遮罩：该页不画雾幕，白色返回键与操作图标（含新的
+  「导出视频」）此前压在明亮底图上几乎不可见。
+
+### 真机验证（Redmi M2012K11C / Android 13 / 120 Hz）
+
+同一套脚本化手势（8 次平移 + 跨 4 级缩放来回 + 2 次平移），
+SurfaceFlinger 逐帧时间戳统计：
+
+| 指标 | 改动前 (82fd02a) | 改动后 |
+|---|---|---|
+| 掉帧 >1.5 vsync | 33.1% | 11.3% |
+| 卡顿 >3 vsync | 5.5% | 0.7% |
+| p95 帧间隔 | 33.0 ms | 16.6 ms |
+| p99 帧间隔 | 66.1 ms | 24.8 ms |
+
+其余实测：奥维模板 `{$z}` 归一化后真实发出 `getomap_202_{z}_{x}_{y}_0_0.png`
+请求并正确渲染；缩放 11 帧零黑块（与改动前持平，未回退）；定位注册数
+空闲前台 1 路 / 后台 0 路 / 录制 1 路（@10 s，前台服务那路）/ 停止后回到 1 路；
+15 秒导出得到 496×1080、30 fps、450 帧、15.000 s 的 H.264 mp4，SAF 保存到
+Download 成功。
+
 ## [Unreleased] — 2026-07-28
 
 ### 性能（同步/备份大提速）
