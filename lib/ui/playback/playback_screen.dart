@@ -1,54 +1,63 @@
+import 'dart:async';
+import 'dart:io';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
+
+import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
+
 import '../../app/providers.dart';
 import '../../data/db/database.dart';
+import '../../services/geo/coord_converter.dart';
 import '../../services/map/tile_providers.dart';
+import '../../services/playback/quick_video_encoder_sink.dart';
+import '../../services/playback/replay_model.dart';
+import '../../services/playback/replay_video_exporter.dart';
 import '../common/pixel.dart';
 
-/// 回放总结：以"一次有效记录（开始→停止，≥10 个点）"为单位的列表，
-/// 顶部年/月筛选。点击进入单次回放。在回放里可叠加：
-///   * 时间窗内的旅行手账（气泡，可隐藏）
-///   * 组队成员同期轨迹（暂未实现持久化，需先在 group_service 里把
-///     接收到的 location 落库才能回放历史）
+/// 回放总结：以"一次有效记录（开始→停止，≥10 个点，单图层）"为单位的列表，
+/// 顶部年/月筛选。点击进入单次回放；勾选多条后可**合并回放**——各条轨迹
+/// 各画各的线、共用一条去掉空档的时间轴（见 replay_model.dart），并可把
+/// 回放导出为 mp4 视频保存到本地。
+///
+/// 世界迷雾（FOW）导入的图层只有位图、没有带时间的轨迹点，因此不会出现在
+/// 这里（列表顶部会提示）。
 class PlaybackScreen extends ConsumerStatefulWidget {
   const PlaybackScreen({super.key});
   @override
   ConsumerState<PlaybackScreen> createState() => _PlaybackScreenState();
 }
 
-/// One "session" — a contiguous run of GPS samples separated from
-/// neighbours by [_kSessionGapMinutes] of silence. Built lazily from the
-/// full TrackPoints table on screen-load.
-class _Session {
-  final List<TrackPoint> points;
-  _Session(this.points);
-  DateTime get start => points.first.time;
-  DateTime get end => points.last.time;
-  int get pointCount => points.length;
-  double get distanceKm {
-    double m = 0;
-    for (int i = 1; i < points.length; i++) {
-      m += _haversineMeters(points[i - 1].lat, points[i - 1].lng,
-          points[i].lat, points[i].lng);
-    }
-    return m / 1000;
-  }
-
-  Duration get duration => end.difference(start);
+/// Per-layer look used by the list and the player.
+class _LayerStyle {
+  final String name;
+  final Color color;
+  const _LayerStyle(this.name, this.color);
 }
 
-const int _kSessionGapMinutes = 10;
-const int _kMinPointsPerSession = 10;
+_LayerStyle _styleOf(Map<int, TrackLayer> layers, int layerId) {
+  final l = layers[layerId];
+  if (l == null) return _LayerStyle('图层 $layerId', const Color(0xFF26A69A));
+  return _LayerStyle(l.name, Color(l.pathColor ?? l.colorValue));
+}
 
 class _PlaybackScreenState extends ConsumerState<PlaybackScreen> {
-  List<_Session> _all = const [];
+  List<ReplaySession> _all = const [];
+  Map<int, TrackLayer> _layers = const {};
+  int _layersWithoutTrack = 0;
   bool _loading = true;
   int? _filterYear;
   int? _filterMonth; // null = whole year
+  final Set<ReplaySession> _selected = {};
 
   @override
   void initState() {
@@ -59,44 +68,36 @@ class _PlaybackScreenState extends ConsumerState<PlaybackScreen> {
   Future<void> _reload() async {
     setState(() => _loading = true);
     final db = ref.read(dbProvider);
-    final all = await db.select(db.trackPoints).get();
-    all.sort((a, b) => a.time.compareTo(b.time));
-    final sessions = _splitIntoSessions(all);
-    sessions.sort((a, b) => b.start.compareTo(a.start)); // newest first
+    final points = await db.select(db.trackPoints).get();
+    final layers = await db.select(db.trackLayers).get();
+    final sessions = splitIntoSessions(points);
+    final withTrack = sessions.map((s) => s.layerId).toSet();
     if (!mounted) return;
     setState(() {
       _all = sessions;
+      _layers = {for (final l in layers) l.id: l};
+      _layersWithoutTrack =
+          layers.where((l) => !withTrack.contains(l.id)).length;
+      _selected.removeWhere((s) => !sessions.contains(s));
       _loading = false;
     });
   }
 
-  static List<_Session> _splitIntoSessions(List<TrackPoint> all) {
-    if (all.isEmpty) return const [];
-    final out = <_Session>[];
-    var bucket = <TrackPoint>[all.first];
-    for (int i = 1; i < all.length; i++) {
-      final gap = all[i].time.difference(all[i - 1].time).inMinutes;
-      if (gap >= _kSessionGapMinutes) {
-        if (bucket.length >= _kMinPointsPerSession) {
-          out.add(_Session(List.of(bucket)));
-        }
-        bucket = <TrackPoint>[all[i]];
-      } else {
-        bucket.add(all[i]);
-      }
-    }
-    if (bucket.length >= _kMinPointsPerSession) {
-      out.add(_Session(List.of(bucket)));
-    }
-    return out;
-  }
-
-  List<_Session> get _filtered {
+  List<ReplaySession> get _filtered {
     return _all.where((s) {
       if (_filterYear != null && s.start.year != _filterYear) return false;
       if (_filterMonth != null && s.start.month != _filterMonth) return false;
       return true;
     }).toList();
+  }
+
+  void _openPlayer(List<ReplaySession> sessions) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => _PlayerScreen(sessions: sessions, layers: _layers),
+      ),
+    );
   }
 
   @override
@@ -107,19 +108,48 @@ class _PlaybackScreenState extends ConsumerState<PlaybackScreen> {
     }.toList()
       ..sort((a, b) => b.compareTo(a));
     final list = _filtered;
+    final selecting = _selected.isNotEmpty;
 
     return Scaffold(
       appBar: AppBar(
-        title: Text('回放 / 总结',
+        title: Text(
+            selecting ? '已选 ${_selected.length} 段' : '回放 / 总结',
             style: PixelText.headline
                 .copyWith(color: Theme.of(context).colorScheme.onSurface)),
+        leading: selecting
+            ? IconButton(
+                tooltip: '取消选择',
+                icon: const Icon(Icons.close_rounded),
+                onPressed: () => setState(_selected.clear),
+              )
+            : null,
         actions: [
+          if (selecting)
+            TextButton(
+              onPressed: () => setState(() => _selected.addAll(list)),
+              child: const Text('全选'),
+            ),
           IconButton(
             icon: const Icon(Icons.refresh_rounded),
             onPressed: _reload,
           ),
         ],
       ),
+      bottomNavigationBar: selecting
+          ? SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+                child: FilledButton.icon(
+                  icon: const Icon(Icons.merge_rounded),
+                  label: Text('合并回放这 ${_selected.length} 段'),
+                  onPressed: () {
+                    final picked = _all.where(_selected.contains).toList();
+                    _openPlayer(picked);
+                  },
+                ),
+              ),
+            )
+          : null,
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : Column(
@@ -164,33 +194,24 @@ class _PlaybackScreenState extends ConsumerState<PlaybackScreen> {
                 ),
                 // ── Aggregate header for the filtered set ─────────────
                 _PeriodSummary(sessions: list),
-                if (list.isNotEmpty)
+                if (_layersWithoutTrack > 0)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
+                    child: Text(
+                      '$_layersWithoutTrack 个图层只有迷雾数据（如世界迷雾导入），'
+                      '没有带时间的轨迹点，无法回放',
+                      style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
+                    ),
+                  ),
+                if (list.isNotEmpty && !selecting)
                   Padding(
                     padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
                     child: SizedBox(
                       width: double.infinity,
-                      child: FilledButton.icon(
+                      child: FilledButton.tonalIcon(
                         icon: const Icon(Icons.play_arrow_rounded),
-                        label: Text('一次性回放本筛选下的 ${list.length} 次记录'),
-                        onPressed: () {
-                          // Stitch all filtered sessions head-to-tail
-                          // into one virtual session for combined playback.
-                          // The player itself doesn't care that the points
-                          // span multiple physical recordings — they're
-                          // just a long ordered list of TrackPoints.
-                          final pts = <TrackPoint>[
-                            for (final s in list.reversed) ...s.points,
-                          ]..sort((a, b) => a.time.compareTo(b.time));
-                          Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (_) => _PlayerScreen(
-                                session: _Session(pts),
-                                stitchedCount: list.length,
-                              ),
-                            ),
-                          );
-                        },
+                        label: Text('合并回放本筛选下的 ${list.length} 段记录'),
+                        onPressed: () => _openPlayer(list),
                       ),
                     ),
                   ),
@@ -209,8 +230,19 @@ class _PlaybackScreenState extends ConsumerState<PlaybackScreen> {
                           itemCount: list.length,
                           separatorBuilder: (_, __) =>
                               const Divider(height: 1),
-                          itemBuilder: (_, i) =>
-                              _SessionTile(session: list[i]),
+                          itemBuilder: (_, i) {
+                            final s = list[i];
+                            return _SessionTile(
+                              session: s,
+                              style: _styleOf(_layers, s.layerId),
+                              selected: _selected.contains(s),
+                              selecting: selecting,
+                              onToggle: () => setState(() {
+                                if (!_selected.remove(s)) _selected.add(s);
+                              }),
+                              onOpen: () => _openPlayer([s]),
+                            );
+                          },
                         ),
                 ),
               ],
@@ -219,38 +251,49 @@ class _PlaybackScreenState extends ConsumerState<PlaybackScreen> {
   }
 }
 
-/// Single-line session row, tap to open the player.
-class _SessionTile extends ConsumerWidget {
-  final _Session session;
-  const _SessionTile({required this.session});
+/// Single-line session row. Tap opens the player (or toggles selection while
+/// selecting); long-press / the checkbox toggles selection.
+class _SessionTile extends StatelessWidget {
+  final ReplaySession session;
+  final _LayerStyle style;
+  final bool selected;
+  final bool selecting;
+  final VoidCallback onToggle;
+  final VoidCallback onOpen;
+  const _SessionTile({
+    required this.session,
+    required this.style,
+    required this.selected,
+    required this.selecting,
+    required this.onToggle,
+    required this.onOpen,
+  });
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     return ListTile(
+      selected: selected,
       leading: Container(
         width: 40,
         height: 40,
         decoration: BoxDecoration(
-          color: cs.primary.withValues(alpha: 0.15),
+          color: style.color.withValues(alpha: 0.18),
           shape: BoxShape.circle,
         ),
-        child: Icon(Icons.route_rounded, color: cs.primary),
+        child: Icon(Icons.route_rounded, color: style.color),
       ),
       title: Text(DateFormat('yyyy-MM-dd HH:mm').format(session.start)),
       subtitle: Text(
+        '${style.name} · '
         '${session.distanceKm.toStringAsFixed(2)} km · '
         '${session.duration.inMinutes} 分 · '
         '${session.pointCount} 点',
         style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
       ),
-      trailing: const Icon(Icons.chevron_right_rounded),
-      onTap: () => Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (_) => _PlayerScreen(session: session),
-        ),
-      ),
+      trailing: Checkbox(value: selected, onChanged: (_) => onToggle()),
+      onTap: selecting ? onToggle : onOpen,
+      onLongPress: onToggle,
     );
   }
 }
@@ -258,18 +301,15 @@ class _SessionTile extends ConsumerWidget {
 /// Sticky header that aggregates "this filter slice" — total distance,
 /// total duration, session count, point count.
 class _PeriodSummary extends StatelessWidget {
-  final List<_Session> sessions;
+  final List<ReplaySession> sessions;
   const _PeriodSummary({required this.sessions});
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final totalKm =
-        sessions.fold<double>(0, (a, s) => a + s.distanceKm);
-    final totalMin =
-        sessions.fold<int>(0, (a, s) => a + s.duration.inMinutes);
-    final totalPts =
-        sessions.fold<int>(0, (a, s) => a + s.pointCount);
+    final totalKm = sessions.fold<double>(0, (a, s) => a + s.distanceKm);
+    final totalMin = sessions.fold<int>(0, (a, s) => a + s.duration.inMinutes);
+    final totalPts = sessions.fold<int>(0, (a, s) => a + s.pointCount);
     return Container(
       margin: const EdgeInsets.fromLTRB(16, 6, 16, 8),
       padding: const EdgeInsets.all(14),
@@ -303,30 +343,47 @@ class _PeriodSummary extends StatelessWidget {
       );
 }
 
-// ─── Single-session player ──────────────────────────────────────────────
+// ─── Player (one or many sessions on a shared timeline) ─────────────────
 
 class _PlayerScreen extends ConsumerStatefulWidget {
-  final _Session session;
-  /// >1 when this is a stitched virtual session (multiple recordings
-  /// concatenated). Surfaced in the AppBar title so the user knows.
-  final int stitchedCount;
-  const _PlayerScreen({required this.session, this.stitchedCount = 1});
+  final List<ReplaySession> sessions;
+  final Map<int, TrackLayer> layers;
+  const _PlayerScreen({required this.sessions, required this.layers});
   @override
   ConsumerState<_PlayerScreen> createState() => _PlayerScreenState();
 }
 
 class _PlayerScreenState extends ConsumerState<_PlayerScreen> {
-  int _idx = 0;
+  late final MergedTimeline _tl = MergedTimeline(widget.sessions);
+  final MapController _mapCtrl = MapController();
+  final GlobalKey _captureKey = GlobalKey();
+
+  /// Position on the virtual (gap-free) timeline.
+  Duration _cursor = Duration.zero;
   bool _playing = false;
+
+  /// Real-time multiplier: virtual seconds advanced per wall-clock second.
+  double _speed = 128;
+  static const _speeds = [16.0, 32.0, 64.0, 128.0, 256.0, 512.0];
+
+  /// Camera follows the moving head until the user pans.
+  bool _follow = true;
   bool _showJournals = true;
-  /// Playback speed multiplier. 1× = 25 ms per step (≈ 40 pts/sec, fast
-  /// enough for hour-long sessions). Stored so the user can crank it up
-  /// for very long stitched playbacks.
-  double _speed = 4.0;
   bool _showPeers = true;
   List<JournalEntry> _journalsInWindow = const [];
-  /// peerId → ordered (time, lat, lng) points within the session window.
   Map<String, List<PeerLocation>> _peerTrails = const {};
+
+  // ── video export ──
+  bool _exporting = false;
+  bool _exportCancel = false;
+  double _exportProgress = 0;
+
+  bool get _multiDay =>
+      _tl.realStart.year != _tl.realEnd.year ||
+      _tl.realStart.month != _tl.realEnd.month ||
+      _tl.realStart.day != _tl.realEnd.day;
+
+  DateTime get _real => _tl.realAt(_cursor);
 
   @override
   void initState() {
@@ -335,32 +392,33 @@ class _PlayerScreenState extends ConsumerState<_PlayerScreen> {
     _loadPeerTrails();
   }
 
+  /// Journals / peers "belong" to the replay when they fall inside one of
+  /// the timeline's active stretches (±30 min) — not in the days between
+  /// two merged trips.
+  bool _inWindow(DateTime t) {
+    const pad = Duration(minutes: 30);
+    for (final seg in _tl.segments) {
+      if (!t.isBefore(seg.start.subtract(pad)) &&
+          !t.isAfter(seg.end.add(pad))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   Future<void> _loadJournals() async {
     final db = ref.read(dbProvider);
     final all = await db.select(db.journalEntries).get();
-    final s = widget.session;
-    // Pad ±30 min so journals written right before/after still show.
-    final from = s.start.subtract(const Duration(minutes: 30));
-    final to = s.end.add(const Duration(minutes: 30));
     if (!mounted) return;
     setState(() {
-      _journalsInWindow = all
-          .where((j) => !j.time.isBefore(from) && !j.time.isAfter(to))
-          .toList();
+      _journalsInWindow = all.where((j) => _inWindow(j.time)).toList();
     });
   }
 
   Future<void> _loadPeerTrails() async {
     final db = ref.read(dbProvider);
-    final s = widget.session;
-    final from = s.start.subtract(const Duration(minutes: 30));
-    final to = s.end.add(const Duration(minutes: 30));
-    // Use raw where-expression syntax because drift's generated table
-    // doesn't expose isBetweenValues — that lives on Drift's column DSL.
     final all = await db.select(db.peerLocations).get();
-    final rows = all
-        .where((r) => !r.time.isBefore(from) && !r.time.isAfter(to))
-        .toList()
+    final rows = all.where((r) => _inWindow(r.time)).toList()
       ..sort((a, b) => a.time.compareTo(b.time));
     final grouped = <String, List<PeerLocation>>{};
     for (final r in rows) {
@@ -378,23 +436,70 @@ class _PlayerScreenState extends ConsumerState<_PlayerScreen> {
     return HSLColor.fromAHSL(1, hue, 0.6, 0.55).toColor();
   }
 
+  /// Stored WGS-84 → the base map's datum (GCJ-02 shift for amap/google/
+  /// ovital). The old player skipped this and drew trails 100–700 m off on
+  /// Chinese base maps.
+  LatLng _toDisplay(LatLng wgs) {
+    if (!CoordConverter.needsGcj02(ref.read(settingsProvider).mapProvider)) {
+      return wgs;
+    }
+    final g = CoordConverter.wgs84ToGcj02(wgs.latitude, wgs.longitude);
+    return LatLng(g.lat, g.lng);
+  }
+
+  LatLngBounds get _allBounds =>
+      LatLngBounds.fromPoints(_tl.allPoints().map(_toDisplay).toList());
+
+  /// The head the camera follows: the active session whose trail is
+  /// currently moving; with several active, the first selected one.
+  LatLng? _leadHead(DateTime real) {
+    for (final s in widget.sessions) {
+      if (s.isActiveAt(real)) {
+        final pos = s.positionAt(real);
+        if (pos != null) return _toDisplay(pos);
+      }
+    }
+    return null;
+  }
+
   @override
   Widget build(BuildContext context) {
-    final pts = widget.session.points;
     final s = ref.watch(settingsProvider);
+    final real = _real;
+    final title = widget.sessions.length > 1
+        ? '${widget.sessions.length} 段合并回放'
+        : DateFormat('yyyy-MM-dd HH:mm').format(_tl.realStart);
     return Scaffold(
       extendBodyBehindAppBar: true,
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         foregroundColor: Colors.white,
-        title: Text(
-          widget.stitchedCount > 1
-              ? '${widget.stitchedCount} 次记录拼接回放'
-              : DateFormat('yyyy-MM-dd HH:mm').format(pts.first.time),
-          style: const TextStyle(
-              fontWeight: FontWeight.w700, fontSize: 16),
+        // The player draws no fog veil, so the bare map underneath is bright
+        // — white-on-white left the back arrow and these actions (including
+        // 导出视频) practically invisible on a daytime base map. A top scrim
+        // keeps them legible without hiding the map.
+        flexibleSpace: const IgnorePointer(
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [Color(0xB3000000), Color(0x00000000)],
+              ),
+            ),
+            child: SizedBox.expand(),
+          ),
         ),
+        title: Text(title,
+            style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16)),
         actions: [
+          IconButton(
+            tooltip: _follow ? '停止跟随' : '跟随轨迹',
+            icon: Icon(_follow
+                ? Icons.center_focus_strong_rounded
+                : Icons.center_focus_weak_rounded),
+            onPressed: () => setState(() => _follow = !_follow),
+          ),
           IconButton(
             tooltip: _showPeers ? '隐藏队友轨迹' : '显示队友轨迹',
             icon: Icon(
@@ -410,306 +515,576 @@ class _PlayerScreenState extends ConsumerState<_PlayerScreen> {
             icon: Icon(_showJournals
                 ? Icons.bubble_chart
                 : Icons.bubble_chart_outlined),
-            onPressed: () =>
-                setState(() => _showJournals = !_showJournals),
+            onPressed: () => setState(() => _showJournals = !_showJournals),
+          ),
+          IconButton(
+            tooltip: '导出视频',
+            icon: const Icon(Icons.movie_creation_outlined),
+            onPressed: _exporting ? null : _exportVideo,
           ),
         ],
       ),
       body: Stack(
         children: [
-          FlutterMap(
-            options: MapOptions(
-              initialCenter: LatLng(pts[_idx].lat, pts[_idx].lng),
-              initialZoom: 14,
-              interactionOptions: const InteractionOptions(
-                flags: InteractiveFlag.all & ~InteractiveFlag.rotate,
-              ),
-            ),
-            children: [
-              buildTileLayer(
-                provider: s.mapProvider,
-                style: s.mapStyle,
-                amapKey: s.amapApiKey,
-                googleKey: s.googleMapKey,
-                customOsmUrl: s.customOsmTileUrl,
-                ovitalUrl: s.ovitalTileUrl,
-              ),
-              PolylineLayer(polylines: [
-                Polyline(
-                  points: pts
-                      .take(_idx + 1)
-                      .map((p) => LatLng(p.lat, p.lng))
-                      .toList(),
-                  color: const Color(0xFF26A69A),
-                  strokeWidth: 4,
+          // Only the map is inside the capture boundary — the transport bar,
+          // summary and export overlay never end up in the video.
+          RepaintBoundary(
+            key: _captureKey,
+            child: FlutterMap(
+              mapController: _mapCtrl,
+              options: MapOptions(
+                initialCameraFit: CameraFit.bounds(
+                  bounds: _allBounds,
+                  padding: const EdgeInsets.all(48),
+                  maxZoom: 16,
                 ),
-                // Peer trails — clipped to the current playback time so
-                // they sweep alongside the user's own trail rather than
-                // appearing all at once.
-                if (_showPeers)
-                  for (final entry in _peerTrails.entries)
+                interactionOptions: const InteractionOptions(
+                  flags: InteractiveFlag.all & ~InteractiveFlag.rotate,
+                ),
+                onPositionChanged: (_, hasGesture) {
+                  if (hasGesture && _follow && !_exporting) {
+                    setState(() => _follow = false);
+                  }
+                },
+              ),
+              children: [
+                buildTileLayer(
+                  provider: s.mapProvider,
+                  style: s.mapStyle,
+                  amapKey: s.amapApiKey,
+                  googleKey: s.googleMapKey,
+                  customOsmUrl: s.customOsmTileUrl,
+                  ovitalUrl: s.ovitalTileUrl,
+                ),
+                PolylineLayer(polylines: [
+                  for (final sess in widget.sessions)
                     Polyline(
-                      points: entry.value
-                          .where((p) => !p.time.isAfter(pts[_idx].time))
-                          .map((p) => LatLng(p.lat, p.lng))
-                          .toList(),
-                      color: _peerColor(entry.key)
-                          .withValues(alpha: 0.85),
-                      strokeWidth: 3,
+                      points: sess.pathUntil(real).map(_toDisplay).toList(),
+                      color: _styleOf(widget.layers, sess.layerId).color,
+                      strokeWidth: 4,
                     ),
-              ]),
-              // Peer "where they are now" markers — one per peer, at the
-              // last location ≤ current playback time.
-              if (_showPeers && _peerTrails.isNotEmpty)
-                MarkerLayer(markers: [
-                  for (final entry in _peerTrails.entries) ...[
-                    () {
-                      final upTo = entry.value
-                          .where((p) => !p.time.isAfter(pts[_idx].time))
-                          .toList();
-                      if (upTo.isEmpty) return null;
-                      final last = upTo.last;
-                      final label = last.peerName.isNotEmpty
-                          ? last.peerName
-                          : entry.key.substring(
-                              0, entry.key.length < 4 ? entry.key.length : 4);
-                      return Marker(
-                        point: LatLng(last.lat, last.lng),
-                        width: 32,
-                        height: 32,
-                        child: Tooltip(
-                          message: label,
-                          child: Container(
-                            decoration: BoxDecoration(
-                              color: _peerColor(entry.key),
-                              shape: BoxShape.circle,
-                              border: Border.all(
-                                  color: Colors.white, width: 2),
-                            ),
-                            alignment: Alignment.center,
-                            child: Text(
-                              label.characters.first,
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 12,
-                                fontWeight: FontWeight.w700,
+                  // Peer trails — clipped to the current playback time so
+                  // they sweep alongside the user's own trail rather than
+                  // appearing all at once.
+                  if (_showPeers)
+                    for (final entry in _peerTrails.entries)
+                      Polyline(
+                        points: entry.value
+                            .where((p) => !p.time.isAfter(real))
+                            .map((p) => _toDisplay(LatLng(p.lat, p.lng)))
+                            .toList(),
+                        color: _peerColor(entry.key).withValues(alpha: 0.85),
+                        strokeWidth: 3,
+                      ),
+                ]),
+                // Peer "where they are now" markers — one per peer, at the
+                // last location ≤ current playback time.
+                if (_showPeers && _peerTrails.isNotEmpty)
+                  MarkerLayer(markers: [
+                    for (final entry in _peerTrails.entries) ...[
+                      () {
+                        final upTo = entry.value
+                            .where((p) => !p.time.isAfter(real))
+                            .toList();
+                        if (upTo.isEmpty) return null;
+                        final last = upTo.last;
+                        final label = last.peerName.isNotEmpty
+                            ? last.peerName
+                            : entry.key.substring(
+                                0, math.min(4, entry.key.length));
+                        return Marker(
+                          point: _toDisplay(LatLng(last.lat, last.lng)),
+                          width: 32,
+                          height: 32,
+                          child: Tooltip(
+                            message: label,
+                            child: Container(
+                              decoration: BoxDecoration(
+                                color: _peerColor(entry.key),
+                                shape: BoxShape.circle,
+                                border:
+                                    Border.all(color: Colors.white, width: 2),
+                              ),
+                              alignment: Alignment.center,
+                              child: Text(
+                                label.characters.first,
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w700,
+                                ),
                               ),
                             ),
                           ),
-                        ),
-                      );
-                    }(),
-                  ].whereType<Marker>(),
-                ]),
-              if (_showJournals && _journalsInWindow.isNotEmpty)
-                MarkerLayer(
-                  markers: [
-                    for (final j in _journalsInWindow)
-                      Marker(
-                        point: LatLng(j.lat, j.lng),
-                        width: 36,
-                        height: 36,
-                        child: Tooltip(
-                          message: j.title,
-                          child: Container(
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFFF8A65),
-                              shape: BoxShape.circle,
-                              border: Border.all(
-                                  color: Colors.white, width: 2),
-                              boxShadow: [
-                                BoxShadow(
-                                  color: Colors.black
-                                      .withValues(alpha: 0.3),
-                                  blurRadius: 4,
-                                ),
-                              ],
+                        );
+                      }(),
+                    ].whereType<Marker>(),
+                  ]),
+                if (_showJournals && _journalsInWindow.isNotEmpty)
+                  MarkerLayer(
+                    markers: [
+                      for (final j in _journalsInWindow)
+                        Marker(
+                          point: _toDisplay(LatLng(j.lat, j.lng)),
+                          width: 36,
+                          height: 36,
+                          child: Tooltip(
+                            message: j.title,
+                            child: Container(
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFFF8A65),
+                                shape: BoxShape.circle,
+                                border:
+                                    Border.all(color: Colors.white, width: 2),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: Colors.black.withValues(alpha: 0.3),
+                                    blurRadius: 4,
+                                  ),
+                                ],
+                              ),
+                              child: const Icon(Icons.menu_book_rounded,
+                                  color: Colors.white, size: 18),
                             ),
-                            child: const Icon(Icons.menu_book_rounded,
-                                color: Colors.white, size: 18),
+                          ),
+                        ),
+                    ],
+                  ),
+                // One head dot per trail that has started, in its layer
+                // colour; trails still to come have no dot yet.
+                MarkerLayer(markers: [
+                  for (final sess in widget.sessions)
+                    if (sess.positionAt(real) case final pos?)
+                      Marker(
+                        point: _toDisplay(pos),
+                        width: 24,
+                        height: 24,
+                        child: Container(
+                          decoration: BoxDecoration(
+                            color: _styleOf(widget.layers, sess.layerId).color,
+                            shape: BoxShape.circle,
+                            border: Border.all(color: Colors.white, width: 2.5),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withValues(alpha: 0.3),
+                                blurRadius: 6,
+                              ),
+                            ],
                           ),
                         ),
                       ),
-                  ],
-                ),
-              MarkerLayer(markers: [
-                Marker(
-                  point: LatLng(pts[_idx].lat, pts[_idx].lng),
-                  width: 24,
-                  height: 24,
-                  child: Container(
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF26A69A),
-                      shape: BoxShape.circle,
-                      border: Border.all(color: Colors.white, width: 2.5),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withValues(alpha: 0.3),
-                          blurRadius: 6,
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ]),
-            ],
-          ),
-          Positioned(
-            left: 16,
-            right: 16,
-            bottom: 24,
-            child: Container(
-              padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
-              decoration: BoxDecoration(
-                color: const Color(0xFF1A2733).withValues(alpha: 0.92),
-                borderRadius: BorderRadius.circular(6),
-              ),
-              child: Row(
-                children: [
-                  Material(
-                    color: Colors.transparent,
-                    child: InkWell(
-                      customBorder: const CircleBorder(),
-                      onTap: _togglePlay,
-                      child: Container(
-                        width: 40,
-                        height: 40,
-                        decoration: const BoxDecoration(
-                          color: Color(0xFF26A69A),
-                          shape: BoxShape.circle,
-                        ),
-                        child: Icon(
-                            _playing
-                                ? Icons.pause_rounded
-                                : Icons.play_arrow_rounded,
-                            color: Colors.white,
-                            size: 22),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: SliderTheme(
-                      data: SliderThemeData(
-                        thumbShape: const RoundSliderThumbShape(
-                            enabledThumbRadius: 6),
-                        overlayShape: const RoundSliderOverlayShape(
-                            overlayRadius: 14),
-                        activeTrackColor: const Color(0xFF26A69A),
-                        inactiveTrackColor: Colors.white24,
-                        thumbColor: Colors.white,
-                        trackHeight: 3,
-                      ),
-                      child: Slider(
-                        value: _idx.toDouble(),
-                        min: 0,
-                        max: (pts.length - 1).toDouble(),
-                        onChanged: (v) =>
-                            setState(() => _idx = v.toInt()),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 4),
-                  Text(
-                      DateFormat('HH:mm:ss')
-                          .format(pts[_idx].time),
-                      style: const TextStyle(
-                          color: Colors.white70, fontSize: 11)),
-                  const SizedBox(width: 8),
-                  // Speed picker — 1× / 2× / 4× / 8× / 16×.
-                  PopupMenuButton<double>(
-                    initialValue: _speed,
-                    tooltip: '播放速度',
-                    onSelected: (v) => setState(() => _speed = v),
-                    color: const Color(0xFF223040),
-                    itemBuilder: (_) => const [
-                      PopupMenuItem(value: 1.0, child: Text('1×',
-                          style: TextStyle(color: Colors.white))),
-                      PopupMenuItem(value: 2.0, child: Text('2×',
-                          style: TextStyle(color: Colors.white))),
-                      PopupMenuItem(value: 4.0, child: Text('4×',
-                          style: TextStyle(color: Colors.white))),
-                      PopupMenuItem(value: 8.0, child: Text('8×',
-                          style: TextStyle(color: Colors.white))),
-                      PopupMenuItem(value: 16.0, child: Text('16×',
-                          style: TextStyle(color: Colors.white))),
-                    ],
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 8, vertical: 4),
-                      decoration: BoxDecoration(
-                        color: Colors.white12,
-                        borderRadius: BorderRadius.circular(3),
-                      ),
-                      child: Text('${_speed.toStringAsFixed(0)}×',
-                          style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600)),
-                    ),
-                  ),
-                ],
-              ),
+                ]),
+              ],
             ),
           ),
+          if (!_exporting) _transportBar(real),
           Positioned(
             left: 16,
             right: 16,
             top: MediaQuery.of(context).padding.top + 56,
-            child: _PlayerSummary(session: widget.session),
+            child: _PlayerSummary(
+                sessions: widget.sessions, layers: widget.layers),
           ),
+          if (_exporting) _exportOverlay(),
         ],
       ),
     );
   }
 
-  void _togglePlay() {
-    setState(() => _playing = !_playing);
-    if (_playing) _tick();
+  Widget _transportBar(DateTime real) {
+    final totalMs = math.max(1, _tl.total.inMilliseconds);
+    return Positioned(
+      left: 16,
+      right: 16,
+      bottom: 24,
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+        decoration: BoxDecoration(
+          color: const Color(0xFF1A2733).withValues(alpha: 0.92),
+          borderRadius: BorderRadius.circular(6),
+        ),
+        child: Row(
+          children: [
+            Material(
+              color: Colors.transparent,
+              child: InkWell(
+                customBorder: const CircleBorder(),
+                onTap: _togglePlay,
+                child: Container(
+                  width: 40,
+                  height: 40,
+                  decoration: const BoxDecoration(
+                    color: Color(0xFF26A69A),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(
+                      _playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                      color: Colors.white,
+                      size: 22),
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: SliderTheme(
+                data: SliderThemeData(
+                  thumbShape:
+                      const RoundSliderThumbShape(enabledThumbRadius: 6),
+                  overlayShape:
+                      const RoundSliderOverlayShape(overlayRadius: 14),
+                  activeTrackColor: const Color(0xFF26A69A),
+                  inactiveTrackColor: Colors.white24,
+                  thumbColor: Colors.white,
+                  trackHeight: 3,
+                ),
+                child: Slider(
+                  value: _cursor.inMilliseconds.clamp(0, totalMs).toDouble(),
+                  min: 0,
+                  max: totalMs.toDouble(),
+                  onChanged: (v) => setState(
+                      () => _cursor = Duration(milliseconds: v.round())),
+                ),
+              ),
+            ),
+            const SizedBox(width: 4),
+            Text(
+                DateFormat(_multiDay ? 'MM-dd HH:mm' : 'HH:mm:ss').format(real),
+                style: const TextStyle(color: Colors.white70, fontSize: 11)),
+            const SizedBox(width: 8),
+            PopupMenuButton<double>(
+              initialValue: _speed,
+              tooltip: '播放速度（真实时间倍率）',
+              onSelected: (v) => setState(() => _speed = v),
+              color: const Color(0xFF223040),
+              itemBuilder: (_) => [
+                for (final v in _speeds)
+                  PopupMenuItem(
+                      value: v,
+                      child: Text('${v.toInt()}×',
+                          style: const TextStyle(color: Colors.white))),
+              ],
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: Colors.white12,
+                  borderRadius: BorderRadius.circular(3),
+                ),
+                child: Text('${_speed.toInt()}×',
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600)),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
-  Future<void> _tick() async {
-    while (_playing && mounted && _idx < widget.session.points.length - 1) {
-      // 25 ms base / _speed → 1× is 40 fps, 8× = 320 pts/sec, fine for
-      // stitched multi-hour playback.
-      final ms = (25 / _speed).round().clamp(2, 200);
-      await Future.delayed(Duration(milliseconds: ms));
-      if (!mounted) return;
-      setState(() => _idx++);
+  Widget _exportOverlay() => Positioned.fill(
+        child: Container(
+          color: Colors.black54,
+          alignment: Alignment.center,
+          child: Container(
+            width: 260,
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: const Color(0xFF1A2733),
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text('正在导出视频…',
+                    style: TextStyle(color: Colors.white, fontSize: 14)),
+                const SizedBox(height: 12),
+                LinearProgressIndicator(value: _exportProgress),
+                const SizedBox(height: 6),
+                Text('${(_exportProgress * 100).toStringAsFixed(0)}%',
+                    style:
+                        const TextStyle(color: Colors.white70, fontSize: 11)),
+                const SizedBox(height: 10),
+                TextButton(
+                  onPressed: () => setState(() => _exportCancel = true),
+                  child: const Text('取消'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+
+  void _togglePlay() {
+    if (_tl.total <= Duration.zero) return;
+    if (!_playing && _cursor >= _tl.total) _cursor = Duration.zero;
+    setState(() => _playing = !_playing);
+    if (_playing) _run();
+  }
+
+  /// Advance the virtual clock by wall time × speed, ~30 updates/s.
+  Future<void> _run() async {
+    final sw = Stopwatch()..start();
+    while (_playing && mounted && !_exporting) {
+      await Future.delayed(const Duration(milliseconds: 33));
+      if (!mounted || !_playing || _exporting) break;
+      final dt = sw.elapsed;
+      sw.reset();
+      var next = _cursor + dt * _speed;
+      final done = next >= _tl.total;
+      if (done) next = _tl.total;
+      setState(() {
+        _cursor = next;
+        if (done) _playing = false;
+      });
+      if (_follow) {
+        final head = _leadHead(_tl.realAt(next));
+        if (head != null) _mapCtrl.move(head, _mapCtrl.camera.zoom);
+      }
     }
-    if (mounted) setState(() => _playing = false);
+  }
+
+  // ── video export ──────────────────────────────────────────────────────
+
+  Future<void> _exportVideo() async {
+    if (!QuickVideoEncoderSink.supported) {
+      _toast('当前平台不支持视频导出（Android / iOS / macOS 可用）');
+      return;
+    }
+    if (_tl.total <= Duration.zero) {
+      _toast('这段记录没有可回放的时长');
+      return;
+    }
+    final plan = await showDialog<ExportPlan>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('导出为视频'),
+        children: [
+          for (final secs in const [15, 30, 60])
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(
+                  ctx, ExportPlan(fps: 30, videoDuration: Duration(seconds: secs))),
+              child: Text('$secs 秒 · 30 fps'),
+            ),
+          const Padding(
+            padding: EdgeInsets.fromLTRB(24, 8, 24, 4),
+            child: Text('整段回放会被压进所选时长；导出期间请保持在本页。',
+                style: TextStyle(fontSize: 12)),
+          ),
+        ],
+      ),
+    );
+    if (plan == null || !mounted) return;
+
+    setState(() {
+      _playing = false;
+      _exporting = true;
+      _exportCancel = false;
+      _exportProgress = 0;
+      _follow = false;
+    });
+    // A fixed frame showing the whole route reads far better in a clip than
+    // a camera chasing the head; give the base tiles a moment to land.
+    _mapCtrl.fitCamera(CameraFit.bounds(
+        bounds: _allBounds, padding: const EdgeInsets.all(40), maxZoom: 16));
+    await Future.delayed(const Duration(milliseconds: 1500));
+    if (!mounted) return;
+
+    final boundary = _captureKey.currentContext?.findRenderObject()
+        as RenderRepaintBoundary?;
+    if (boundary == null) {
+      setState(() => _exporting = false);
+      return;
+    }
+    // Longest side ≈ 1080 px regardless of the device's density.
+    final longest = math.max(boundary.size.width, boundary.size.height);
+    final pixelRatio = (1080 / longest).clamp(1.0, 3.0);
+
+    final dir = await getApplicationDocumentsDirectory();
+    final stamp = DateFormat('yyyyMMdd_HHmmss').format(DateTime.now());
+    final outPath = p.join(dir.path, 'exports', 'replay_$stamp.mp4');
+    final savedCursor = _cursor;
+
+    ExportResult? result;
+    Object? error;
+    try {
+      result = await ReplayVideoExporter().run(
+        timelineTotal: _tl.total,
+        plan: plan,
+        capture: (t) => _captureFrame(t, pixelRatio),
+        sink: QuickVideoEncoderSink(),
+        outputPath: outPath,
+        onProgress: (v) {
+          if (mounted) setState(() => _exportProgress = v);
+        },
+        isCancelled: () => _exportCancel || !mounted,
+      );
+    } catch (e) {
+      error = e;
+    }
+    if (!mounted) return;
+    setState(() {
+      _exporting = false;
+      _cursor = savedCursor;
+    });
+    if (error != null) {
+      _toast('导出失败：$error');
+      return;
+    }
+    if (result == null || result.cancelled) {
+      try {
+        await File(outPath).delete();
+      } catch (_) {}
+      _toast('已取消导出');
+      return;
+    }
+    await _offerExportedFile(File(outPath), result);
+  }
+
+  /// Show frame [t], wait for it to be painted, read the pixels back.
+  Future<RawFrame?> _captureFrame(Duration t, double pixelRatio) async {
+    if (!mounted) return null;
+    setState(() => _cursor = t);
+    await WidgetsBinding.instance.endOfFrame;
+    if (!mounted) return null;
+    final boundary = _captureKey.currentContext?.findRenderObject()
+        as RenderRepaintBoundary?;
+    if (boundary == null) return null;
+    // If layout dirtied the boundary again (rare), let one more frame paint.
+    if (boundary.debugNeedsPaint) await WidgetsBinding.instance.endOfFrame;
+    final img = await boundary.toImage(pixelRatio: pixelRatio);
+    try {
+      final bd = await img.toByteData(format: ui.ImageByteFormat.rawRgba);
+      if (bd == null) return null;
+      return RawFrame(img.width, img.height,
+          bd.buffer.asUint8List(bd.offsetInBytes, bd.lengthInBytes));
+    } finally {
+      img.dispose();
+    }
+  }
+
+  Future<void> _offerExportedFile(File file, ExportResult res) async {
+    final bytes = await file.length();
+    final mb = (bytes / (1024 * 1024)).toStringAsFixed(1);
+    if (!mounted) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.movie_rounded),
+              title: Text('视频已生成 · $mb MB'),
+              subtitle: Text(
+                  '${res.width}×${res.height} · ${res.framesWritten} 帧\n${file.path}',
+                  style: const TextStyle(fontSize: 11)),
+              isThreeLine: true,
+            ),
+            ListTile(
+              leading: const Icon(Icons.save_alt_rounded),
+              title: const Text('保存到本地'),
+              subtitle: const Text('选择保存位置（Android 默认 Download）'),
+              onTap: () async {
+                Navigator.pop(ctx);
+                await _saveLocally(file);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.share_rounded),
+              title: const Text('分享'),
+              onTap: () async {
+                Navigator.pop(ctx);
+                await Share.shareXFiles([XFile(file.path)],
+                    subject: 'Explore Journal 路径回放');
+              },
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Same SAF pattern as the FOW export: saveFile writes the bytes itself on
+  /// mobile; desktop pickers only return a path.
+  Future<void> _saveLocally(File file) async {
+    try {
+      final bytes = await file.readAsBytes();
+      final path = await FilePicker.platform.saveFile(
+        dialogTitle: '保存回放视频',
+        fileName: p.basename(file.path),
+        type: FileType.custom,
+        allowedExtensions: ['mp4'],
+        bytes: bytes,
+      );
+      if (path == null) return;
+      if (!kIsWeb &&
+          (Platform.isLinux || Platform.isWindows || Platform.isMacOS)) {
+        await File(path).writeAsBytes(bytes);
+      }
+      _toast('已保存：$path');
+    } catch (e) {
+      _toast('保存失败：$e');
+    }
+  }
+
+  void _toast(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 }
 
 class _PlayerSummary extends StatelessWidget {
-  final _Session session;
-  const _PlayerSummary({required this.session});
+  final List<ReplaySession> sessions;
+  final Map<int, TrackLayer> layers;
+  const _PlayerSummary({required this.sessions, required this.layers});
   @override
   Widget build(BuildContext context) {
+    final km = sessions.fold<double>(0, (a, s) => a + s.distanceKm);
+    final minutes = sessions.fold<int>(0, (a, s) => a + s.duration.inMinutes);
+    final pts = sessions.fold<int>(0, (a, s) => a + s.pointCount);
+    final layerIds = sessions.map((s) => s.layerId).toSet();
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       decoration: BoxDecoration(
         color: const Color(0xFF1A2733).withValues(alpha: 0.85),
         borderRadius: BorderRadius.circular(4),
       ),
-      child: Text(
-        '${session.distanceKm.toStringAsFixed(2)} km · '
-        '${session.duration.inMinutes} 分钟 · '
-        '${session.pointCount} 点',
-        style: const TextStyle(color: Colors.white, fontSize: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            '${km.toStringAsFixed(2)} km · $minutes 分钟 · $pts 点'
+            '${sessions.length > 1 ? ' · ${sessions.length} 段' : ''}',
+            style: const TextStyle(color: Colors.white, fontSize: 12),
+          ),
+          if (layerIds.length > 1)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Wrap(
+                spacing: 8,
+                children: [
+                  for (final id in layerIds)
+                    Row(mainAxisSize: MainAxisSize.min, children: [
+                      Container(
+                          width: 8,
+                          height: 8,
+                          decoration: BoxDecoration(
+                              color: _styleOf(layers, id).color,
+                              shape: BoxShape.circle)),
+                      const SizedBox(width: 4),
+                      Text(_styleOf(layers, id).name,
+                          style: const TextStyle(
+                              color: Colors.white70, fontSize: 11)),
+                    ]),
+                ],
+              ),
+            ),
+        ],
       ),
     );
   }
-}
-
-double _haversineMeters(double a, double b, double c, double d) {
-  const r = 6371000.0;
-  final dLat = (c - a) * math.pi / 180;
-  final dLng = (d - b) * math.pi / 180;
-  final h = math.sin(dLat / 2) * math.sin(dLat / 2) +
-      math.cos(a * math.pi / 180) *
-          math.cos(c * math.pi / 180) *
-          math.sin(dLng / 2) *
-          math.sin(dLng / 2);
-  return 2 * r * math.atan2(math.sqrt(h), math.sqrt(1 - h));
 }

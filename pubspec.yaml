@@ -104,6 +104,7 @@ dependencies:
   file_picker: ^8.1.2
   geocoding: ^3.0.0
   flutter_tts: ^4.2.5
+  flutter_quick_video_encoder: ^1.7.2
 
 # record_linux 0.7.2 is broken against record_platform_interface 1.5.
 # We don't ship Linux desktop; force the older interface so deps resolve.
