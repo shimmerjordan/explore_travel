@@ -15,10 +15,13 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
+import 'package:drift/drift.dart' show Value;
+
 import '../../app/providers.dart';
 import '../../data/db/database.dart';
 import '../../services/geo/coord_converter.dart';
 import '../../services/map/tile_providers.dart';
+import '../../services/playback/merged_trip_model.dart';
 import '../../services/playback/quick_video_encoder_sink.dart';
 import '../../services/playback/replay_model.dart';
 import '../../services/playback/replay_video_exporter.dart';
@@ -53,11 +56,15 @@ _LayerStyle _styleOf(Map<int, TrackLayer> layers, int layerId) {
 class _PlaybackScreenState extends ConsumerState<PlaybackScreen> {
   List<ReplaySession> _all = const [];
   Map<int, TrackLayer> _layers = const {};
+  List<MergedTrip> _trips = const [];
   int _layersWithoutTrack = 0;
   bool _loading = true;
   int? _filterYear;
   int? _filterMonth; // null = whole year
   final Set<ReplaySession> _selected = {};
+
+  Map<int, String> get _layerUuidById =>
+      {for (final l in _layers.values) l.id: l.uuid};
 
   @override
   void initState() {
@@ -70,17 +77,110 @@ class _PlaybackScreenState extends ConsumerState<PlaybackScreen> {
     final db = ref.read(dbProvider);
     final points = await db.select(db.trackPoints).get();
     final layers = await db.select(db.trackLayers).get();
+    final trips = await db.allMergedTrips();
     final sessions = splitIntoSessions(points);
     final withTrack = sessions.map((s) => s.layerId).toSet();
     if (!mounted) return;
     setState(() {
       _all = sessions;
       _layers = {for (final l in layers) l.id: l};
+      _trips = trips;
       _layersWithoutTrack =
           layers.where((l) => !withTrack.contains(l.id)).length;
       _selected.removeWhere((s) => !sessions.contains(s));
       _loading = false;
     });
+  }
+
+  List<ReplaySession> _sessionsOfTrip(MergedTrip t) => resolveTripSessions(
+      decodeTripSegments(t.segmentsJson), _all, _layerUuidById)
+    ..sort((a, b) => a.start.compareTo(b.start));
+
+  /// 把选中的段存成一个可命名的「合并记录」。只存引用（图层 uuid + 时间窗），
+  /// 原始轨迹点一个都不动 —— 图层、迷雾、同步全都不受影响。
+  Future<void> _saveSelectionAsTrip() async {
+    final picked = _all.where(_selected.contains).toList()
+      ..sort((a, b) => a.start.compareTo(b.start));
+    final segs = segmentsForSessions(picked, _layerUuidById);
+    if (segs.isEmpty) return;
+    final defaultName =
+        '${DateFormat('M月d日').format(picked.first.start)}的旅程';
+    final ctrl = TextEditingController(text: defaultName);
+    final name = await showDialog<String>(
+      context: context,
+      builder: (dctx) => AlertDialog(
+        title: Text('合并为一条记录（${picked.length} 段）'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          decoration: const InputDecoration(labelText: '记录名称'),
+          onSubmitted: (s) => Navigator.pop(dctx, s),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(dctx), child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(dctx, ctrl.text),
+              child: const Text('保存')),
+        ],
+      ),
+    );
+    if (name == null || name.trim().isEmpty) return;
+    await ref.read(dbProvider).insertMergedTrip(MergedTripsCompanion.insert(
+          name: name.trim(),
+          segmentsJson: encodeTripSegments(segs),
+          createdAt: DateTime.now(),
+          updatedAt: Value(DateTime.now()),
+        ));
+    if (!mounted) return;
+    setState(_selected.clear);
+    await _reload();
+  }
+
+  Future<void> _renameTrip(MergedTrip t) async {
+    final ctrl = TextEditingController(text: t.name);
+    final name = await showDialog<String>(
+      context: context,
+      builder: (dctx) => AlertDialog(
+        title: const Text('重命名合并记录'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          onSubmitted: (s) => Navigator.pop(dctx, s),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(dctx), child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(dctx, ctrl.text),
+              child: const Text('保存')),
+        ],
+      ),
+    );
+    if (name == null || name.trim().isEmpty || name.trim() == t.name) return;
+    await ref.read(dbProvider).renameMergedTrip(t.id, name.trim());
+    await _reload();
+  }
+
+  Future<void> _dissolveTrip(MergedTrip t) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dctx) => AlertDialog(
+        title: Text('解散「${t.name}」？'),
+        content: const Text('只删除这条合并记录本身，原始轨迹段不受影响。'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(dctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(dctx, true),
+              child: const Text('解散')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await ref.read(dbProvider).deleteMergedTrip(t.id);
+    await _reload();
   }
 
   List<ReplaySession> get _filtered {
@@ -139,13 +239,28 @@ class _PlaybackScreenState extends ConsumerState<PlaybackScreen> {
           ? SafeArea(
               child: Padding(
                 padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-                child: FilledButton.icon(
-                  icon: const Icon(Icons.merge_rounded),
-                  label: Text('合并回放这 ${_selected.length} 段'),
-                  onPressed: () {
-                    final picked = _all.where(_selected.contains).toList();
-                    _openPlayer(picked);
-                  },
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        icon: const Icon(Icons.bookmark_add_outlined),
+                        label: const Text('存为合并记录'),
+                        onPressed: _saveSelectionAsTrip,
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: FilledButton.icon(
+                        icon: const Icon(Icons.merge_rounded),
+                        label: Text('合并回放 ${_selected.length} 段'),
+                        onPressed: () {
+                          final picked =
+                              _all.where(_selected.contains).toList();
+                          _openPlayer(picked);
+                        },
+                      ),
+                    ),
+                  ],
                 ),
               ),
             )
@@ -194,6 +309,54 @@ class _PlaybackScreenState extends ConsumerState<PlaybackScreen> {
                 ),
                 // ── Aggregate header for the filtered set ─────────────
                 _PeriodSummary(sessions: list),
+                // ── 合并记录：用户存下来的多段捆绑，一条即可整体回放 ──
+                if (_trips.isNotEmpty && !selecting)
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxHeight: 216),
+                    child: ListView(
+                      shrinkWrap: true,
+                      children: [
+                        for (final t in _trips)
+                          Builder(builder: (_) {
+                            final sess = _sessionsOfTrip(t);
+                            final km = sess.fold<double>(
+                                0, (a, s) => a + s.distanceKm);
+                            final range = sess.isEmpty
+                                ? '所引用的记录段已不存在'
+                                : '${DateFormat('yyyy-MM-dd').format(sess.first.start)}'
+                                    '${sess.length > 1 ? ' → ${DateFormat('MM-dd').format(sess.last.start)}' : ''}'
+                                    ' · ${sess.length} 段 · ${km.toStringAsFixed(1)} km';
+                            return ListTile(
+                              dense: true,
+                              leading: Icon(Icons.bookmark_rounded,
+                                  color: cs.primary),
+                              title: Text(t.name,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis),
+                              subtitle: Text(range,
+                                  style: const TextStyle(fontSize: 11)),
+                              onTap: sess.isEmpty
+                                  ? null
+                                  : () => _openPlayer(sess),
+                              trailing: PopupMenuButton<String>(
+                                onSelected: (v) => switch (v) {
+                                  'rename' => _renameTrip(t),
+                                  'dissolve' => _dissolveTrip(t),
+                                  _ => null,
+                                },
+                                itemBuilder: (_) => const [
+                                  PopupMenuItem(
+                                      value: 'rename', child: Text('重命名')),
+                                  PopupMenuItem(
+                                      value: 'dissolve',
+                                      child: Text('解散（不动原始记录）')),
+                                ],
+                              ),
+                            );
+                          }),
+                      ],
+                    ),
+                  ),
                 if (_layersWithoutTrack > 0)
                   Padding(
                     padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
