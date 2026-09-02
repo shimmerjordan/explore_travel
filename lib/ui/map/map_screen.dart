@@ -22,9 +22,14 @@ import '../../services/fog/fog_engine.dart';
 import '../../services/group/group_service.dart';
 import '../../services/group/group_sync_controller.dart';
 import 'native_file_image_io.dart';
+import '../../services/heat/heat3d_camera.dart';
+import '../../services/heat/heat_source.dart';
+import '../../services/heat/heat_tile_provider.dart';
 import '../../services/map/fog_tile_provider.dart';
 import '../../services/map/tile_providers.dart';
 import '../common/pixel.dart';
+import '../heat/heat_style_sheet.dart';
+import '../heat/heat_tilt_screen.dart';
 import '../companion/companion_card.dart';
 import '../journal/journal_screen.dart' as journal_ui;
 import '../import/track_import_flow.dart';
@@ -186,6 +191,70 @@ class _MapScreenState extends ConsumerState<MapScreen>
     });
   }
 
+  bool _tiltBusy = false;
+
+  /// Non-null while the map is in 3D heat mode (the live-tile overlay is up).
+  HeatSnapshot? _tiltHeat;
+  Heat3DCamera? _tiltCam;
+
+  /// 「热图」＝3D 地图模式（Google Maps 式实时瓦片 3D）：加载热度索引，
+  /// 用当前 2D 相机初始化 3D 相机，然后把整个地图切给 Heat3DView——
+  /// 瓦片在 3D 里按需流式加载，不再抓快照。
+  Future<void> _enterHeat3D() async {
+    if (_tiltBusy || _tiltHeat != null) return;
+    setState(() => _tiltBusy = true);
+    try {
+      final s = ref.read(settingsProvider);
+      final db = ref.read(dbProvider);
+      final layerIds = (await db.allLayers())
+          .where((l) => l.visible)
+          .map((l) => l.id)
+          .toList();
+      final win = heatTimeWindow(s);
+      final snap = await loadHeatSnapshot(
+        db: db,
+        layerIds: layerIds,
+        mapProvider: s.mapProvider,
+        style: HeatStyle(
+            palette: s.heatPalette,
+            exposure: s.heatExposure,
+            width: s.heatWidth),
+        from: win.$1,
+        to: win.$2,
+        includeFog: s.heatFogBaseline,
+      );
+      if (!mounted) return;
+      final cam = _mapCtrl.camera;
+      final c = cam.center;
+      setState(() {
+        _tiltHeat = snap;
+        _tiltCam = Heat3DCamera(
+          centerX01: HeatIndex.lngToWorldX(c.longitude),
+          centerY01: HeatIndex.latToWorldY(c.latitude),
+          zoom: cam.zoom,
+          viewport: Size(cam.nonRotatedSize.x, cam.nonRotatedSize.y),
+        );
+      });
+    } catch (e, st) {
+      debugPrint('[HEAT] enter 3D failed: $e\n$st');
+      if (mounted) TopToast.show(context, '3D 热图打开失败：$e');
+    } finally {
+      if (mounted) setState(() => _tiltBusy = false);
+    }
+  }
+
+  /// Leaving 3D: the 2D map lands exactly where the 3D camera was.
+  void _exitHeat3D(double lat, double lng, double zoom) {
+    if (!mounted) return;
+    setState(() {
+      _tiltHeat = null;
+      _tiltCam = null;
+    });
+    try {
+      _mapCtrl.move(LatLng(lat, lng), zoom.clamp(3.0, 19.0));
+    } catch (_) {}
+  }
+
   /// Zoom by [delta] levels via the +/- buttons (clamped to the map's range).
   void _zoomBy(double delta) {
     final cam = _mapCtrl.camera;
@@ -239,6 +308,8 @@ class _MapScreenState extends ConsumerState<MapScreen>
       if (!mounted) return;
       final focus = ref.read(fogImportFocusProvider);
       if (focus != null) _consumeFogImportFocus(focus);
+      final mf = ref.read(mapFocusProvider);
+      if (mf != null) _consumeMapFocus(mf);
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       // If a recording was in progress when the app was last killed (or the
@@ -585,6 +656,10 @@ class _MapScreenState extends ConsumerState<MapScreen>
     });
     // After a FOW import, fly to the freshly-revealed region (FoW has no track
     // lines, so cleared fog far from the user is otherwise easy to miss).
+    ref.listen<({double lat, double lng, double zoom})?>(mapFocusProvider,
+        (_, next) {
+      if (next != null) _consumeMapFocus(next);
+    });
     ref.listen<LatLng?>(fogImportFocusProvider, (_, next) {
       if (next != null) _consumeFogImportFocus(next);
     });
@@ -625,7 +700,11 @@ class _MapScreenState extends ConsumerState<MapScreen>
       resizeToAvoidBottomInset: false,
       extendBody: true,
       floatingActionButtonLocation: FloatingActionButtonLocation.centerDocked,
-      floatingActionButton: _CenterRecFab(
+      // Scaffold chrome floats ABOVE the body stack, so the 3D heat overlay
+      // can't cover it — hide it outright while the 3D mode is up.
+      floatingActionButton: _tiltHeat != null
+          ? null
+          : _CenterRecFab(
         recording: recording,
         onTap: () async {
           final ctrl = ref.read(recordingControllerProvider);
@@ -658,13 +737,15 @@ class _MapScreenState extends ConsumerState<MapScreen>
           }
         },
       ),
-      bottomNavigationBar: _BottomNav(
-        onJournal: _showNearbyJournals,
-        onGroup: () => context.push('/group'),
-        onMusic: () => context.push('/music'),
-        onMenu: () => context.push('/menu'),
-        onQuickNote: _quickNewJournal,
-      ),
+      bottomNavigationBar: _tiltHeat != null
+          ? null
+          : _BottomNav(
+              onJournal: _showNearbyJournals,
+              onGroup: () => context.push('/group'),
+              onMusic: () => context.push('/music'),
+              onMenu: () => context.push('/menu'),
+              onQuickNote: _quickNewJournal,
+            ),
       // No AppBar — every top-element is a floating Positioned widget so
       // taps reach the buttons directly instead of being intercepted by the
       // toolbar hit area.
@@ -679,7 +760,9 @@ class _MapScreenState extends ConsumerState<MapScreen>
             onPointerMove: _onPointerMove,
             onPointerUp: _onPointerUp,
             onPointerCancel: _onPointerUp,
-            child: FlutterMap(
+            // RepaintBoundary: isolates map repaints from the chrome above.
+            child: RepaintBoundary(
+              child: FlutterMap(
               mapController: _mapCtrl,
               options: MapOptions(
                 initialCenter: _center,
@@ -886,6 +969,7 @@ class _MapScreenState extends ConsumerState<MapScreen>
                     },
                   ),
               ],
+              ),
             ),
           ),
           if (_editMode != _EditMode.none)
@@ -1058,6 +1142,16 @@ class _MapScreenState extends ConsumerState<MapScreen>
                   onTap: () => ref
                       .read(settingsProvider.notifier)
                       .update((p) => p.copyWith(darkMap: !p.darkMap)),
+                ),
+                // 热图＝3D 地图模式：一点就切入 3D 热力山脊（人生点点式），
+                // 长按打开样式面板（色板 / 曝光 / 粗细 / 时间范围）。
+                _MapChip(
+                  icon: _tiltBusy
+                      ? Icons.hourglass_top_rounded
+                      : Icons.local_fire_department_rounded,
+                  label: _tiltBusy ? '热图…' : null,
+                  onTap: _enterHeat3D,
+                  onLongPress: () => showHeatStyleSheet(context),
                 ),
                 // Rotation lock toggle — lives in the existing top-left chip
                 // row so it doesn't cover any other control. Default state
@@ -1292,6 +1386,15 @@ class _MapScreenState extends ConsumerState<MapScreen>
                 },
               ),
             ),
+          // ── 3D 热图模式：实时瓦片 3D 地图，全屏覆盖（FAB/底栏此时隐藏）。──
+          if (_tiltCam != null && _tiltHeat != null)
+            Positioned.fill(
+              child: Heat3DView(
+                initialCamera: _tiltCam!,
+                heat: _tiltHeat!,
+                onExit: _exitHeat3D,
+              ),
+            ),
         ],
       ),
     );
@@ -1363,6 +1466,18 @@ class _MapScreenState extends ConsumerState<MapScreen>
       }
     });
     ref.read(fogImportFocusProvider.notifier).state = null;
+  }
+
+  /// Fly to a place / visit picked on another page (timeline, stats).
+  void _consumeMapFocus(({double lat, double lng, double zoom}) f) {
+    _followCamera = false;
+    final display = _toDisplay(f.lat, f.lng);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      try {
+        _mapCtrl.move(display, f.zoom);
+      } catch (_) {}
+    });
+    ref.read(mapFocusProvider.notifier).state = null;
   }
 
   /// Called on every position update. While recording and follow is armed,
@@ -2147,7 +2262,9 @@ class _MapChip extends StatelessWidget {
   final IconData icon;
   final String? label;
   final VoidCallback onTap;
-  const _MapChip({required this.icon, this.label, required this.onTap});
+  final VoidCallback? onLongPress;
+  const _MapChip(
+      {required this.icon, this.label, required this.onTap, this.onLongPress});
 
   @override
   Widget build(BuildContext context) {
@@ -2159,6 +2276,7 @@ class _MapChip extends StatelessWidget {
         child: InkWell(
           borderRadius: BorderRadius.circular(4),
           onTap: onTap,
+          onLongPress: onLongPress,
           child: Padding(
             padding: EdgeInsets.symmetric(
                 horizontal: label != null ? 10 : 8, vertical: 6),
