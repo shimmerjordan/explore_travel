@@ -14,6 +14,7 @@ import '../fog/fow_compat.dart'
     show tileIdToFilename, buildFowTile, fowBlocksFromFile,
         looksLikeFowTileName;
 import '../leaderboard/leaderboard_model.dart';
+import '../location/point_filter.dart' show PointFilter;
 import '../leaderboard/leaderboard_service.dart';
 
 /// Modular chunked zip backup. Schema v2.
@@ -66,6 +67,8 @@ class BackupService {
     'fog_tiles',
     'song_favorites',
     'track_points',
+    'visits',
+    'trips',
     'chat_messages',
     'planner_history',
     'settings',
@@ -88,6 +91,8 @@ class BackupService {
     'fog_tiles': '迷雾瓦片（探索进度）',
     'song_favorites': '歌曲收藏',
     'track_points': '轨迹点',
+    'visits': '到访地点',
+    'trips': '合并记录',
     'chat_messages': '聊天记录',
     'planner_history': 'AI 规划记录',
     'settings': '应用设置',
@@ -105,6 +110,8 @@ class BackupService {
     'journal_entries',
     'chat_messages',
     'song_favorites',
+    'places',
+    'merged_trips',
   ];
 
   /// Wipe one module's LOCAL data (DB rows or prefs entry). Used by the
@@ -138,6 +145,13 @@ class BackupService {
       case 'track_points':
         await db.delete(db.trackPoints).go();
         return '已清除本机轨迹点';
+      case 'visits':
+        await db.delete(db.visits).go();
+        await db.delete(db.places).go();
+        return '已清除本机到访地点（可从轨迹重新识别）';
+      case 'trips':
+        await db.delete(db.mergedTrips).go();
+        return '已清除本机合并记录（原始轨迹段不受影响）';
       case 'chat_messages':
         await db.delete(db.chatMessages).go();
         return '已清除本机聊天记录';
@@ -351,12 +365,91 @@ class BackupService {
           // restore would flatten manual dabs / trails to the layer default.
           'width': r.width,
           'layerId': r.layerId,
+          if (r.flags != 0) 'flags': r.flags,
         });
       }
       for (final entry in byMonth.entries) {
         addText('track_points/${entry.key}.jsonl',
             entry.value.map(jsonEncode).join('\n'));
       }
+    }
+
+    if (modules.contains('visits')) {
+      await step('visits');
+      final placeRows = await db.select(db.places).get();
+      final visitRows = await db.select(db.visits).get();
+      final layerUuidById = {
+        for (final l in await db.allLayers()) l.id: l.uuid,
+      };
+      final placeUuidById = {for (final p in placeRows) p.id: p.uuid};
+      // Only USER-TOUCHED visits travel (confirmed / declined / soft-deleted
+      // / manually assigned). Machine-suggested rows are re-derivable from
+      // the track points on every device — and their uuids never match
+      // across devices, so exporting them would duplicate every stay after
+      // one round trip. Same reason auto places nobody confirmed stay local
+      // unless a travelling visit references them.
+      final userVisits = visitRows
+          .where((v) => v.status != 0 || v.deletedAt != null)
+          .toList();
+      final refPlaces =
+          userVisits.map((v) => v.placeId).whereType<int>().toSet();
+      final travelPlaces = placeRows
+          .where((p) => p.source == 1 || refPlaces.contains(p.id))
+          .toList();
+      addText(
+          'visits/places.jsonl',
+          travelPlaces.map((p) => jsonEncode({
+                'uuid': p.uuid,
+                'name': p.name,
+                'lat': p.lat,
+                'lng': p.lng,
+                'radius': p.radius,
+                'source': p.source,
+                'country': p.country,
+                'province': p.province,
+                'city': p.city,
+                'createdAt': p.createdAt.toIso8601String(),
+                'updatedAt': p.updatedAt?.toIso8601String(),
+              })).join('\n'));
+      addText(
+          'visits/visits.jsonl',
+          userVisits.map((v) => jsonEncode({
+                'uuid': v.uuid,
+                // Cross-device references travel as UUIDs — local ids differ.
+                'placeUuid':
+                    v.placeId == null ? null : placeUuidById[v.placeId],
+                'layerUuid': layerUuidById[v.layerId],
+                'startedAt': v.startedAt.toIso8601String(),
+                'endedAt': v.endedAt.toIso8601String(),
+                'lat': v.lat,
+                'lng': v.lng,
+                'radius': v.radius,
+                'pointCount': v.pointCount,
+                'bridgedSec': v.bridgedSec,
+                'status': v.status,
+                'confidence': v.confidence,
+                'confidenceJson': v.confidenceJson,
+                'detectionVersion': v.detectionVersion,
+                'deletedAt': v.deletedAt?.toIso8601String(),
+                'createdAt': v.createdAt.toIso8601String(),
+                'updatedAt': v.updatedAt?.toIso8601String(),
+              })).join('\n'));
+    }
+
+    if (modules.contains('trips')) {
+      await step('trips');
+      final rows = await db.allMergedTrips();
+      addText(
+          'trips/trips.jsonl',
+          rows.map((t) => jsonEncode({
+                'uuid': t.uuid,
+                'name': t.name,
+                // Already layer-UUID based (see MergedTrips docs) — safe to
+                // ship verbatim.
+                'segmentsJson': t.segmentsJson,
+                'createdAt': t.createdAt.toIso8601String(),
+                'updatedAt': t.updatedAt?.toIso8601String(),
+              })).join('\n'));
     }
 
     if (modules.contains('chat_messages')) {
@@ -1228,6 +1321,7 @@ class BackupService {
               width: Value((r['width'] as num?)?.toDouble()),
               layerId:
                   remapLayerId((r['layerId'] as num).toInt(), localByUuid),
+              flags: Value((r['flags'] as num?)?.toInt() ?? 0),
             ));
             if (uuid.isNotEmpty) seen.add(uuid);
           } catch (e) {
@@ -1243,6 +1337,251 @@ class BackupService {
       }
       if (skipped > 0) summary.skipped['track_points'] = skipped;
       if (bad > 0) summary.errors['track_points'] = '$bad 行损坏已跳过';
+    });
+
+    await wrap('visits', () async {
+      final placesRaw = readText('visits/places.jsonl');
+      final visitsRaw = readText('visits/visits.jsonl');
+      if (placesRaw == null && visitsRaw == null) return;
+      if (clearBeforeImport) {
+        await db.delete(db.visits).go();
+        await db.delete(db.places).go();
+      }
+      final placeTombs = tombstoned['places'] ?? const <String>{};
+
+      // ── Places: uuid match → LWW update; no uuid match → FOLD onto a
+      // local place within 30 m (re-stamping the local uuid so future pulls
+      // match by uuid); else insert. The fold is what keeps two devices'
+      // auto-minted places for the same spot from piling up.
+      final localPlaces = await db.allPlaces();
+      final placeIdByUuid = <String, int>{
+        for (final p in localPlaces)
+          if (p.uuid.isNotEmpty) p.uuid: p.id,
+      };
+      final placeById = {for (final p in localPlaces) p.id: p};
+      var skipped = 0, bad = 0;
+      for (final line in (placesRaw ?? '').split('\n')) {
+        if (line.trim().isEmpty) continue;
+        try {
+          final r = jsonDecode(line) as Map<String, dynamic>;
+          final uuid = r['uuid']?.toString() ?? '';
+          if (uuid.isEmpty || placeTombs.contains(uuid)) {
+            skipped++;
+            continue;
+          }
+          final incomingTs =
+              DateTime.tryParse(r['updatedAt']?.toString() ?? '');
+          final lat = (r['lat'] as num).toDouble();
+          final lng = (r['lng'] as num).toDouble();
+          PlacesCompanion fields() => PlacesCompanion(
+                name: Value(r['name']?.toString() ?? '未命名地点'),
+                lat: Value(lat),
+                lng: Value(lng),
+                radius: Value((r['radius'] as num?)?.toDouble() ?? 100),
+                source: Value((r['source'] as num?)?.toInt() ?? 0),
+                country: Value(r['country']?.toString()),
+                province: Value(r['province']?.toString()),
+                city: Value(r['city']?.toString()),
+                updatedAt: Value(incomingTs),
+              );
+          final knownId = placeIdByUuid[uuid];
+          if (knownId != null) {
+            final local = placeById[knownId];
+            final newer = incomingTs != null &&
+                (local?.updatedAt == null ||
+                    incomingTs.isAfter(local!.updatedAt!));
+            if (!newer) {
+              skipped++;
+              continue;
+            }
+            await (db.update(db.places)..where((p) => p.id.equals(knownId)))
+                .write(fields());
+          } else {
+            Place? near;
+            for (final p in placeById.values) {
+              if (_haversineMeters(p.lat, p.lng, lat, lng) <= 30) {
+                near = p;
+                break;
+              }
+            }
+            if (near != null) {
+              final newer = incomingTs != null &&
+                  (near.updatedAt == null ||
+                      incomingTs.isAfter(near.updatedAt!));
+              await (db.update(db.places)
+                    ..where((p) => p.id.equals(near!.id)))
+                  .write(newer
+                      ? fields().copyWith(uuid: Value(uuid))
+                      : PlacesCompanion(uuid: Value(uuid)));
+              placeIdByUuid[uuid] = near.id;
+            } else {
+              final id = await db.insertPlace(PlacesCompanion.insert(
+                uuid: Value(uuid),
+                name: r['name']?.toString() ?? '未命名地点',
+                lat: lat,
+                lng: lng,
+                radius: Value((r['radius'] as num?)?.toDouble() ?? 100),
+                source: Value((r['source'] as num?)?.toInt() ?? 0),
+                country: Value(r['country']?.toString()),
+                province: Value(r['province']?.toString()),
+                city: Value(r['city']?.toString()),
+                createdAt:
+                    DateTime.tryParse(r['createdAt']?.toString() ?? '') ??
+                        DateTime.now(),
+                updatedAt: Value(incomingTs),
+              ));
+              placeIdByUuid[uuid] = id;
+            }
+          }
+          summary.imported['visits'] = (summary.imported['visits'] ?? 0) + 1;
+        } catch (e) {
+          bad++;
+          debugPrint('[BackupService] places row skipped: $e');
+        }
+      }
+
+      // ── Visits (only user-touched rows ever travel; see the exporter).
+      // References arrive as UUIDs → remap to local ids. LWW by updatedAt,
+      // soft-deletes travel as data so a delete beats an older confirm.
+      final layerByUuid = <String, int>{
+        for (final l in await db.allLayers())
+          if (l.uuid.isNotEmpty) l.uuid: l.id,
+      };
+      final localVisit = <String, ({int id, DateTime? ts})>{};
+      for (final v in await db.select(db.visits).get()) {
+        if (v.uuid.isNotEmpty) localVisit[v.uuid] = (id: v.id, ts: v.updatedAt);
+      }
+      for (final line in (visitsRaw ?? '').split('\n')) {
+        if (line.trim().isEmpty) continue;
+        try {
+          final r = jsonDecode(line) as Map<String, dynamic>;
+          final uuid = r['uuid']?.toString() ?? '';
+          if (uuid.isEmpty) {
+            skipped++;
+            continue;
+          }
+          final layerId = layerByUuid[r['layerUuid']?.toString() ?? ''];
+          if (layerId == null) {
+            // The layer this visit lives on isn't here (not synced yet /
+            // deleted) — skip rather than guess; the next pull after the
+            // layers arrive will bring it in.
+            skipped++;
+            continue;
+          }
+          final placeId = placeIdByUuid[r['placeUuid']?.toString() ?? ''];
+          final incomingTs =
+              DateTime.tryParse(r['updatedAt']?.toString() ?? '');
+          VisitsCompanion fields() => VisitsCompanion(
+                placeId: Value(placeId),
+                layerId: Value(layerId),
+                startedAt: Value(
+                    DateTime.tryParse(r['startedAt']?.toString() ?? '') ??
+                        DateTime.now()),
+                endedAt: Value(
+                    DateTime.tryParse(r['endedAt']?.toString() ?? '') ??
+                        DateTime.now()),
+                lat: Value((r['lat'] as num).toDouble()),
+                lng: Value((r['lng'] as num).toDouble()),
+                radius: Value((r['radius'] as num?)?.toDouble() ?? 50),
+                pointCount: Value((r['pointCount'] as num?)?.toInt() ?? 0),
+                bridgedSec: Value((r['bridgedSec'] as num?)?.toInt() ?? 0),
+                status: Value((r['status'] as num?)?.toInt() ?? 1),
+                confidence: Value((r['confidence'] as num?)?.toInt() ?? 0),
+                confidenceJson:
+                    Value(r['confidenceJson']?.toString() ?? ''),
+                detectionVersion:
+                    Value((r['detectionVersion'] as num?)?.toInt() ?? 0),
+                deletedAt: Value(
+                    DateTime.tryParse(r['deletedAt']?.toString() ?? '')),
+                updatedAt: Value(incomingTs),
+              );
+          final known = localVisit[uuid];
+          if (known != null) {
+            final newer = incomingTs != null &&
+                (known.ts == null || incomingTs.isAfter(known.ts!));
+            if (!newer) {
+              skipped++;
+              continue;
+            }
+            await (db.update(db.visits)..where((v) => v.id.equals(known.id)))
+                .write(fields());
+          } else {
+            await db.insertVisits([
+              fields().copyWith(
+                uuid: Value(uuid),
+                createdAt: Value(
+                    DateTime.tryParse(r['createdAt']?.toString() ?? '') ??
+                        DateTime.now()),
+              ),
+            ]);
+            localVisit[uuid] = (id: -1, ts: incomingTs);
+          }
+          summary.imported['visits'] = (summary.imported['visits'] ?? 0) + 1;
+        } catch (e) {
+          bad++;
+          debugPrint('[BackupService] visits row skipped: $e');
+        }
+      }
+      if (skipped > 0) summary.skipped['visits'] = skipped;
+      if (bad > 0) summary.errors['visits'] = '$bad 行损坏已跳过';
+    });
+
+    await wrap('trips', () async {
+      final raw = readText('trips/trips.jsonl');
+      if (raw == null) return;
+      if (clearBeforeImport) await db.delete(db.mergedTrips).go();
+      final tombs = tombstoned['merged_trips'] ?? const <String>{};
+      final localTs = <String, ({int id, DateTime? ts})>{};
+      for (final t in await db.allMergedTrips()) {
+        if (t.uuid.isNotEmpty) localTs[t.uuid] = (id: t.id, ts: t.updatedAt);
+      }
+      var skipped = 0, bad = 0;
+      for (final line in raw.split('\n')) {
+        if (line.trim().isEmpty) continue;
+        try {
+          final r = jsonDecode(line) as Map<String, dynamic>;
+          final uuid = r['uuid']?.toString() ?? '';
+          if (uuid.isEmpty || tombs.contains(uuid)) {
+            skipped++;
+            continue;
+          }
+          final incomingTs =
+              DateTime.tryParse(r['updatedAt']?.toString() ?? '');
+          final known = localTs[uuid];
+          if (known != null) {
+            final newer = incomingTs != null &&
+                (known.ts == null || incomingTs.isAfter(known.ts!));
+            if (!newer) {
+              skipped++;
+              continue;
+            }
+            await (db.update(db.mergedTrips)
+                  ..where((t) => t.id.equals(known.id)))
+                .write(MergedTripsCompanion(
+              name: Value(r['name']?.toString() ?? ''),
+              segmentsJson: Value(r['segmentsJson']?.toString() ?? '[]'),
+              updatedAt: Value(incomingTs),
+            ));
+          } else {
+            await db.insertMergedTrip(MergedTripsCompanion.insert(
+              uuid: Value(uuid),
+              name: r['name']?.toString() ?? '合并记录',
+              segmentsJson: r['segmentsJson']?.toString() ?? '[]',
+              createdAt:
+                  DateTime.tryParse(r['createdAt']?.toString() ?? '') ??
+                      DateTime.now(),
+              updatedAt: Value(incomingTs),
+            ));
+            localTs[uuid] = (id: -1, ts: incomingTs);
+          }
+          summary.imported['trips'] = (summary.imported['trips'] ?? 0) + 1;
+        } catch (e) {
+          bad++;
+          debugPrint('[BackupService] trips row skipped: $e');
+        }
+      }
+      if (skipped > 0) summary.skipped['trips'] = skipped;
+      if (bad > 0) summary.errors['trips'] = '$bad 行损坏已跳过';
     });
 
     await wrap('chat_messages', () async {
@@ -2003,3 +2342,6 @@ class ImportSummary {
         : parts.join('\n');
   }
 }
+
+double _haversineMeters(double lat1, double lng1, double lat2, double lng2) =>
+    PointFilter.haversineMeters(lat1, lng1, lat2, lng2);
