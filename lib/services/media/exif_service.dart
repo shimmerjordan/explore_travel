@@ -9,9 +9,47 @@ class ExifGps {
   ExifGps({required this.lat, required this.lng, this.time});
 }
 
+/// Everything EXIF can tell us about *where and when*: either half may be
+/// missing. A photo with a time but no GPS is the common case for shared /
+/// screenshot-cleaned images — and exactly the case the track interpolator
+/// can rescue, so [readGps] (which needs both) is no longer the only door.
+class ExifMeta {
+  final double? lat;
+  final double? lng;
+  final DateTime? time;
+  const ExifMeta({this.lat, this.lng, this.time});
+  bool get hasGps => lat != null && lng != null;
+}
+
 /// Reads GPS coordinates from a photo's EXIF metadata. Returns null if the
 /// file has no GPS tags or can't be parsed.
 class ExifService {
+  /// GPS and/or capture time — whichever the file carries. Null only when
+  /// the file has no EXIF at all (or can't be parsed).
+  static Future<ExifMeta?> readMeta(String path) async {
+    try {
+      final bytes = await File(path).readAsBytes();
+      final tags = await readExifFromBytes(bytes);
+      if (tags.isEmpty) return null;
+      final lat = _coord(tags['GPS GPSLatitude'], tags['GPS GPSLatitudeRef']);
+      final lng =
+          _coord(tags['GPS GPSLongitude'], tags['GPS GPSLongitudeRef']);
+      DateTime? time;
+      final dt = tags['EXIF DateTimeOriginal']?.printable ??
+          tags['Image DateTime']?.printable;
+      if (dt != null) {
+        try {
+          final iso = dt.replaceFirst(':', '-').replaceFirst(':', '-');
+          time = DateTime.tryParse(iso.replaceFirst(' ', 'T'));
+        } catch (_) {}
+      }
+      if (lat == null && lng == null && time == null) return null;
+      return ExifMeta(lat: lat, lng: lng, time: time);
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Android 10+ strips the GPS EXIF from gallery photos unless
   /// ACCESS_MEDIA_LOCATION is granted. Call once before a batch EXIF read so
   /// [readGps] actually sees coordinates. No-op on non-Android platforms.

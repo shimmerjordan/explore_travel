@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../data/db/database.dart';
 import '../services/location/background_task.dart'
     if (dart.library.js_interop) '../services/location/background_task_stub.dart';
+import '../services/location/point_filter.dart';
 import '../services/location/sample_buffer.dart';
 import '../services/map/live_track_point.dart' show LiveTrackPoint;
 import 'providers.dart';
@@ -55,6 +56,11 @@ class RecordingController with WidgetsBindingObserver {
   /// Last sample (lat, lng, time) per layer — used for the line-stitching
   /// gate.
   final Map<int, ({double lat, double lng, DateTime t})> _lastSample = {};
+
+  /// Last sample that passed the noise gate, per layer — the reference for
+  /// the implied-speed check. Separate from [_lastSample] (which is about
+  /// fog chaining) only in lifetime: this one is reset with it in [stop].
+  final Map<int, ({double lat, double lng, int tMs})> _lastClean = {};
 
   /// Serialises samples. New samples await whatever's already in flight
   /// before their own work begins. If the queue ever exceeds [_maxQueue]
@@ -241,6 +247,24 @@ class RecordingController with WidgetsBindingObserver {
     final lat = (s['lat'] as num).toDouble();
     final lng = (s['lng'] as num).toDouble();
     final settings = ref.read(settingsProvider);
+    // Noise gate. `drop` never reaches the DB (Null Island, ≥500 m accuracy);
+    // `anomaly` is stored but flagged so the analytic readers skip it and the
+    // fog corridor isn't painted from a teleport. The "previous" reference is
+    // the last CLEAN sample on this layer, so one bad fix doesn't make the
+    // next good one look like a teleport back.
+    final sampleMs = (s['timeMs'] as num?)?.toInt() ??
+        DateTime.now().millisecondsSinceEpoch;
+    final prevClean = _lastClean[layerId];
+    final verdict = PointFilter.judge(
+      PointSample(lat, lng, sampleMs,
+          accuracy: (s['accuracy'] as num?)?.toDouble()),
+      prev: prevClean == null
+          ? null
+          : PointSample(prevClean.lat, prevClean.lng, prevClean.tMs),
+    );
+    if (verdict == PointVerdict.drop) return;
+    final anomaly = verdict == PointVerdict.anomaly;
+    if (!anomaly) _lastClean[layerId] = (lat: lat, lng: lng, tMs: sampleMs);
     // Width for NEW points = the active layer's own path width, falling back
     // to the global default when the layer hasn't customised it.
     final activeLayer = ref
@@ -279,7 +303,11 @@ class RecordingController with WidgetsBindingObserver {
         // Freeze the trail size onto this point so later changes to the
         // layer's size only affect points recorded after them.
         width: Value(newPointWidth),
+        flags: Value(anomaly ? PointFlags.anomaly : 0),
       ));
+      // A teleport must not reveal fog (a 100 km corridor from one bad fix)
+      // nor feed the live trail; it's in the DB for the record, nothing else.
+      if (anomaly) return;
 
       // Connect ONLY the immediate predecessor sample when both:
       //   * spatial: centre-to-centre ≤ 2.5 × diameter (= 5 × penR)
@@ -377,7 +405,11 @@ class RecordingController with WidgetsBindingObserver {
     // tomorrow, next week — the first new sample doesn't paint a long
     // line back to wherever the user stopped.
     _lastSample.clear();
+    _lastClean.clear();
     ref.read(recordingActiveProvider.notifier).state = false;
+    // The session just recorded may hold new stays — re-detect the last few
+    // hours (fire-and-forget; the timeline refreshes via visitsRefresh).
+    unawaited(ref.read(visitEngineProvider).detectRecent());
   }
 }
 

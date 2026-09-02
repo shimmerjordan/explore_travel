@@ -11,6 +11,7 @@ import 'package:latlong2/latlong.dart';
 import '../../app/providers.dart';
 import '../../data/db/database.dart';
 import '../../services/geo/coord_converter.dart';
+import '../../services/geo/track_interpolator.dart';
 import '../../services/imghost/upload_queue.dart' show UploadRecord;
 import '../../services/imghost/private_image_loader.dart';
 import '../../services/map/tile_providers.dart';
@@ -114,10 +115,11 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
     var created = 0;
     var skipped = 0;
 
+    var interpolated = 0;
     for (final f in files) {
-      final gps = await ExifService.readGps(f.path);
-      DateTime time = gps?.time ?? DateTime.now();
-      if (gps?.time == null) {
+      final meta = await ExifService.readMeta(f.path);
+      DateTime time = meta?.time ?? DateTime.now();
+      if (meta?.time == null) {
         try {
           time = await File(f.path).lastModified();
         } catch (_) {}
@@ -125,8 +127,18 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
       // Copy out of image_picker's CACHE dir before storing the path — cache
       // files get purged by the OS and the photo would silently vanish.
       final stored = await JournalMediaStore.persist(f.path);
-      double? lat = gps?.lat;
-      double? lng = gps?.lng;
+      double? lat = meta?.lat;
+      double? lng = meta?.lng;
+      if ((lat == null || lng == null) && meta?.time != null) {
+        // No GPS but a capture time: place it on the trail we were walking
+        // at that moment (±30 min), instead of wherever the phone is NOW.
+        final guess = await TrackInterpolator.positionAt(db, meta!.time!);
+        if (guess != null) {
+          lat = guess.lat;
+          lng = guess.lng;
+          interpolated++;
+        }
+      }
       if (lat == null || lng == null) {
         final fb = await fallback();
         if (fb == null) {
@@ -155,6 +167,7 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
     if (!mounted) return;
     _bumpRefresh();
     final msg = StringBuffer('已从照片创建 $created 条手账');
+    if (interpolated > 0) msg.write('，$interpolated 张位置由轨迹推算');
     if (skipped > 0) msg.write('，$skipped 张无定位信息已跳过');
     ScaffoldMessenger.of(context)
         .showSnackBar(SnackBar(content: Text(msg.toString())));
@@ -420,6 +433,8 @@ Future<bool> showJournalEditor(
   // `return` on an empty title, so the button looked broken ("保存不了没提示").
   String? titleError;
   String? posError;
+  // 位置来自轨迹推算时的提示（照片无 GPS 但有拍摄时间）。
+  String? posNote;
   await showDialog<void>(
     context: context,
     builder: (_) => StatefulBuilder(builder: (dialogCtx, setState) {
@@ -518,6 +533,14 @@ Future<bool> showJournalEditor(
                     },
                   ),
                 ]),
+                if (posError == null && posNote != null && pickedPos == null)
+                  Padding(
+                    padding: const EdgeInsets.only(left: 20, bottom: 2),
+                    child: Text(posNote!,
+                        style: TextStyle(
+                            fontSize: 11,
+                            color: Theme.of(dialogCtx).hintColor)),
+                  ),
                 if (posError != null)
                   Padding(
                     padding: const EdgeInsets.only(left: 20, bottom: 2),
@@ -615,15 +638,35 @@ Future<bool> showJournalEditor(
                         final f =
                             await picker.pickImage(source: ImageSource.gallery);
                         if (f != null) {
-                          final gps = await ExifService.readGps(f.path);
+                          final meta = await ExifService.readMeta(f.path);
                           final stored =
                               await JournalMediaStore.persist(f.path);
+                          // Photo with a time but no GPS → ask the trail
+                          // where we were then (±30 min). Beats pinning it
+                          // to wherever the phone happens to be right now.
+                          InterpolatedPosition? guess;
+                          if (meta != null &&
+                              !meta.hasGps &&
+                              meta.time != null &&
+                              exifLat == null) {
+                            guess = await TrackInterpolator.positionAt(
+                                db0, meta.time!);
+                          }
+                          if (!alive) return;
                           setState(() {
                             mediaPaths.add(stored);
-                            if (gps != null && exifLat == null) {
-                              exifLat = gps.lat;
-                              exifLng = gps.lng;
-                              exifTime = gps.time;
+                            if (meta != null && exifLat == null) {
+                              if (meta.hasGps) {
+                                exifLat = meta.lat;
+                                exifLng = meta.lng;
+                                posNote = null;
+                              } else if (guess != null) {
+                                exifLat = guess.lat;
+                                exifLng = guess.lng;
+                                posNote =
+                                    '位置由当时轨迹推算（±${guess.gap.inMinutes} 分）';
+                              }
+                              exifTime ??= meta.time;
                             }
                           });
                         }

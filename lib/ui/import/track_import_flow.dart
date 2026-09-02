@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:drift/drift.dart' show Value;
 import 'package:file_picker/file_picker.dart';
@@ -144,10 +145,11 @@ class TrackImportFlow {
       ),
     );
 
-    int inserted = 0;
+    var result =
+        const IngestResult(inserted: 0, duplicates: 0, dropped: 0);
     String? error;
     try {
-      inserted = await TrackImport.ingest(
+      result = await TrackImport.ingest(
         track: track,
         layerId: layerId,
         db: db,
@@ -161,14 +163,24 @@ class TrackImportFlow {
     }
     progress.dispose();
     ref.read(fogRefreshProvider.notifier).state++;
+    // Imported history may contain stays — detect over exactly its span.
+    if (result.inserted > 0 && result.from != null && result.to != null) {
+      unawaited(
+          ref.read(visitEngineProvider).detectRange(result.from!, result.to!));
+    }
 
     if (!context.mounted) return;
     Navigator.of(context).pop(); // dismiss progress dialog
-    _snack(
-        context,
-        error != null
-            ? '导入失败：$error'
-            : '已点亮 $inserted 个轨迹点${extraNote ?? ''}');
+    if (error != null) {
+      _snack(context, '导入失败：$error');
+      return;
+    }
+    final notes = <String>[
+      if (result.duplicates > 0) '跳过 ${result.duplicates} 个重复点',
+      if (result.dropped > 0) '丢弃 ${result.dropped} 个无效定位',
+    ];
+    final suffix = notes.isEmpty ? '' : '（${notes.join('，')}）';
+    _snack(context, '已点亮 ${result.inserted} 个轨迹点$suffix${extraNote ?? ''}');
   }
 
   static void _snack(BuildContext context, String msg) =>

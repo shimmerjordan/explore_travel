@@ -18,6 +18,7 @@ void main() {
         lng: lng,
         time: t0.add(dt),
         layerId: layer,
+        flags: 0,
       );
 
   /// [n] points, one per second, walking north 0.001° per step.

@@ -8,6 +8,27 @@ import 'package:path/path.dart' as p;
 import 'package:xml/xml.dart';
 import '../../data/db/database.dart';
 import '../fog/fog_engine.dart';
+import '../location/point_filter.dart';
+
+/// What [TrackImport.ingest] did: rows written, exact duplicates of points
+/// already on the layer skipped, fixes the noise gate refused outright.
+class IngestResult {
+  final int inserted;
+  final int duplicates;
+  final int dropped;
+
+  /// Time span of the written points (null when nothing was written) — the
+  /// window stay detection should re-run over.
+  final DateTime? from;
+  final DateTime? to;
+  const IngestResult({
+    required this.inserted,
+    required this.duplicates,
+    required this.dropped,
+    this.from,
+    this.to,
+  });
+}
 
 /// A single imported coordinate. [time] is null when the source format
 /// carries no per-point timestamp (most KML LineStrings / GeoJSON);
@@ -258,8 +279,14 @@ class TrackImport {
   /// Write [track] into [layerId] and reveal fog along each segment. Points
   /// without a source timestamp get a synthesised monotonic clock (1 s apart
   /// within a run, 60 s between runs) so the renderer keeps them ordered and
-  /// still breaks the visible line between runs. Returns points inserted.
-  static Future<int> ingest({
+  /// still breaks the visible line between runs.
+  ///
+  /// Two gates run first: exact duplicates of points already on the layer
+  /// (same ms + same 1e-6° coords — re-importing a GPX, or a GPX that
+  /// overlaps a recorded session) are skipped, and the GPS noise gate drops /
+  /// flags bad fixes exactly as live recording does. Fog is revealed only
+  /// along clean, newly written points.
+  static Future<IngestResult> ingest({
     required ImportedTrack track,
     required int layerId,
     required AppDb db,
@@ -268,26 +295,68 @@ class TrackImport {
     required double penRadius,
     void Function(double progress)? onProgress,
   }) async {
-    // 1) Insert all points (batched in one transaction for speed).
+    // 1) Assign times, dedup against what the layer already holds, gate.
     var synth = DateTime.now()
         .subtract(Duration(seconds: track.pointCount + track.segments.length));
-    final rows = <TrackPointsCompanion>[];
+    final timed = <List<({ImportedPoint p, DateTime t})>>[];
+    DateTime? lo, hi;
     for (final seg in track.segments) {
+      final run = <({ImportedPoint p, DateTime t})>[];
       for (final pt in seg) {
         final t = pt.time ?? synth;
         synth = synth.add(const Duration(seconds: 1));
-        rows.add(TrackPointsCompanion.insert(
-          lat: pt.lat,
-          lng: pt.lng,
-          time: t,
-          layerId: layerId,
-          altitude: Value(pt.altitude),
-          width: Value(pointWidth),
-        ));
+        run.add((p: pt, t: t));
+        if (lo == null || t.isBefore(lo)) lo = t;
+        if (hi == null || t.isAfter(hi)) hi = t;
       }
       synth = synth.add(const Duration(seconds: 60)); // gap between runs
+      timed.add(run);
     }
-    if (rows.isEmpty) return 0;
+    if (lo == null || hi == null) {
+      return const IngestResult(inserted: 0, duplicates: 0, dropped: 0);
+    }
+    final existing = await db.pointDedupKeys(layerId, lo, hi);
+
+    final rows = <TrackPointsCompanion>[];
+    // Clean points per run, for the fog pass (anomalies and dupes excluded).
+    final cleanRuns = <List<ImportedPoint>>[];
+    var duplicates = 0, dropped = 0;
+    for (final run in timed) {
+      final clean = <ImportedPoint>[];
+      PointSample? prev;
+      for (final e in run) {
+        final key = AppDb.pointDedupKey(e.t, e.p.lat, e.p.lng);
+        if (existing.contains(key)) {
+          duplicates++;
+          continue;
+        }
+        existing.add(key); // a file can repeat its own points too
+        final sample =
+            PointSample(e.p.lat, e.p.lng, e.t.millisecondsSinceEpoch);
+        final verdict = PointFilter.judge(sample, prev: prev);
+        if (verdict == PointVerdict.drop) {
+          dropped++;
+          continue;
+        }
+        final anomaly = verdict == PointVerdict.anomaly;
+        if (!anomaly) prev = sample;
+        rows.add(TrackPointsCompanion.insert(
+          lat: e.p.lat,
+          lng: e.p.lng,
+          time: e.t,
+          layerId: layerId,
+          altitude: Value(e.p.altitude),
+          width: Value(pointWidth),
+          flags: Value(anomaly ? PointFlags.anomaly : 0),
+        ));
+        if (!anomaly) clean.add(e.p);
+      }
+      if (clean.isNotEmpty) cleanRuns.add(clean);
+    }
+    if (rows.isEmpty) {
+      onProgress?.call(1.0);
+      return IngestResult(inserted: 0, duplicates: duplicates, dropped: dropped);
+    }
     await db.insertPoints(rows);
 
     // 2) Reveal fog. Within a run, chain consecutive points with a swept
@@ -295,9 +364,9 @@ class TrackImport {
     //    RecordingController's distance gate so a sparse track's big jumps
     //    don't paint a giant fake corridor).
     final maxGap = (penRadius * 5).clamp(50.0, double.infinity);
-    final total = track.pointCount;
+    final total = cleanRuns.fold<int>(0, (a, s) => a + s.length);
     var done = 0;
-    for (final seg in track.segments) {
+    for (final seg in cleanRuns) {
       for (var i = 0; i < seg.length; i++) {
         final cur = seg[i];
         if (i == 0) {
@@ -333,7 +402,13 @@ class TrackImport {
       }
     }
     onProgress?.call(1.0);
-    return rows.length;
+    return IngestResult(
+      inserted: rows.length,
+      duplicates: duplicates,
+      dropped: dropped,
+      from: lo,
+      to: hi,
+    );
   }
 
   static double _haversine(
