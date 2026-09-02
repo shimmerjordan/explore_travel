@@ -25,6 +25,7 @@ class HomeScreen extends ConsumerWidget {
     final sections = <_HomeSection>[
       const _HomeSection('记录与回顾', _Tint.primary, [
         _HomeItem('旅行手账', Icons.auto_stories_rounded, '/journal'),
+        _HomeItem('足迹时间轴', Icons.timeline_rounded, '/timeline'),
         _HomeItem('回放 / 总结', Icons.route_rounded, '/playback'),
         _HomeItem('图层与标签', Icons.layers_rounded, '/layers'),
         _HomeItem('手账图床', Icons.image_outlined, '/imghost'),

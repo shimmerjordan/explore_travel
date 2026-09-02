@@ -16,6 +16,7 @@ import '../../services/geo/learned_regions.dart';
 import '../../services/map/tile_providers.dart';
 import '../common/atmosphere.dart';
 import '../common/pixel.dart';
+import 'footprint_tab.dart';
 
 /// Exploration progress, organised by continent → country pixel grid.
 ///
@@ -302,7 +303,7 @@ class _ExploreScreenState extends ConsumerState<ExploreScreen> {
         .length;
 
     return DefaultTabController(
-      length: 2,
+      length: 3,
       child: Scaffold(
         appBar: AppBar(
           title: Text('探索进度',
@@ -319,12 +320,14 @@ class _ExploreScreenState extends ConsumerState<ExploreScreen> {
           bottom: const TabBar(tabs: [
             Tab(text: '总览'),
             Tab(text: '点亮地图'),
+            Tab(text: '足迹'),
           ]),
         ),
         body: TabBarView(
           children: [
             _buildOverview(visitedCountries, totalCountries),
             _LitMapTab(learned: _learned),
+            const FootprintTab(),
           ],
         ),
       ),

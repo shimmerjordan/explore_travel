@@ -33,6 +33,8 @@ import '../services/geo/geocoding_service.dart';
 import '../services/geo/learned_regions.dart';
 import '../services/leaderboard/leaderboard_service.dart';
 import '../services/leaderboard/leaderboard_sync.dart';
+import '../services/visits/visit_engine.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 final prefsStoreProvider = Provider((_) => PrefsStore());
 
@@ -162,6 +164,49 @@ final musicServiceProvider = Provider((ref) {
 
 final learnedRegionsProvider =
     Provider<LearnedRegionsStore>((_) => LearnedRegionsStore());
+
+/// Stay detection → visits/places. Long-lived; geocodes new places through
+/// the shared [GeocodingService] (network only if the user allowed prewarm
+/// geocoding — detection must never spend the data plan on its own).
+final visitEngineProvider = Provider<VisitEngine>((ref) {
+  final engine = VisitEngine(
+    ref.read(dbProvider),
+    geocoder: (lat, lng) => ref.read(geocodingServiceProvider).resolve(lat, lng,
+        allowNetwork: ref.read(settingsProvider).geocodingPrewarm),
+  );
+  final sub = engine.changes
+      .listen((_) => ref.read(visitsRefreshProvider.notifier).state++);
+  ref.onDispose(() {
+    sub.cancel();
+    engine.dispose();
+  });
+  return engine;
+});
+
+/// Bumped whenever visits/places change (detection run, user edit) so the
+/// timeline and stats pages refresh.
+final visitsRefreshProvider = StateProvider<int>((ref) => 0);
+
+/// One-shot: the first launch after the visits feature lands walks the whole
+/// history (month by month, off the UI isolate). Subsequent launches do
+/// nothing — recording stops and imports keep the table current.
+Future<void> runInitialVisitDetection(VisitEngine engine) async {
+  const key = 'visits_initial_v1';
+  try {
+    final prefs = await SharedPreferences.getInstance();
+    if (prefs.getBool(key) == true) return;
+    final n = await engine.detectAll();
+    await prefs.setBool(key, true);
+    debugPrint('[VISITS] initial full-history detection: $n visits');
+  } catch (e) {
+    debugPrint('[VISITS] initial detection failed: $e');
+  }
+}
+
+/// Where the map should fly next (a visit, a place). Consumed once by the
+/// map screen, like [fogImportFocusProvider] but with a caller-chosen zoom.
+final mapFocusProvider =
+    StateProvider<({double lat, double lng, double zoom})?>((ref) => null);
 
 /// Long-lived. Same shape as [uploadQueueProvider] — settings updates are
 /// pushed in instead of rebuilding (cache lives on the instance).

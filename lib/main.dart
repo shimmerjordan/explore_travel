@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui';
 import 'package:flutter/foundation.dart';
@@ -16,6 +17,7 @@ import 'ui/settings/storage_screen.dart';
 import 'ui/journal/journal_screen.dart';
 import 'ui/playback/playback_screen.dart';
 import 'ui/explore/explore_screen.dart';
+import 'ui/timeline/timeline_screen.dart';
 import 'ui/ai_planner/ai_planner_screen.dart';
 import 'ui/chat/chat_screen.dart';
 import 'ui/music/music_screen.dart';
@@ -30,6 +32,7 @@ import 'ui/about/about_screen.dart';
 import 'ui/permissions/permissions_screen.dart';
 import 'app/providers.dart'
     show groupLifecycleProvider, dbProvider, runStartupDbMaintenance,
+        runInitialVisitDetection, visitEngineProvider, visitsRefreshProvider,
         settingsProvider;
 import 'services/vault/auth_controller.dart';
 import 'ui/auth/login_screen.dart';
@@ -131,7 +134,26 @@ class _ExploreJournalAppState extends ConsumerState<ExploreJournalApp> {
       // runStartupDbMaintenance). Recreating an orphaned layer flips the
       // watchLayers() stream, so the map/trail/journal re-render on their own.
       runStartupDbMaintenance(ref.read(dbProvider));
+      // First-launch stay detection over the whole history — after the map
+      // has had a few seconds to settle, and never on the read-only web view.
+      // A cancellable Timer (not Future.delayed) so tearing the app down —
+      // widget tests do — leaves nothing pending.
+      if (!kIsWeb) {
+        _visitKick = Timer(const Duration(seconds: 8), () {
+          if (!mounted) return;
+          runInitialVisitDetection(ref.read(visitEngineProvider))
+              .then((_) => ref.read(visitsRefreshProvider.notifier).state++);
+        });
+      }
     });
+  }
+
+  Timer? _visitKick;
+
+  @override
+  void dispose() {
+    _visitKick?.cancel();
+    super.dispose();
   }
 
   GoRouter _makeRouter() => GoRouter(
@@ -163,6 +185,7 @@ class _ExploreJournalAppState extends ConsumerState<ExploreJournalApp> {
       GoRoute(path: '/journal', builder: (_, __) => const JournalScreen()),
       GoRoute(path: '/playback', builder: (_, __) => const PlaybackScreen()),
       GoRoute(path: '/explore', builder: (_, __) => const ExploreScreen()),
+      GoRoute(path: '/timeline', builder: (_, __) => const TimelineScreen()),
       GoRoute(path: '/ai', builder: (_, __) => const AiPlannerScreen()),
       GoRoute(path: '/group', builder: (_, __) => const ChatScreen()),
       GoRoute(path: '/music', builder: (_, __) => const MusicScreen()),
