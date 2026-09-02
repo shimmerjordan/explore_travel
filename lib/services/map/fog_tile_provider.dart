@@ -676,6 +676,47 @@ const int _kFogNativeZoom = 14;
 /// z17 tiles, whose edges are already soft, so they stay smooth when scaled.
 const int _kFogMaxNativeZoom = 17;
 
+/// Shared gesture-coalescing tile updater for every baked-in-memory layer
+/// (fog, heat). One pass 120 ms after events stop, and at least one every
+/// 400 ms during a long gesture — see [_FogTileLayerState._coalesced].
+final TileUpdateTransformer coalescedTileUpdates = coalescedTileUpdateTransformer(
+  quiet: const Duration(milliseconds: 120),
+  maxWait: const Duration(milliseconds: 400),
+);
+
+/// Build a [TileUpdateTransformer] that swallows the per-frame MapEvents of a
+/// gesture and emits the LATEST one once things go quiet for [quiet], or at
+/// the latest every [maxWait] while the gesture continues.
+TileUpdateTransformer coalescedTileUpdateTransformer(
+    {required Duration quiet, required Duration maxWait}) {
+  Timer? quietTimer, maxTimer;
+  TileUpdateEvent? pending;
+  return StreamTransformer.fromHandlers(
+    handleData: (event, sink) {
+      if (event.wasTriggeredByTap()) return;
+      pending = event;
+      void emit() {
+        quietTimer?.cancel();
+        maxTimer?.cancel();
+        quietTimer = null;
+        maxTimer = null;
+        final e = pending;
+        pending = null;
+        if (e != null) sink.add(e);
+      }
+
+      quietTimer?.cancel();
+      quietTimer = Timer(quiet, emit);
+      maxTimer ??= Timer(maxWait, emit);
+    },
+    handleDone: (sink) {
+      quietTimer?.cancel();
+      maxTimer?.cancel();
+      sink.close();
+    },
+  );
+}
+
 /// Drop-in flutter_map layer that draws the explored fog as baked tiles. Owns
 /// the [FogTileProvider] + a persistent reset stream; loads the explored rows
 /// for the visible layers and re-bakes (via the reset stream + a bumped
@@ -897,40 +938,7 @@ class _FogTileLayerState extends State<FogTileLayer> {
   /// pass at least every 400 ms so a slow pan never runs out of tiles.
   /// Meanwhile the retained tiles are simply rescaled — the same thing the
   /// reference WebGL fog does through a zoom animation.
-  static final TileUpdateTransformer _coalesced = _coalescedTransformer(
-    quiet: const Duration(milliseconds: 120),
-    maxWait: const Duration(milliseconds: 400),
-  );
-
-  static TileUpdateTransformer _coalescedTransformer(
-      {required Duration quiet, required Duration maxWait}) {
-    Timer? quietTimer, maxTimer;
-    TileUpdateEvent? pending;
-    return StreamTransformer.fromHandlers(
-      handleData: (event, sink) {
-        if (event.wasTriggeredByTap()) return;
-        pending = event;
-        void emit() {
-          quietTimer?.cancel();
-          maxTimer?.cancel();
-          quietTimer = null;
-          maxTimer = null;
-          final e = pending;
-          pending = null;
-          if (e != null) sink.add(e);
-        }
-
-        quietTimer?.cancel();
-        quietTimer = Timer(quiet, emit);
-        maxTimer ??= Timer(maxWait, emit);
-      },
-      handleDone: (sink) {
-        quietTimer?.cancel();
-        maxTimer?.cancel();
-        sink.close();
-      },
-    );
-  }
+  static final TileUpdateTransformer _coalesced = coalescedTileUpdates;
 
   TileLayer _tiles(FogTileProvider provider, String kind) => TileLayer(
         // Remount when the snapshot flips empty↔non-empty. The in-place

@@ -33,6 +33,22 @@ class AppSettings {
   /// 奥维瓦片是否为 GCJ-02（奥维大陆境内底图默认 GCJ-02；若接的是
   /// WGS-84 源可关掉，否则轨迹会偏几百米）。
   final bool ovitalGcj02;
+
+  // ── 热图（人生点点式 3D 热力山脊，样式参数；显示模式即 3D，无持久开关）──
+  /// HeatPalette.all 的下标（按索引存盘，只能追加）。
+  final int heatPalette;
+  /// 曝光：每次经过叠加的亮度倍率，0.3..3。
+  final double heatExposure;
+  /// 粗细倍率，0.5..3。
+  final double heatWidth;
+  /// 3D 倾斜视图里山脊的高度倍率，0.3..2。
+  final double heatHeight;
+  /// 时间范围：0 全部 / 1 今年 / 2 近 30 天 / 3 自定义（下面两个毫秒时间戳）。
+  final int heatRange;
+  final int heatRangeFromMs;
+  final int heatRangeToMs;
+  /// 把纯迷雾块（如 FOW 导入、没有轨迹点的区域）算作淡淡的底噪。
+  final bool heatFogBaseline;
   final String? aiBaseUrl;
   final String? aiApiKey;
   final String aiModel;
@@ -285,6 +301,14 @@ class AppSettings {
     this.customOsmTileUrl,
     this.ovitalTileUrl,
     this.ovitalGcj02 = true,
+    this.heatPalette = 0,
+    this.heatExposure = 1.0,
+    this.heatWidth = 1.0,
+    this.heatHeight = 1.0,
+    this.heatRange = 0,
+    this.heatRangeFromMs = 0,
+    this.heatRangeToMs = 0,
+    this.heatFogBaseline = true,
     this.aiBaseUrl = 'https://api.siliconflow.cn/v1',
     this.aiApiKey,
     this.aiModel = 'Qwen/Qwen2.5-7B-Instruct',
@@ -392,6 +416,14 @@ class AppSettings {
     String? customOsmTileUrl,
     String? ovitalTileUrl,
     bool? ovitalGcj02,
+    int? heatPalette,
+    double? heatExposure,
+    double? heatWidth,
+    double? heatHeight,
+    int? heatRange,
+    int? heatRangeFromMs,
+    int? heatRangeToMs,
+    bool? heatFogBaseline,
     String? aiBaseUrl,
     String? aiApiKey,
     String? aiModel,
@@ -497,6 +529,14 @@ class AppSettings {
         customOsmTileUrl: customOsmTileUrl ?? this.customOsmTileUrl,
         ovitalTileUrl: ovitalTileUrl ?? this.ovitalTileUrl,
         ovitalGcj02: ovitalGcj02 ?? this.ovitalGcj02,
+        heatPalette: heatPalette ?? this.heatPalette,
+        heatExposure: heatExposure ?? this.heatExposure,
+        heatWidth: heatWidth ?? this.heatWidth,
+        heatHeight: heatHeight ?? this.heatHeight,
+        heatRange: heatRange ?? this.heatRange,
+        heatRangeFromMs: heatRangeFromMs ?? this.heatRangeFromMs,
+        heatRangeToMs: heatRangeToMs ?? this.heatRangeToMs,
+        heatFogBaseline: heatFogBaseline ?? this.heatFogBaseline,
         aiBaseUrl: aiBaseUrl ?? this.aiBaseUrl,
         aiApiKey: aiApiKey ?? this.aiApiKey,
         aiModel: aiModel ?? this.aiModel,
@@ -618,6 +658,14 @@ class AppSettings {
         'customOsmTileUrl': customOsmTileUrl,
         'ovitalTileUrl': ovitalTileUrl,
         'ovitalGcj02': ovitalGcj02,
+        'heatPalette': heatPalette,
+        'heatExposure': heatExposure,
+        'heatWidth': heatWidth,
+        'heatHeight': heatHeight,
+        'heatRange': heatRange,
+        'heatRangeFromMs': heatRangeFromMs,
+        'heatRangeToMs': heatRangeToMs,
+        'heatFogBaseline': heatFogBaseline,
         'aiBaseUrl': aiBaseUrl,
         'aiApiKey': aiApiKey,
         'aiModel': aiModel,
@@ -713,6 +761,25 @@ class AppSettings {
   /// newer build added one, then the user downgraded). Out of range used to
   /// throw RangeError here, and the try/catch around fromJson then reset the
   /// ENTIRE settings blob to defaults — fog colour, AI keys, sync backend…
+  /// Clamped numeric readers: a value outside its sane range (hand-edited
+  /// blob, future version with a wider scale) degrades to the default alone
+  /// instead of failing the whole settings load.
+  static int _intIn(Object? raw, int lo, int hi, int fallback) {
+    if (raw is num) {
+      final v = raw.toInt();
+      if (v >= lo && v <= hi) return v;
+    }
+    return fallback;
+  }
+
+  static double _dblIn(Object? raw, double lo, double hi, double fallback) {
+    if (raw is num) {
+      final v = raw.toDouble();
+      if (v.isFinite && v >= lo && v <= hi) return v;
+    }
+    return fallback;
+  }
+
   static T _enumAt<T extends Enum>(List<T> values, Object? raw, T fallback) {
     if (raw is int && raw >= 0 && raw < values.length) return values[raw];
     return fallback;
@@ -734,6 +801,14 @@ class AppSettings {
         customOsmTileUrl: j['customOsmTileUrl'],
         ovitalTileUrl: j['ovitalTileUrl'],
         ovitalGcj02: (j['ovitalGcj02'] ?? true) as bool,
+        heatPalette: _intIn(j['heatPalette'], 0, 99, 0),
+        heatExposure: _dblIn(j['heatExposure'], 0.3, 3.0, 1.0),
+        heatWidth: _dblIn(j['heatWidth'], 0.5, 3.0, 1.0),
+        heatHeight: _dblIn(j['heatHeight'], 0.3, 2.0, 1.0),
+        heatRange: _intIn(j['heatRange'], 0, 3, 0),
+        heatRangeFromMs: (j['heatRangeFromMs'] as num?)?.toInt() ?? 0,
+        heatRangeToMs: (j['heatRangeToMs'] as num?)?.toInt() ?? 0,
+        heatFogBaseline: (j['heatFogBaseline'] ?? true) as bool,
         aiBaseUrl: j['aiBaseUrl'] ?? 'https://api.siliconflow.cn/v1',
         aiApiKey: j['aiApiKey'],
         aiModel: j['aiModel'] ?? 'Qwen/Qwen2.5-7B-Instruct',

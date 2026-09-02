@@ -45,6 +45,95 @@ String? normalizeTileTemplate(String? raw) {
   return s;
 }
 
+/// The raster template + subdomain pool for a provider/style — the single
+/// source both the 2D TileLayer and the 3D tile engine resolve URLs from.
+({String url, List<String> subdomains}) rasterTileTemplate({
+  required MapProvider provider,
+  required MapStyle style,
+  String? customOsmUrl,
+  String? ovitalUrl,
+}) {
+  const amapSubs = ['1', '2', '3', '4'];
+  switch (provider) {
+    case MapProvider.amap:
+      return switch (style) {
+        MapStyle.standard => (
+            url:
+                'https://wprd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&style=7&x={x}&y={y}&z={z}',
+            subdomains: amapSubs
+          ),
+        MapStyle.satellite => (
+            url:
+                'https://webst0{s}.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}',
+            subdomains: amapSubs
+          ),
+        MapStyle.hybrid => (
+            url:
+                'https://webst0{s}.is.autonavi.com/appmaptile?style=8&x={x}&y={y}&z={z}',
+            subdomains: amapSubs
+          ),
+      };
+    case MapProvider.google:
+      final t = switch (style) {
+        MapStyle.standard => 'm',
+        MapStyle.satellite => 's',
+        MapStyle.hybrid => 'y',
+      };
+      return (
+        url: 'https://mt{s}.google.com/vt/lyrs=$t&x={x}&y={y}&z={z}',
+        subdomains: const ['0', '1', '2', '3'],
+      );
+    case MapProvider.osm:
+      final url = normalizeTileTemplate(customOsmUrl) ??
+          switch (style) {
+            MapStyle.standard => _kOsmStandardUrl,
+            MapStyle.satellite =>
+              'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+            MapStyle.hybrid =>
+              'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+          };
+      return (url: url, subdomains: const []);
+    case MapProvider.ovital:
+      final url = normalizeTileTemplate(ovitalUrl);
+      if (url == null) return (url: _kOsmStandardUrl, subdomains: const []);
+      // Ovital's `{s}` (if any) is the user's own server list; we can only
+      // hand it one host, so keep a single-element pool.
+      return (
+        url: url,
+        subdomains: url.contains('{s}') ? const ['a'] : const []
+      );
+  }
+}
+
+/// Concrete tile URL for the 3D engine (subdomain rotated by coordinates so
+/// neighbouring fetches spread across the pool like flutter_map does).
+String rasterTileUrl({
+  required MapProvider provider,
+  required MapStyle style,
+  String? customOsmUrl,
+  String? ovitalUrl,
+  required int z,
+  required int x,
+  required int y,
+}) {
+  final t = rasterTileTemplate(
+      provider: provider,
+      style: style,
+      customOsmUrl: customOsmUrl,
+      ovitalUrl: ovitalUrl);
+  var url = t.url
+      .replaceAll('{z}', '$z')
+      .replaceAll('{x}', '$x')
+      .replaceAll('{y}', '$y');
+  if (url.contains('{s}')) {
+    final s = t.subdomains.isEmpty
+        ? ''
+        : t.subdomains[(x + y) % t.subdomains.length];
+    url = url.replaceAll('{s}', s);
+  }
+  return url;
+}
+
 /// Returns a TileLayer for the requested provider + style.
 TileLayer buildTileLayer({
   required MapProvider provider,
@@ -93,54 +182,10 @@ TileLayer buildTileLayer({
             debugPrint('[TILE] ${tile.coordinates} failed: $error'),
       );
 
-  const amapSubs = ['1', '2', '3', '4'];
-
-  switch (provider) {
-    case MapProvider.amap:
-      switch (style) {
-        case MapStyle.standard:
-          return make(
-            'https://wprd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&style=7&x={x}&y={y}&z={z}',
-            subdomains: amapSubs,
-          );
-        case MapStyle.satellite:
-          return make(
-            'https://webst0{s}.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}',
-            subdomains: amapSubs,
-          );
-        case MapStyle.hybrid:
-          return make(
-            'https://webst0{s}.is.autonavi.com/appmaptile?style=8&x={x}&y={y}&z={z}',
-            subdomains: amapSubs,
-          );
-      }
-    case MapProvider.google:
-      final t = switch (style) {
-        MapStyle.standard => 'm',
-        MapStyle.satellite => 's',
-        MapStyle.hybrid => 'y',
-      };
-      return make(
-        'https://mt{s}.google.com/vt/lyrs=$t&x={x}&y={y}&z={z}',
-        subdomains: const ['0', '1', '2', '3'],
-      );
-    case MapProvider.osm:
-      final url = normalizeTileTemplate(customOsmUrl) ??
-          switch (style) {
-            MapStyle.standard => _kOsmStandardUrl,
-            MapStyle.satellite =>
-              'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-            MapStyle.hybrid =>
-              'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-          };
-      return make(url);
-    case MapProvider.ovital:
-      // One template serves every style: which Ovital map it shows is the
-      // `getomap_<mapId>` segment the user put in the URL.
-      final url = normalizeTileTemplate(ovitalUrl);
-      if (url == null) return make(_kOsmStandardUrl);
-      // Ovital's `{s}` (if any) is the user's own server list; we can only
-      // hand it one host, so keep a single-element pool.
-      return make(url, subdomains: url.contains('{s}') ? const ['a'] : const []);
-  }
+  final t = rasterTileTemplate(
+      provider: provider,
+      style: style,
+      customOsmUrl: customOsmUrl,
+      ovitalUrl: ovitalUrl);
+  return make(t.url, subdomains: t.subdomains);
 }
