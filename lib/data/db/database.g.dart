@@ -68,9 +68,27 @@ class $TrackPointsTable extends TrackPoints
   late final GeneratedColumn<int> layerId = GeneratedColumn<int>(
       'layer_id', aliasedName, false,
       type: DriftSqlType.int, requiredDuringInsert: true);
+  static const VerificationMeta _flagsMeta = const VerificationMeta('flags');
   @override
-  List<GeneratedColumn> get $columns =>
-      [id, uuid, lat, lng, time, accuracy, altitude, speed, width, layerId];
+  late final GeneratedColumn<int> flags = GeneratedColumn<int>(
+      'flags', aliasedName, false,
+      type: DriftSqlType.int,
+      requiredDuringInsert: false,
+      defaultValue: const Constant(0));
+  @override
+  List<GeneratedColumn> get $columns => [
+        id,
+        uuid,
+        lat,
+        lng,
+        time,
+        accuracy,
+        altitude,
+        speed,
+        width,
+        layerId,
+        flags
+      ];
   @override
   String get aliasedName => _alias ?? actualTableName;
   @override
@@ -128,6 +146,10 @@ class $TrackPointsTable extends TrackPoints
     } else if (isInserting) {
       context.missing(_layerIdMeta);
     }
+    if (data.containsKey('flags')) {
+      context.handle(
+          _flagsMeta, flags.isAcceptableOrUnknown(data['flags']!, _flagsMeta));
+    }
     return context;
   }
 
@@ -157,6 +179,8 @@ class $TrackPointsTable extends TrackPoints
           .read(DriftSqlType.double, data['${effectivePrefix}width']),
       layerId: attachedDatabase.typeMapping
           .read(DriftSqlType.int, data['${effectivePrefix}layer_id'])!,
+      flags: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}flags'])!,
     );
   }
 
@@ -186,6 +210,11 @@ class TrackPoint extends DataClass implements Insertable<TrackPoint> {
   /// renderer's default width.
   final double? width;
   final int layerId;
+
+  /// Bit flags (see `PointFlags`). bit0 = GPS anomaly: the fix is kept for
+  /// the record but heat map / visits / stats skip it. Marked, never
+  /// deleted — a wrong "anomaly" call is recoverable, a delete isn't.
+  final int flags;
   const TrackPoint(
       {required this.id,
       required this.uuid,
@@ -196,7 +225,8 @@ class TrackPoint extends DataClass implements Insertable<TrackPoint> {
       this.altitude,
       this.speed,
       this.width,
-      required this.layerId});
+      required this.layerId,
+      required this.flags});
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
     final map = <String, Expression>{};
@@ -218,6 +248,7 @@ class TrackPoint extends DataClass implements Insertable<TrackPoint> {
       map['width'] = Variable<double>(width);
     }
     map['layer_id'] = Variable<int>(layerId);
+    map['flags'] = Variable<int>(flags);
     return map;
   }
 
@@ -239,6 +270,7 @@ class TrackPoint extends DataClass implements Insertable<TrackPoint> {
       width:
           width == null && nullToAbsent ? const Value.absent() : Value(width),
       layerId: Value(layerId),
+      flags: Value(flags),
     );
   }
 
@@ -256,6 +288,7 @@ class TrackPoint extends DataClass implements Insertable<TrackPoint> {
       speed: serializer.fromJson<double?>(json['speed']),
       width: serializer.fromJson<double?>(json['width']),
       layerId: serializer.fromJson<int>(json['layerId']),
+      flags: serializer.fromJson<int>(json['flags']),
     );
   }
   @override
@@ -272,6 +305,7 @@ class TrackPoint extends DataClass implements Insertable<TrackPoint> {
       'speed': serializer.toJson<double?>(speed),
       'width': serializer.toJson<double?>(width),
       'layerId': serializer.toJson<int>(layerId),
+      'flags': serializer.toJson<int>(flags),
     };
   }
 
@@ -285,7 +319,8 @@ class TrackPoint extends DataClass implements Insertable<TrackPoint> {
           Value<double?> altitude = const Value.absent(),
           Value<double?> speed = const Value.absent(),
           Value<double?> width = const Value.absent(),
-          int? layerId}) =>
+          int? layerId,
+          int? flags}) =>
       TrackPoint(
         id: id ?? this.id,
         uuid: uuid ?? this.uuid,
@@ -297,6 +332,7 @@ class TrackPoint extends DataClass implements Insertable<TrackPoint> {
         speed: speed.present ? speed.value : this.speed,
         width: width.present ? width.value : this.width,
         layerId: layerId ?? this.layerId,
+        flags: flags ?? this.flags,
       );
   TrackPoint copyWithCompanion(TrackPointsCompanion data) {
     return TrackPoint(
@@ -310,6 +346,7 @@ class TrackPoint extends DataClass implements Insertable<TrackPoint> {
       speed: data.speed.present ? data.speed.value : this.speed,
       width: data.width.present ? data.width.value : this.width,
       layerId: data.layerId.present ? data.layerId.value : this.layerId,
+      flags: data.flags.present ? data.flags.value : this.flags,
     );
   }
 
@@ -325,14 +362,15 @@ class TrackPoint extends DataClass implements Insertable<TrackPoint> {
           ..write('altitude: $altitude, ')
           ..write('speed: $speed, ')
           ..write('width: $width, ')
-          ..write('layerId: $layerId')
+          ..write('layerId: $layerId, ')
+          ..write('flags: $flags')
           ..write(')'))
         .toString();
   }
 
   @override
-  int get hashCode => Object.hash(
-      id, uuid, lat, lng, time, accuracy, altitude, speed, width, layerId);
+  int get hashCode => Object.hash(id, uuid, lat, lng, time, accuracy, altitude,
+      speed, width, layerId, flags);
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -346,7 +384,8 @@ class TrackPoint extends DataClass implements Insertable<TrackPoint> {
           other.altitude == this.altitude &&
           other.speed == this.speed &&
           other.width == this.width &&
-          other.layerId == this.layerId);
+          other.layerId == this.layerId &&
+          other.flags == this.flags);
 }
 
 class TrackPointsCompanion extends UpdateCompanion<TrackPoint> {
@@ -360,6 +399,7 @@ class TrackPointsCompanion extends UpdateCompanion<TrackPoint> {
   final Value<double?> speed;
   final Value<double?> width;
   final Value<int> layerId;
+  final Value<int> flags;
   const TrackPointsCompanion({
     this.id = const Value.absent(),
     this.uuid = const Value.absent(),
@@ -371,6 +411,7 @@ class TrackPointsCompanion extends UpdateCompanion<TrackPoint> {
     this.speed = const Value.absent(),
     this.width = const Value.absent(),
     this.layerId = const Value.absent(),
+    this.flags = const Value.absent(),
   });
   TrackPointsCompanion.insert({
     this.id = const Value.absent(),
@@ -383,6 +424,7 @@ class TrackPointsCompanion extends UpdateCompanion<TrackPoint> {
     this.speed = const Value.absent(),
     this.width = const Value.absent(),
     required int layerId,
+    this.flags = const Value.absent(),
   })  : lat = Value(lat),
         lng = Value(lng),
         time = Value(time),
@@ -398,6 +440,7 @@ class TrackPointsCompanion extends UpdateCompanion<TrackPoint> {
     Expression<double>? speed,
     Expression<double>? width,
     Expression<int>? layerId,
+    Expression<int>? flags,
   }) {
     return RawValuesInsertable({
       if (id != null) 'id': id,
@@ -410,6 +453,7 @@ class TrackPointsCompanion extends UpdateCompanion<TrackPoint> {
       if (speed != null) 'speed': speed,
       if (width != null) 'width': width,
       if (layerId != null) 'layer_id': layerId,
+      if (flags != null) 'flags': flags,
     });
   }
 
@@ -423,7 +467,8 @@ class TrackPointsCompanion extends UpdateCompanion<TrackPoint> {
       Value<double?>? altitude,
       Value<double?>? speed,
       Value<double?>? width,
-      Value<int>? layerId}) {
+      Value<int>? layerId,
+      Value<int>? flags}) {
     return TrackPointsCompanion(
       id: id ?? this.id,
       uuid: uuid ?? this.uuid,
@@ -435,6 +480,7 @@ class TrackPointsCompanion extends UpdateCompanion<TrackPoint> {
       speed: speed ?? this.speed,
       width: width ?? this.width,
       layerId: layerId ?? this.layerId,
+      flags: flags ?? this.flags,
     );
   }
 
@@ -471,6 +517,9 @@ class TrackPointsCompanion extends UpdateCompanion<TrackPoint> {
     if (layerId.present) {
       map['layer_id'] = Variable<int>(layerId.value);
     }
+    if (flags.present) {
+      map['flags'] = Variable<int>(flags.value);
+    }
     return map;
   }
 
@@ -486,7 +535,8 @@ class TrackPointsCompanion extends UpdateCompanion<TrackPoint> {
           ..write('altitude: $altitude, ')
           ..write('speed: $speed, ')
           ..write('width: $width, ')
-          ..write('layerId: $layerId')
+          ..write('layerId: $layerId, ')
+          ..write('flags: $flags')
           ..write(')'))
         .toString();
   }
@@ -3720,6 +3770,1737 @@ class FogErasesCompanion extends UpdateCompanion<FogErase> {
   }
 }
 
+class $PlacesTable extends Places with TableInfo<$PlacesTable, Place> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $PlacesTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  @override
+  late final GeneratedColumn<int> id = GeneratedColumn<int>(
+      'id', aliasedName, false,
+      hasAutoIncrement: true,
+      type: DriftSqlType.int,
+      requiredDuringInsert: false,
+      defaultConstraints:
+          GeneratedColumn.constraintIsAlways('PRIMARY KEY AUTOINCREMENT'));
+  static const VerificationMeta _uuidMeta = const VerificationMeta('uuid');
+  @override
+  late final GeneratedColumn<String> uuid = GeneratedColumn<String>(
+      'uuid', aliasedName, false,
+      type: DriftSqlType.string,
+      requiredDuringInsert: false,
+      defaultValue: const Constant(''));
+  static const VerificationMeta _nameMeta = const VerificationMeta('name');
+  @override
+  late final GeneratedColumn<String> name = GeneratedColumn<String>(
+      'name', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _latMeta = const VerificationMeta('lat');
+  @override
+  late final GeneratedColumn<double> lat = GeneratedColumn<double>(
+      'lat', aliasedName, false,
+      type: DriftSqlType.double, requiredDuringInsert: true);
+  static const VerificationMeta _lngMeta = const VerificationMeta('lng');
+  @override
+  late final GeneratedColumn<double> lng = GeneratedColumn<double>(
+      'lng', aliasedName, false,
+      type: DriftSqlType.double, requiredDuringInsert: true);
+  static const VerificationMeta _radiusMeta = const VerificationMeta('radius');
+  @override
+  late final GeneratedColumn<double> radius = GeneratedColumn<double>(
+      'radius', aliasedName, false,
+      type: DriftSqlType.double,
+      requiredDuringInsert: false,
+      defaultValue: const Constant(100));
+  static const VerificationMeta _sourceMeta = const VerificationMeta('source');
+  @override
+  late final GeneratedColumn<int> source = GeneratedColumn<int>(
+      'source', aliasedName, false,
+      type: DriftSqlType.int,
+      requiredDuringInsert: false,
+      defaultValue: const Constant(0));
+  static const VerificationMeta _countryMeta =
+      const VerificationMeta('country');
+  @override
+  late final GeneratedColumn<String> country = GeneratedColumn<String>(
+      'country', aliasedName, true,
+      type: DriftSqlType.string, requiredDuringInsert: false);
+  static const VerificationMeta _provinceMeta =
+      const VerificationMeta('province');
+  @override
+  late final GeneratedColumn<String> province = GeneratedColumn<String>(
+      'province', aliasedName, true,
+      type: DriftSqlType.string, requiredDuringInsert: false);
+  static const VerificationMeta _cityMeta = const VerificationMeta('city');
+  @override
+  late final GeneratedColumn<String> city = GeneratedColumn<String>(
+      'city', aliasedName, true,
+      type: DriftSqlType.string, requiredDuringInsert: false);
+  static const VerificationMeta _createdAtMeta =
+      const VerificationMeta('createdAt');
+  @override
+  late final GeneratedColumn<DateTime> createdAt = GeneratedColumn<DateTime>(
+      'created_at', aliasedName, false,
+      type: DriftSqlType.dateTime, requiredDuringInsert: true);
+  static const VerificationMeta _updatedAtMeta =
+      const VerificationMeta('updatedAt');
+  @override
+  late final GeneratedColumn<DateTime> updatedAt = GeneratedColumn<DateTime>(
+      'updated_at', aliasedName, true,
+      type: DriftSqlType.dateTime, requiredDuringInsert: false);
+  @override
+  List<GeneratedColumn> get $columns => [
+        id,
+        uuid,
+        name,
+        lat,
+        lng,
+        radius,
+        source,
+        country,
+        province,
+        city,
+        createdAt,
+        updatedAt
+      ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'places';
+  @override
+  VerificationContext validateIntegrity(Insertable<Place> instance,
+      {bool isInserting = false}) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    }
+    if (data.containsKey('uuid')) {
+      context.handle(
+          _uuidMeta, uuid.isAcceptableOrUnknown(data['uuid']!, _uuidMeta));
+    }
+    if (data.containsKey('name')) {
+      context.handle(
+          _nameMeta, name.isAcceptableOrUnknown(data['name']!, _nameMeta));
+    } else if (isInserting) {
+      context.missing(_nameMeta);
+    }
+    if (data.containsKey('lat')) {
+      context.handle(
+          _latMeta, lat.isAcceptableOrUnknown(data['lat']!, _latMeta));
+    } else if (isInserting) {
+      context.missing(_latMeta);
+    }
+    if (data.containsKey('lng')) {
+      context.handle(
+          _lngMeta, lng.isAcceptableOrUnknown(data['lng']!, _lngMeta));
+    } else if (isInserting) {
+      context.missing(_lngMeta);
+    }
+    if (data.containsKey('radius')) {
+      context.handle(_radiusMeta,
+          radius.isAcceptableOrUnknown(data['radius']!, _radiusMeta));
+    }
+    if (data.containsKey('source')) {
+      context.handle(_sourceMeta,
+          source.isAcceptableOrUnknown(data['source']!, _sourceMeta));
+    }
+    if (data.containsKey('country')) {
+      context.handle(_countryMeta,
+          country.isAcceptableOrUnknown(data['country']!, _countryMeta));
+    }
+    if (data.containsKey('province')) {
+      context.handle(_provinceMeta,
+          province.isAcceptableOrUnknown(data['province']!, _provinceMeta));
+    }
+    if (data.containsKey('city')) {
+      context.handle(
+          _cityMeta, city.isAcceptableOrUnknown(data['city']!, _cityMeta));
+    }
+    if (data.containsKey('created_at')) {
+      context.handle(_createdAtMeta,
+          createdAt.isAcceptableOrUnknown(data['created_at']!, _createdAtMeta));
+    } else if (isInserting) {
+      context.missing(_createdAtMeta);
+    }
+    if (data.containsKey('updated_at')) {
+      context.handle(_updatedAtMeta,
+          updatedAt.isAcceptableOrUnknown(data['updated_at']!, _updatedAtMeta));
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  Place map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return Place(
+      id: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}id'])!,
+      uuid: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}uuid'])!,
+      name: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}name'])!,
+      lat: attachedDatabase.typeMapping
+          .read(DriftSqlType.double, data['${effectivePrefix}lat'])!,
+      lng: attachedDatabase.typeMapping
+          .read(DriftSqlType.double, data['${effectivePrefix}lng'])!,
+      radius: attachedDatabase.typeMapping
+          .read(DriftSqlType.double, data['${effectivePrefix}radius'])!,
+      source: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}source'])!,
+      country: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}country']),
+      province: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}province']),
+      city: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}city']),
+      createdAt: attachedDatabase.typeMapping
+          .read(DriftSqlType.dateTime, data['${effectivePrefix}created_at'])!,
+      updatedAt: attachedDatabase.typeMapping
+          .read(DriftSqlType.dateTime, data['${effectivePrefix}updated_at']),
+    );
+  }
+
+  @override
+  $PlacesTable createAlias(String alias) {
+    return $PlacesTable(attachedDatabase, alias);
+  }
+}
+
+class Place extends DataClass implements Insertable<Place> {
+  final int id;
+  final String uuid;
+  final String name;
+  final double lat;
+  final double lng;
+
+  /// Match radius in metres for attributing new stays (default 100).
+  final double radius;
+
+  /// 0 = auto (detected), 1 = manual (user named / created).
+  final int source;
+  final String? country;
+  final String? province;
+  final String? city;
+  final DateTime createdAt;
+  final DateTime? updatedAt;
+  const Place(
+      {required this.id,
+      required this.uuid,
+      required this.name,
+      required this.lat,
+      required this.lng,
+      required this.radius,
+      required this.source,
+      this.country,
+      this.province,
+      this.city,
+      required this.createdAt,
+      this.updatedAt});
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<int>(id);
+    map['uuid'] = Variable<String>(uuid);
+    map['name'] = Variable<String>(name);
+    map['lat'] = Variable<double>(lat);
+    map['lng'] = Variable<double>(lng);
+    map['radius'] = Variable<double>(radius);
+    map['source'] = Variable<int>(source);
+    if (!nullToAbsent || country != null) {
+      map['country'] = Variable<String>(country);
+    }
+    if (!nullToAbsent || province != null) {
+      map['province'] = Variable<String>(province);
+    }
+    if (!nullToAbsent || city != null) {
+      map['city'] = Variable<String>(city);
+    }
+    map['created_at'] = Variable<DateTime>(createdAt);
+    if (!nullToAbsent || updatedAt != null) {
+      map['updated_at'] = Variable<DateTime>(updatedAt);
+    }
+    return map;
+  }
+
+  PlacesCompanion toCompanion(bool nullToAbsent) {
+    return PlacesCompanion(
+      id: Value(id),
+      uuid: Value(uuid),
+      name: Value(name),
+      lat: Value(lat),
+      lng: Value(lng),
+      radius: Value(radius),
+      source: Value(source),
+      country: country == null && nullToAbsent
+          ? const Value.absent()
+          : Value(country),
+      province: province == null && nullToAbsent
+          ? const Value.absent()
+          : Value(province),
+      city: city == null && nullToAbsent ? const Value.absent() : Value(city),
+      createdAt: Value(createdAt),
+      updatedAt: updatedAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(updatedAt),
+    );
+  }
+
+  factory Place.fromJson(Map<String, dynamic> json,
+      {ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return Place(
+      id: serializer.fromJson<int>(json['id']),
+      uuid: serializer.fromJson<String>(json['uuid']),
+      name: serializer.fromJson<String>(json['name']),
+      lat: serializer.fromJson<double>(json['lat']),
+      lng: serializer.fromJson<double>(json['lng']),
+      radius: serializer.fromJson<double>(json['radius']),
+      source: serializer.fromJson<int>(json['source']),
+      country: serializer.fromJson<String?>(json['country']),
+      province: serializer.fromJson<String?>(json['province']),
+      city: serializer.fromJson<String?>(json['city']),
+      createdAt: serializer.fromJson<DateTime>(json['createdAt']),
+      updatedAt: serializer.fromJson<DateTime?>(json['updatedAt']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<int>(id),
+      'uuid': serializer.toJson<String>(uuid),
+      'name': serializer.toJson<String>(name),
+      'lat': serializer.toJson<double>(lat),
+      'lng': serializer.toJson<double>(lng),
+      'radius': serializer.toJson<double>(radius),
+      'source': serializer.toJson<int>(source),
+      'country': serializer.toJson<String?>(country),
+      'province': serializer.toJson<String?>(province),
+      'city': serializer.toJson<String?>(city),
+      'createdAt': serializer.toJson<DateTime>(createdAt),
+      'updatedAt': serializer.toJson<DateTime?>(updatedAt),
+    };
+  }
+
+  Place copyWith(
+          {int? id,
+          String? uuid,
+          String? name,
+          double? lat,
+          double? lng,
+          double? radius,
+          int? source,
+          Value<String?> country = const Value.absent(),
+          Value<String?> province = const Value.absent(),
+          Value<String?> city = const Value.absent(),
+          DateTime? createdAt,
+          Value<DateTime?> updatedAt = const Value.absent()}) =>
+      Place(
+        id: id ?? this.id,
+        uuid: uuid ?? this.uuid,
+        name: name ?? this.name,
+        lat: lat ?? this.lat,
+        lng: lng ?? this.lng,
+        radius: radius ?? this.radius,
+        source: source ?? this.source,
+        country: country.present ? country.value : this.country,
+        province: province.present ? province.value : this.province,
+        city: city.present ? city.value : this.city,
+        createdAt: createdAt ?? this.createdAt,
+        updatedAt: updatedAt.present ? updatedAt.value : this.updatedAt,
+      );
+  Place copyWithCompanion(PlacesCompanion data) {
+    return Place(
+      id: data.id.present ? data.id.value : this.id,
+      uuid: data.uuid.present ? data.uuid.value : this.uuid,
+      name: data.name.present ? data.name.value : this.name,
+      lat: data.lat.present ? data.lat.value : this.lat,
+      lng: data.lng.present ? data.lng.value : this.lng,
+      radius: data.radius.present ? data.radius.value : this.radius,
+      source: data.source.present ? data.source.value : this.source,
+      country: data.country.present ? data.country.value : this.country,
+      province: data.province.present ? data.province.value : this.province,
+      city: data.city.present ? data.city.value : this.city,
+      createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
+      updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('Place(')
+          ..write('id: $id, ')
+          ..write('uuid: $uuid, ')
+          ..write('name: $name, ')
+          ..write('lat: $lat, ')
+          ..write('lng: $lng, ')
+          ..write('radius: $radius, ')
+          ..write('source: $source, ')
+          ..write('country: $country, ')
+          ..write('province: $province, ')
+          ..write('city: $city, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('updatedAt: $updatedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(id, uuid, name, lat, lng, radius, source,
+      country, province, city, createdAt, updatedAt);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is Place &&
+          other.id == this.id &&
+          other.uuid == this.uuid &&
+          other.name == this.name &&
+          other.lat == this.lat &&
+          other.lng == this.lng &&
+          other.radius == this.radius &&
+          other.source == this.source &&
+          other.country == this.country &&
+          other.province == this.province &&
+          other.city == this.city &&
+          other.createdAt == this.createdAt &&
+          other.updatedAt == this.updatedAt);
+}
+
+class PlacesCompanion extends UpdateCompanion<Place> {
+  final Value<int> id;
+  final Value<String> uuid;
+  final Value<String> name;
+  final Value<double> lat;
+  final Value<double> lng;
+  final Value<double> radius;
+  final Value<int> source;
+  final Value<String?> country;
+  final Value<String?> province;
+  final Value<String?> city;
+  final Value<DateTime> createdAt;
+  final Value<DateTime?> updatedAt;
+  const PlacesCompanion({
+    this.id = const Value.absent(),
+    this.uuid = const Value.absent(),
+    this.name = const Value.absent(),
+    this.lat = const Value.absent(),
+    this.lng = const Value.absent(),
+    this.radius = const Value.absent(),
+    this.source = const Value.absent(),
+    this.country = const Value.absent(),
+    this.province = const Value.absent(),
+    this.city = const Value.absent(),
+    this.createdAt = const Value.absent(),
+    this.updatedAt = const Value.absent(),
+  });
+  PlacesCompanion.insert({
+    this.id = const Value.absent(),
+    this.uuid = const Value.absent(),
+    required String name,
+    required double lat,
+    required double lng,
+    this.radius = const Value.absent(),
+    this.source = const Value.absent(),
+    this.country = const Value.absent(),
+    this.province = const Value.absent(),
+    this.city = const Value.absent(),
+    required DateTime createdAt,
+    this.updatedAt = const Value.absent(),
+  })  : name = Value(name),
+        lat = Value(lat),
+        lng = Value(lng),
+        createdAt = Value(createdAt);
+  static Insertable<Place> custom({
+    Expression<int>? id,
+    Expression<String>? uuid,
+    Expression<String>? name,
+    Expression<double>? lat,
+    Expression<double>? lng,
+    Expression<double>? radius,
+    Expression<int>? source,
+    Expression<String>? country,
+    Expression<String>? province,
+    Expression<String>? city,
+    Expression<DateTime>? createdAt,
+    Expression<DateTime>? updatedAt,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (uuid != null) 'uuid': uuid,
+      if (name != null) 'name': name,
+      if (lat != null) 'lat': lat,
+      if (lng != null) 'lng': lng,
+      if (radius != null) 'radius': radius,
+      if (source != null) 'source': source,
+      if (country != null) 'country': country,
+      if (province != null) 'province': province,
+      if (city != null) 'city': city,
+      if (createdAt != null) 'created_at': createdAt,
+      if (updatedAt != null) 'updated_at': updatedAt,
+    });
+  }
+
+  PlacesCompanion copyWith(
+      {Value<int>? id,
+      Value<String>? uuid,
+      Value<String>? name,
+      Value<double>? lat,
+      Value<double>? lng,
+      Value<double>? radius,
+      Value<int>? source,
+      Value<String?>? country,
+      Value<String?>? province,
+      Value<String?>? city,
+      Value<DateTime>? createdAt,
+      Value<DateTime?>? updatedAt}) {
+    return PlacesCompanion(
+      id: id ?? this.id,
+      uuid: uuid ?? this.uuid,
+      name: name ?? this.name,
+      lat: lat ?? this.lat,
+      lng: lng ?? this.lng,
+      radius: radius ?? this.radius,
+      source: source ?? this.source,
+      country: country ?? this.country,
+      province: province ?? this.province,
+      city: city ?? this.city,
+      createdAt: createdAt ?? this.createdAt,
+      updatedAt: updatedAt ?? this.updatedAt,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<int>(id.value);
+    }
+    if (uuid.present) {
+      map['uuid'] = Variable<String>(uuid.value);
+    }
+    if (name.present) {
+      map['name'] = Variable<String>(name.value);
+    }
+    if (lat.present) {
+      map['lat'] = Variable<double>(lat.value);
+    }
+    if (lng.present) {
+      map['lng'] = Variable<double>(lng.value);
+    }
+    if (radius.present) {
+      map['radius'] = Variable<double>(radius.value);
+    }
+    if (source.present) {
+      map['source'] = Variable<int>(source.value);
+    }
+    if (country.present) {
+      map['country'] = Variable<String>(country.value);
+    }
+    if (province.present) {
+      map['province'] = Variable<String>(province.value);
+    }
+    if (city.present) {
+      map['city'] = Variable<String>(city.value);
+    }
+    if (createdAt.present) {
+      map['created_at'] = Variable<DateTime>(createdAt.value);
+    }
+    if (updatedAt.present) {
+      map['updated_at'] = Variable<DateTime>(updatedAt.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('PlacesCompanion(')
+          ..write('id: $id, ')
+          ..write('uuid: $uuid, ')
+          ..write('name: $name, ')
+          ..write('lat: $lat, ')
+          ..write('lng: $lng, ')
+          ..write('radius: $radius, ')
+          ..write('source: $source, ')
+          ..write('country: $country, ')
+          ..write('province: $province, ')
+          ..write('city: $city, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('updatedAt: $updatedAt')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class $VisitsTable extends Visits with TableInfo<$VisitsTable, Visit> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $VisitsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  @override
+  late final GeneratedColumn<int> id = GeneratedColumn<int>(
+      'id', aliasedName, false,
+      hasAutoIncrement: true,
+      type: DriftSqlType.int,
+      requiredDuringInsert: false,
+      defaultConstraints:
+          GeneratedColumn.constraintIsAlways('PRIMARY KEY AUTOINCREMENT'));
+  static const VerificationMeta _uuidMeta = const VerificationMeta('uuid');
+  @override
+  late final GeneratedColumn<String> uuid = GeneratedColumn<String>(
+      'uuid', aliasedName, false,
+      type: DriftSqlType.string,
+      requiredDuringInsert: false,
+      defaultValue: const Constant(''));
+  static const VerificationMeta _placeIdMeta =
+      const VerificationMeta('placeId');
+  @override
+  late final GeneratedColumn<int> placeId = GeneratedColumn<int>(
+      'place_id', aliasedName, true,
+      type: DriftSqlType.int, requiredDuringInsert: false);
+  static const VerificationMeta _layerIdMeta =
+      const VerificationMeta('layerId');
+  @override
+  late final GeneratedColumn<int> layerId = GeneratedColumn<int>(
+      'layer_id', aliasedName, false,
+      type: DriftSqlType.int, requiredDuringInsert: true);
+  static const VerificationMeta _startedAtMeta =
+      const VerificationMeta('startedAt');
+  @override
+  late final GeneratedColumn<DateTime> startedAt = GeneratedColumn<DateTime>(
+      'started_at', aliasedName, false,
+      type: DriftSqlType.dateTime, requiredDuringInsert: true);
+  static const VerificationMeta _endedAtMeta =
+      const VerificationMeta('endedAt');
+  @override
+  late final GeneratedColumn<DateTime> endedAt = GeneratedColumn<DateTime>(
+      'ended_at', aliasedName, false,
+      type: DriftSqlType.dateTime, requiredDuringInsert: true);
+  static const VerificationMeta _latMeta = const VerificationMeta('lat');
+  @override
+  late final GeneratedColumn<double> lat = GeneratedColumn<double>(
+      'lat', aliasedName, false,
+      type: DriftSqlType.double, requiredDuringInsert: true);
+  static const VerificationMeta _lngMeta = const VerificationMeta('lng');
+  @override
+  late final GeneratedColumn<double> lng = GeneratedColumn<double>(
+      'lng', aliasedName, false,
+      type: DriftSqlType.double, requiredDuringInsert: true);
+  static const VerificationMeta _radiusMeta = const VerificationMeta('radius');
+  @override
+  late final GeneratedColumn<double> radius = GeneratedColumn<double>(
+      'radius', aliasedName, false,
+      type: DriftSqlType.double, requiredDuringInsert: true);
+  static const VerificationMeta _pointCountMeta =
+      const VerificationMeta('pointCount');
+  @override
+  late final GeneratedColumn<int> pointCount = GeneratedColumn<int>(
+      'point_count', aliasedName, false,
+      type: DriftSqlType.int, requiredDuringInsert: true);
+  static const VerificationMeta _bridgedSecMeta =
+      const VerificationMeta('bridgedSec');
+  @override
+  late final GeneratedColumn<int> bridgedSec = GeneratedColumn<int>(
+      'bridged_sec', aliasedName, false,
+      type: DriftSqlType.int,
+      requiredDuringInsert: false,
+      defaultValue: const Constant(0));
+  static const VerificationMeta _statusMeta = const VerificationMeta('status');
+  @override
+  late final GeneratedColumn<int> status = GeneratedColumn<int>(
+      'status', aliasedName, false,
+      type: DriftSqlType.int,
+      requiredDuringInsert: false,
+      defaultValue: const Constant(0));
+  static const VerificationMeta _confidenceMeta =
+      const VerificationMeta('confidence');
+  @override
+  late final GeneratedColumn<int> confidence = GeneratedColumn<int>(
+      'confidence', aliasedName, false,
+      type: DriftSqlType.int,
+      requiredDuringInsert: false,
+      defaultValue: const Constant(0));
+  static const VerificationMeta _confidenceJsonMeta =
+      const VerificationMeta('confidenceJson');
+  @override
+  late final GeneratedColumn<String> confidenceJson = GeneratedColumn<String>(
+      'confidence_json', aliasedName, false,
+      type: DriftSqlType.string,
+      requiredDuringInsert: false,
+      defaultValue: const Constant(''));
+  static const VerificationMeta _detectionVersionMeta =
+      const VerificationMeta('detectionVersion');
+  @override
+  late final GeneratedColumn<int> detectionVersion = GeneratedColumn<int>(
+      'detection_version', aliasedName, false,
+      type: DriftSqlType.int,
+      requiredDuringInsert: false,
+      defaultValue: const Constant(0));
+  static const VerificationMeta _deletedAtMeta =
+      const VerificationMeta('deletedAt');
+  @override
+  late final GeneratedColumn<DateTime> deletedAt = GeneratedColumn<DateTime>(
+      'deleted_at', aliasedName, true,
+      type: DriftSqlType.dateTime, requiredDuringInsert: false);
+  static const VerificationMeta _createdAtMeta =
+      const VerificationMeta('createdAt');
+  @override
+  late final GeneratedColumn<DateTime> createdAt = GeneratedColumn<DateTime>(
+      'created_at', aliasedName, false,
+      type: DriftSqlType.dateTime, requiredDuringInsert: true);
+  static const VerificationMeta _updatedAtMeta =
+      const VerificationMeta('updatedAt');
+  @override
+  late final GeneratedColumn<DateTime> updatedAt = GeneratedColumn<DateTime>(
+      'updated_at', aliasedName, true,
+      type: DriftSqlType.dateTime, requiredDuringInsert: false);
+  @override
+  List<GeneratedColumn> get $columns => [
+        id,
+        uuid,
+        placeId,
+        layerId,
+        startedAt,
+        endedAt,
+        lat,
+        lng,
+        radius,
+        pointCount,
+        bridgedSec,
+        status,
+        confidence,
+        confidenceJson,
+        detectionVersion,
+        deletedAt,
+        createdAt,
+        updatedAt
+      ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'visits';
+  @override
+  VerificationContext validateIntegrity(Insertable<Visit> instance,
+      {bool isInserting = false}) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    }
+    if (data.containsKey('uuid')) {
+      context.handle(
+          _uuidMeta, uuid.isAcceptableOrUnknown(data['uuid']!, _uuidMeta));
+    }
+    if (data.containsKey('place_id')) {
+      context.handle(_placeIdMeta,
+          placeId.isAcceptableOrUnknown(data['place_id']!, _placeIdMeta));
+    }
+    if (data.containsKey('layer_id')) {
+      context.handle(_layerIdMeta,
+          layerId.isAcceptableOrUnknown(data['layer_id']!, _layerIdMeta));
+    } else if (isInserting) {
+      context.missing(_layerIdMeta);
+    }
+    if (data.containsKey('started_at')) {
+      context.handle(_startedAtMeta,
+          startedAt.isAcceptableOrUnknown(data['started_at']!, _startedAtMeta));
+    } else if (isInserting) {
+      context.missing(_startedAtMeta);
+    }
+    if (data.containsKey('ended_at')) {
+      context.handle(_endedAtMeta,
+          endedAt.isAcceptableOrUnknown(data['ended_at']!, _endedAtMeta));
+    } else if (isInserting) {
+      context.missing(_endedAtMeta);
+    }
+    if (data.containsKey('lat')) {
+      context.handle(
+          _latMeta, lat.isAcceptableOrUnknown(data['lat']!, _latMeta));
+    } else if (isInserting) {
+      context.missing(_latMeta);
+    }
+    if (data.containsKey('lng')) {
+      context.handle(
+          _lngMeta, lng.isAcceptableOrUnknown(data['lng']!, _lngMeta));
+    } else if (isInserting) {
+      context.missing(_lngMeta);
+    }
+    if (data.containsKey('radius')) {
+      context.handle(_radiusMeta,
+          radius.isAcceptableOrUnknown(data['radius']!, _radiusMeta));
+    } else if (isInserting) {
+      context.missing(_radiusMeta);
+    }
+    if (data.containsKey('point_count')) {
+      context.handle(
+          _pointCountMeta,
+          pointCount.isAcceptableOrUnknown(
+              data['point_count']!, _pointCountMeta));
+    } else if (isInserting) {
+      context.missing(_pointCountMeta);
+    }
+    if (data.containsKey('bridged_sec')) {
+      context.handle(
+          _bridgedSecMeta,
+          bridgedSec.isAcceptableOrUnknown(
+              data['bridged_sec']!, _bridgedSecMeta));
+    }
+    if (data.containsKey('status')) {
+      context.handle(_statusMeta,
+          status.isAcceptableOrUnknown(data['status']!, _statusMeta));
+    }
+    if (data.containsKey('confidence')) {
+      context.handle(
+          _confidenceMeta,
+          confidence.isAcceptableOrUnknown(
+              data['confidence']!, _confidenceMeta));
+    }
+    if (data.containsKey('confidence_json')) {
+      context.handle(
+          _confidenceJsonMeta,
+          confidenceJson.isAcceptableOrUnknown(
+              data['confidence_json']!, _confidenceJsonMeta));
+    }
+    if (data.containsKey('detection_version')) {
+      context.handle(
+          _detectionVersionMeta,
+          detectionVersion.isAcceptableOrUnknown(
+              data['detection_version']!, _detectionVersionMeta));
+    }
+    if (data.containsKey('deleted_at')) {
+      context.handle(_deletedAtMeta,
+          deletedAt.isAcceptableOrUnknown(data['deleted_at']!, _deletedAtMeta));
+    }
+    if (data.containsKey('created_at')) {
+      context.handle(_createdAtMeta,
+          createdAt.isAcceptableOrUnknown(data['created_at']!, _createdAtMeta));
+    } else if (isInserting) {
+      context.missing(_createdAtMeta);
+    }
+    if (data.containsKey('updated_at')) {
+      context.handle(_updatedAtMeta,
+          updatedAt.isAcceptableOrUnknown(data['updated_at']!, _updatedAtMeta));
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  Visit map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return Visit(
+      id: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}id'])!,
+      uuid: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}uuid'])!,
+      placeId: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}place_id']),
+      layerId: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}layer_id'])!,
+      startedAt: attachedDatabase.typeMapping
+          .read(DriftSqlType.dateTime, data['${effectivePrefix}started_at'])!,
+      endedAt: attachedDatabase.typeMapping
+          .read(DriftSqlType.dateTime, data['${effectivePrefix}ended_at'])!,
+      lat: attachedDatabase.typeMapping
+          .read(DriftSqlType.double, data['${effectivePrefix}lat'])!,
+      lng: attachedDatabase.typeMapping
+          .read(DriftSqlType.double, data['${effectivePrefix}lng'])!,
+      radius: attachedDatabase.typeMapping
+          .read(DriftSqlType.double, data['${effectivePrefix}radius'])!,
+      pointCount: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}point_count'])!,
+      bridgedSec: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}bridged_sec'])!,
+      status: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}status'])!,
+      confidence: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}confidence'])!,
+      confidenceJson: attachedDatabase.typeMapping.read(
+          DriftSqlType.string, data['${effectivePrefix}confidence_json'])!,
+      detectionVersion: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}detection_version'])!,
+      deletedAt: attachedDatabase.typeMapping
+          .read(DriftSqlType.dateTime, data['${effectivePrefix}deleted_at']),
+      createdAt: attachedDatabase.typeMapping
+          .read(DriftSqlType.dateTime, data['${effectivePrefix}created_at'])!,
+      updatedAt: attachedDatabase.typeMapping
+          .read(DriftSqlType.dateTime, data['${effectivePrefix}updated_at']),
+    );
+  }
+
+  @override
+  $VisitsTable createAlias(String alias) {
+    return $VisitsTable(attachedDatabase, alias);
+  }
+}
+
+class Visit extends DataClass implements Insertable<Visit> {
+  final int id;
+  final String uuid;
+  final int? placeId;
+  final int layerId;
+  final DateTime startedAt;
+  final DateTime endedAt;
+  final double lat;
+  final double lng;
+  final double radius;
+  final int pointCount;
+
+  /// Seconds of silence bridged into this stay (same place, gap > 1 h).
+  final int bridgedSec;
+  final int status;
+  final int confidence;
+  final String confidenceJson;
+  final int detectionVersion;
+  final DateTime? deletedAt;
+  final DateTime createdAt;
+  final DateTime? updatedAt;
+  const Visit(
+      {required this.id,
+      required this.uuid,
+      this.placeId,
+      required this.layerId,
+      required this.startedAt,
+      required this.endedAt,
+      required this.lat,
+      required this.lng,
+      required this.radius,
+      required this.pointCount,
+      required this.bridgedSec,
+      required this.status,
+      required this.confidence,
+      required this.confidenceJson,
+      required this.detectionVersion,
+      this.deletedAt,
+      required this.createdAt,
+      this.updatedAt});
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<int>(id);
+    map['uuid'] = Variable<String>(uuid);
+    if (!nullToAbsent || placeId != null) {
+      map['place_id'] = Variable<int>(placeId);
+    }
+    map['layer_id'] = Variable<int>(layerId);
+    map['started_at'] = Variable<DateTime>(startedAt);
+    map['ended_at'] = Variable<DateTime>(endedAt);
+    map['lat'] = Variable<double>(lat);
+    map['lng'] = Variable<double>(lng);
+    map['radius'] = Variable<double>(radius);
+    map['point_count'] = Variable<int>(pointCount);
+    map['bridged_sec'] = Variable<int>(bridgedSec);
+    map['status'] = Variable<int>(status);
+    map['confidence'] = Variable<int>(confidence);
+    map['confidence_json'] = Variable<String>(confidenceJson);
+    map['detection_version'] = Variable<int>(detectionVersion);
+    if (!nullToAbsent || deletedAt != null) {
+      map['deleted_at'] = Variable<DateTime>(deletedAt);
+    }
+    map['created_at'] = Variable<DateTime>(createdAt);
+    if (!nullToAbsent || updatedAt != null) {
+      map['updated_at'] = Variable<DateTime>(updatedAt);
+    }
+    return map;
+  }
+
+  VisitsCompanion toCompanion(bool nullToAbsent) {
+    return VisitsCompanion(
+      id: Value(id),
+      uuid: Value(uuid),
+      placeId: placeId == null && nullToAbsent
+          ? const Value.absent()
+          : Value(placeId),
+      layerId: Value(layerId),
+      startedAt: Value(startedAt),
+      endedAt: Value(endedAt),
+      lat: Value(lat),
+      lng: Value(lng),
+      radius: Value(radius),
+      pointCount: Value(pointCount),
+      bridgedSec: Value(bridgedSec),
+      status: Value(status),
+      confidence: Value(confidence),
+      confidenceJson: Value(confidenceJson),
+      detectionVersion: Value(detectionVersion),
+      deletedAt: deletedAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(deletedAt),
+      createdAt: Value(createdAt),
+      updatedAt: updatedAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(updatedAt),
+    );
+  }
+
+  factory Visit.fromJson(Map<String, dynamic> json,
+      {ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return Visit(
+      id: serializer.fromJson<int>(json['id']),
+      uuid: serializer.fromJson<String>(json['uuid']),
+      placeId: serializer.fromJson<int?>(json['placeId']),
+      layerId: serializer.fromJson<int>(json['layerId']),
+      startedAt: serializer.fromJson<DateTime>(json['startedAt']),
+      endedAt: serializer.fromJson<DateTime>(json['endedAt']),
+      lat: serializer.fromJson<double>(json['lat']),
+      lng: serializer.fromJson<double>(json['lng']),
+      radius: serializer.fromJson<double>(json['radius']),
+      pointCount: serializer.fromJson<int>(json['pointCount']),
+      bridgedSec: serializer.fromJson<int>(json['bridgedSec']),
+      status: serializer.fromJson<int>(json['status']),
+      confidence: serializer.fromJson<int>(json['confidence']),
+      confidenceJson: serializer.fromJson<String>(json['confidenceJson']),
+      detectionVersion: serializer.fromJson<int>(json['detectionVersion']),
+      deletedAt: serializer.fromJson<DateTime?>(json['deletedAt']),
+      createdAt: serializer.fromJson<DateTime>(json['createdAt']),
+      updatedAt: serializer.fromJson<DateTime?>(json['updatedAt']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<int>(id),
+      'uuid': serializer.toJson<String>(uuid),
+      'placeId': serializer.toJson<int?>(placeId),
+      'layerId': serializer.toJson<int>(layerId),
+      'startedAt': serializer.toJson<DateTime>(startedAt),
+      'endedAt': serializer.toJson<DateTime>(endedAt),
+      'lat': serializer.toJson<double>(lat),
+      'lng': serializer.toJson<double>(lng),
+      'radius': serializer.toJson<double>(radius),
+      'pointCount': serializer.toJson<int>(pointCount),
+      'bridgedSec': serializer.toJson<int>(bridgedSec),
+      'status': serializer.toJson<int>(status),
+      'confidence': serializer.toJson<int>(confidence),
+      'confidenceJson': serializer.toJson<String>(confidenceJson),
+      'detectionVersion': serializer.toJson<int>(detectionVersion),
+      'deletedAt': serializer.toJson<DateTime?>(deletedAt),
+      'createdAt': serializer.toJson<DateTime>(createdAt),
+      'updatedAt': serializer.toJson<DateTime?>(updatedAt),
+    };
+  }
+
+  Visit copyWith(
+          {int? id,
+          String? uuid,
+          Value<int?> placeId = const Value.absent(),
+          int? layerId,
+          DateTime? startedAt,
+          DateTime? endedAt,
+          double? lat,
+          double? lng,
+          double? radius,
+          int? pointCount,
+          int? bridgedSec,
+          int? status,
+          int? confidence,
+          String? confidenceJson,
+          int? detectionVersion,
+          Value<DateTime?> deletedAt = const Value.absent(),
+          DateTime? createdAt,
+          Value<DateTime?> updatedAt = const Value.absent()}) =>
+      Visit(
+        id: id ?? this.id,
+        uuid: uuid ?? this.uuid,
+        placeId: placeId.present ? placeId.value : this.placeId,
+        layerId: layerId ?? this.layerId,
+        startedAt: startedAt ?? this.startedAt,
+        endedAt: endedAt ?? this.endedAt,
+        lat: lat ?? this.lat,
+        lng: lng ?? this.lng,
+        radius: radius ?? this.radius,
+        pointCount: pointCount ?? this.pointCount,
+        bridgedSec: bridgedSec ?? this.bridgedSec,
+        status: status ?? this.status,
+        confidence: confidence ?? this.confidence,
+        confidenceJson: confidenceJson ?? this.confidenceJson,
+        detectionVersion: detectionVersion ?? this.detectionVersion,
+        deletedAt: deletedAt.present ? deletedAt.value : this.deletedAt,
+        createdAt: createdAt ?? this.createdAt,
+        updatedAt: updatedAt.present ? updatedAt.value : this.updatedAt,
+      );
+  Visit copyWithCompanion(VisitsCompanion data) {
+    return Visit(
+      id: data.id.present ? data.id.value : this.id,
+      uuid: data.uuid.present ? data.uuid.value : this.uuid,
+      placeId: data.placeId.present ? data.placeId.value : this.placeId,
+      layerId: data.layerId.present ? data.layerId.value : this.layerId,
+      startedAt: data.startedAt.present ? data.startedAt.value : this.startedAt,
+      endedAt: data.endedAt.present ? data.endedAt.value : this.endedAt,
+      lat: data.lat.present ? data.lat.value : this.lat,
+      lng: data.lng.present ? data.lng.value : this.lng,
+      radius: data.radius.present ? data.radius.value : this.radius,
+      pointCount:
+          data.pointCount.present ? data.pointCount.value : this.pointCount,
+      bridgedSec:
+          data.bridgedSec.present ? data.bridgedSec.value : this.bridgedSec,
+      status: data.status.present ? data.status.value : this.status,
+      confidence:
+          data.confidence.present ? data.confidence.value : this.confidence,
+      confidenceJson: data.confidenceJson.present
+          ? data.confidenceJson.value
+          : this.confidenceJson,
+      detectionVersion: data.detectionVersion.present
+          ? data.detectionVersion.value
+          : this.detectionVersion,
+      deletedAt: data.deletedAt.present ? data.deletedAt.value : this.deletedAt,
+      createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
+      updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('Visit(')
+          ..write('id: $id, ')
+          ..write('uuid: $uuid, ')
+          ..write('placeId: $placeId, ')
+          ..write('layerId: $layerId, ')
+          ..write('startedAt: $startedAt, ')
+          ..write('endedAt: $endedAt, ')
+          ..write('lat: $lat, ')
+          ..write('lng: $lng, ')
+          ..write('radius: $radius, ')
+          ..write('pointCount: $pointCount, ')
+          ..write('bridgedSec: $bridgedSec, ')
+          ..write('status: $status, ')
+          ..write('confidence: $confidence, ')
+          ..write('confidenceJson: $confidenceJson, ')
+          ..write('detectionVersion: $detectionVersion, ')
+          ..write('deletedAt: $deletedAt, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('updatedAt: $updatedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+      id,
+      uuid,
+      placeId,
+      layerId,
+      startedAt,
+      endedAt,
+      lat,
+      lng,
+      radius,
+      pointCount,
+      bridgedSec,
+      status,
+      confidence,
+      confidenceJson,
+      detectionVersion,
+      deletedAt,
+      createdAt,
+      updatedAt);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is Visit &&
+          other.id == this.id &&
+          other.uuid == this.uuid &&
+          other.placeId == this.placeId &&
+          other.layerId == this.layerId &&
+          other.startedAt == this.startedAt &&
+          other.endedAt == this.endedAt &&
+          other.lat == this.lat &&
+          other.lng == this.lng &&
+          other.radius == this.radius &&
+          other.pointCount == this.pointCount &&
+          other.bridgedSec == this.bridgedSec &&
+          other.status == this.status &&
+          other.confidence == this.confidence &&
+          other.confidenceJson == this.confidenceJson &&
+          other.detectionVersion == this.detectionVersion &&
+          other.deletedAt == this.deletedAt &&
+          other.createdAt == this.createdAt &&
+          other.updatedAt == this.updatedAt);
+}
+
+class VisitsCompanion extends UpdateCompanion<Visit> {
+  final Value<int> id;
+  final Value<String> uuid;
+  final Value<int?> placeId;
+  final Value<int> layerId;
+  final Value<DateTime> startedAt;
+  final Value<DateTime> endedAt;
+  final Value<double> lat;
+  final Value<double> lng;
+  final Value<double> radius;
+  final Value<int> pointCount;
+  final Value<int> bridgedSec;
+  final Value<int> status;
+  final Value<int> confidence;
+  final Value<String> confidenceJson;
+  final Value<int> detectionVersion;
+  final Value<DateTime?> deletedAt;
+  final Value<DateTime> createdAt;
+  final Value<DateTime?> updatedAt;
+  const VisitsCompanion({
+    this.id = const Value.absent(),
+    this.uuid = const Value.absent(),
+    this.placeId = const Value.absent(),
+    this.layerId = const Value.absent(),
+    this.startedAt = const Value.absent(),
+    this.endedAt = const Value.absent(),
+    this.lat = const Value.absent(),
+    this.lng = const Value.absent(),
+    this.radius = const Value.absent(),
+    this.pointCount = const Value.absent(),
+    this.bridgedSec = const Value.absent(),
+    this.status = const Value.absent(),
+    this.confidence = const Value.absent(),
+    this.confidenceJson = const Value.absent(),
+    this.detectionVersion = const Value.absent(),
+    this.deletedAt = const Value.absent(),
+    this.createdAt = const Value.absent(),
+    this.updatedAt = const Value.absent(),
+  });
+  VisitsCompanion.insert({
+    this.id = const Value.absent(),
+    this.uuid = const Value.absent(),
+    this.placeId = const Value.absent(),
+    required int layerId,
+    required DateTime startedAt,
+    required DateTime endedAt,
+    required double lat,
+    required double lng,
+    required double radius,
+    required int pointCount,
+    this.bridgedSec = const Value.absent(),
+    this.status = const Value.absent(),
+    this.confidence = const Value.absent(),
+    this.confidenceJson = const Value.absent(),
+    this.detectionVersion = const Value.absent(),
+    this.deletedAt = const Value.absent(),
+    required DateTime createdAt,
+    this.updatedAt = const Value.absent(),
+  })  : layerId = Value(layerId),
+        startedAt = Value(startedAt),
+        endedAt = Value(endedAt),
+        lat = Value(lat),
+        lng = Value(lng),
+        radius = Value(radius),
+        pointCount = Value(pointCount),
+        createdAt = Value(createdAt);
+  static Insertable<Visit> custom({
+    Expression<int>? id,
+    Expression<String>? uuid,
+    Expression<int>? placeId,
+    Expression<int>? layerId,
+    Expression<DateTime>? startedAt,
+    Expression<DateTime>? endedAt,
+    Expression<double>? lat,
+    Expression<double>? lng,
+    Expression<double>? radius,
+    Expression<int>? pointCount,
+    Expression<int>? bridgedSec,
+    Expression<int>? status,
+    Expression<int>? confidence,
+    Expression<String>? confidenceJson,
+    Expression<int>? detectionVersion,
+    Expression<DateTime>? deletedAt,
+    Expression<DateTime>? createdAt,
+    Expression<DateTime>? updatedAt,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (uuid != null) 'uuid': uuid,
+      if (placeId != null) 'place_id': placeId,
+      if (layerId != null) 'layer_id': layerId,
+      if (startedAt != null) 'started_at': startedAt,
+      if (endedAt != null) 'ended_at': endedAt,
+      if (lat != null) 'lat': lat,
+      if (lng != null) 'lng': lng,
+      if (radius != null) 'radius': radius,
+      if (pointCount != null) 'point_count': pointCount,
+      if (bridgedSec != null) 'bridged_sec': bridgedSec,
+      if (status != null) 'status': status,
+      if (confidence != null) 'confidence': confidence,
+      if (confidenceJson != null) 'confidence_json': confidenceJson,
+      if (detectionVersion != null) 'detection_version': detectionVersion,
+      if (deletedAt != null) 'deleted_at': deletedAt,
+      if (createdAt != null) 'created_at': createdAt,
+      if (updatedAt != null) 'updated_at': updatedAt,
+    });
+  }
+
+  VisitsCompanion copyWith(
+      {Value<int>? id,
+      Value<String>? uuid,
+      Value<int?>? placeId,
+      Value<int>? layerId,
+      Value<DateTime>? startedAt,
+      Value<DateTime>? endedAt,
+      Value<double>? lat,
+      Value<double>? lng,
+      Value<double>? radius,
+      Value<int>? pointCount,
+      Value<int>? bridgedSec,
+      Value<int>? status,
+      Value<int>? confidence,
+      Value<String>? confidenceJson,
+      Value<int>? detectionVersion,
+      Value<DateTime?>? deletedAt,
+      Value<DateTime>? createdAt,
+      Value<DateTime?>? updatedAt}) {
+    return VisitsCompanion(
+      id: id ?? this.id,
+      uuid: uuid ?? this.uuid,
+      placeId: placeId ?? this.placeId,
+      layerId: layerId ?? this.layerId,
+      startedAt: startedAt ?? this.startedAt,
+      endedAt: endedAt ?? this.endedAt,
+      lat: lat ?? this.lat,
+      lng: lng ?? this.lng,
+      radius: radius ?? this.radius,
+      pointCount: pointCount ?? this.pointCount,
+      bridgedSec: bridgedSec ?? this.bridgedSec,
+      status: status ?? this.status,
+      confidence: confidence ?? this.confidence,
+      confidenceJson: confidenceJson ?? this.confidenceJson,
+      detectionVersion: detectionVersion ?? this.detectionVersion,
+      deletedAt: deletedAt ?? this.deletedAt,
+      createdAt: createdAt ?? this.createdAt,
+      updatedAt: updatedAt ?? this.updatedAt,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<int>(id.value);
+    }
+    if (uuid.present) {
+      map['uuid'] = Variable<String>(uuid.value);
+    }
+    if (placeId.present) {
+      map['place_id'] = Variable<int>(placeId.value);
+    }
+    if (layerId.present) {
+      map['layer_id'] = Variable<int>(layerId.value);
+    }
+    if (startedAt.present) {
+      map['started_at'] = Variable<DateTime>(startedAt.value);
+    }
+    if (endedAt.present) {
+      map['ended_at'] = Variable<DateTime>(endedAt.value);
+    }
+    if (lat.present) {
+      map['lat'] = Variable<double>(lat.value);
+    }
+    if (lng.present) {
+      map['lng'] = Variable<double>(lng.value);
+    }
+    if (radius.present) {
+      map['radius'] = Variable<double>(radius.value);
+    }
+    if (pointCount.present) {
+      map['point_count'] = Variable<int>(pointCount.value);
+    }
+    if (bridgedSec.present) {
+      map['bridged_sec'] = Variable<int>(bridgedSec.value);
+    }
+    if (status.present) {
+      map['status'] = Variable<int>(status.value);
+    }
+    if (confidence.present) {
+      map['confidence'] = Variable<int>(confidence.value);
+    }
+    if (confidenceJson.present) {
+      map['confidence_json'] = Variable<String>(confidenceJson.value);
+    }
+    if (detectionVersion.present) {
+      map['detection_version'] = Variable<int>(detectionVersion.value);
+    }
+    if (deletedAt.present) {
+      map['deleted_at'] = Variable<DateTime>(deletedAt.value);
+    }
+    if (createdAt.present) {
+      map['created_at'] = Variable<DateTime>(createdAt.value);
+    }
+    if (updatedAt.present) {
+      map['updated_at'] = Variable<DateTime>(updatedAt.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('VisitsCompanion(')
+          ..write('id: $id, ')
+          ..write('uuid: $uuid, ')
+          ..write('placeId: $placeId, ')
+          ..write('layerId: $layerId, ')
+          ..write('startedAt: $startedAt, ')
+          ..write('endedAt: $endedAt, ')
+          ..write('lat: $lat, ')
+          ..write('lng: $lng, ')
+          ..write('radius: $radius, ')
+          ..write('pointCount: $pointCount, ')
+          ..write('bridgedSec: $bridgedSec, ')
+          ..write('status: $status, ')
+          ..write('confidence: $confidence, ')
+          ..write('confidenceJson: $confidenceJson, ')
+          ..write('detectionVersion: $detectionVersion, ')
+          ..write('deletedAt: $deletedAt, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('updatedAt: $updatedAt')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class $MergedTripsTable extends MergedTrips
+    with TableInfo<$MergedTripsTable, MergedTrip> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $MergedTripsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  @override
+  late final GeneratedColumn<int> id = GeneratedColumn<int>(
+      'id', aliasedName, false,
+      hasAutoIncrement: true,
+      type: DriftSqlType.int,
+      requiredDuringInsert: false,
+      defaultConstraints:
+          GeneratedColumn.constraintIsAlways('PRIMARY KEY AUTOINCREMENT'));
+  static const VerificationMeta _uuidMeta = const VerificationMeta('uuid');
+  @override
+  late final GeneratedColumn<String> uuid = GeneratedColumn<String>(
+      'uuid', aliasedName, false,
+      type: DriftSqlType.string,
+      requiredDuringInsert: false,
+      defaultValue: const Constant(''));
+  static const VerificationMeta _nameMeta = const VerificationMeta('name');
+  @override
+  late final GeneratedColumn<String> name = GeneratedColumn<String>(
+      'name', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _segmentsJsonMeta =
+      const VerificationMeta('segmentsJson');
+  @override
+  late final GeneratedColumn<String> segmentsJson = GeneratedColumn<String>(
+      'segments_json', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _createdAtMeta =
+      const VerificationMeta('createdAt');
+  @override
+  late final GeneratedColumn<DateTime> createdAt = GeneratedColumn<DateTime>(
+      'created_at', aliasedName, false,
+      type: DriftSqlType.dateTime, requiredDuringInsert: true);
+  static const VerificationMeta _updatedAtMeta =
+      const VerificationMeta('updatedAt');
+  @override
+  late final GeneratedColumn<DateTime> updatedAt = GeneratedColumn<DateTime>(
+      'updated_at', aliasedName, true,
+      type: DriftSqlType.dateTime, requiredDuringInsert: false);
+  @override
+  List<GeneratedColumn> get $columns =>
+      [id, uuid, name, segmentsJson, createdAt, updatedAt];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'merged_trips';
+  @override
+  VerificationContext validateIntegrity(Insertable<MergedTrip> instance,
+      {bool isInserting = false}) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    }
+    if (data.containsKey('uuid')) {
+      context.handle(
+          _uuidMeta, uuid.isAcceptableOrUnknown(data['uuid']!, _uuidMeta));
+    }
+    if (data.containsKey('name')) {
+      context.handle(
+          _nameMeta, name.isAcceptableOrUnknown(data['name']!, _nameMeta));
+    } else if (isInserting) {
+      context.missing(_nameMeta);
+    }
+    if (data.containsKey('segments_json')) {
+      context.handle(
+          _segmentsJsonMeta,
+          segmentsJson.isAcceptableOrUnknown(
+              data['segments_json']!, _segmentsJsonMeta));
+    } else if (isInserting) {
+      context.missing(_segmentsJsonMeta);
+    }
+    if (data.containsKey('created_at')) {
+      context.handle(_createdAtMeta,
+          createdAt.isAcceptableOrUnknown(data['created_at']!, _createdAtMeta));
+    } else if (isInserting) {
+      context.missing(_createdAtMeta);
+    }
+    if (data.containsKey('updated_at')) {
+      context.handle(_updatedAtMeta,
+          updatedAt.isAcceptableOrUnknown(data['updated_at']!, _updatedAtMeta));
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  MergedTrip map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return MergedTrip(
+      id: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}id'])!,
+      uuid: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}uuid'])!,
+      name: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}name'])!,
+      segmentsJson: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}segments_json'])!,
+      createdAt: attachedDatabase.typeMapping
+          .read(DriftSqlType.dateTime, data['${effectivePrefix}created_at'])!,
+      updatedAt: attachedDatabase.typeMapping
+          .read(DriftSqlType.dateTime, data['${effectivePrefix}updated_at']),
+    );
+  }
+
+  @override
+  $MergedTripsTable createAlias(String alias) {
+    return $MergedTripsTable(attachedDatabase, alias);
+  }
+}
+
+class MergedTrip extends DataClass implements Insertable<MergedTrip> {
+  final int id;
+  final String uuid;
+  final String name;
+  final String segmentsJson;
+  final DateTime createdAt;
+  final DateTime? updatedAt;
+  const MergedTrip(
+      {required this.id,
+      required this.uuid,
+      required this.name,
+      required this.segmentsJson,
+      required this.createdAt,
+      this.updatedAt});
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<int>(id);
+    map['uuid'] = Variable<String>(uuid);
+    map['name'] = Variable<String>(name);
+    map['segments_json'] = Variable<String>(segmentsJson);
+    map['created_at'] = Variable<DateTime>(createdAt);
+    if (!nullToAbsent || updatedAt != null) {
+      map['updated_at'] = Variable<DateTime>(updatedAt);
+    }
+    return map;
+  }
+
+  MergedTripsCompanion toCompanion(bool nullToAbsent) {
+    return MergedTripsCompanion(
+      id: Value(id),
+      uuid: Value(uuid),
+      name: Value(name),
+      segmentsJson: Value(segmentsJson),
+      createdAt: Value(createdAt),
+      updatedAt: updatedAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(updatedAt),
+    );
+  }
+
+  factory MergedTrip.fromJson(Map<String, dynamic> json,
+      {ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return MergedTrip(
+      id: serializer.fromJson<int>(json['id']),
+      uuid: serializer.fromJson<String>(json['uuid']),
+      name: serializer.fromJson<String>(json['name']),
+      segmentsJson: serializer.fromJson<String>(json['segmentsJson']),
+      createdAt: serializer.fromJson<DateTime>(json['createdAt']),
+      updatedAt: serializer.fromJson<DateTime?>(json['updatedAt']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<int>(id),
+      'uuid': serializer.toJson<String>(uuid),
+      'name': serializer.toJson<String>(name),
+      'segmentsJson': serializer.toJson<String>(segmentsJson),
+      'createdAt': serializer.toJson<DateTime>(createdAt),
+      'updatedAt': serializer.toJson<DateTime?>(updatedAt),
+    };
+  }
+
+  MergedTrip copyWith(
+          {int? id,
+          String? uuid,
+          String? name,
+          String? segmentsJson,
+          DateTime? createdAt,
+          Value<DateTime?> updatedAt = const Value.absent()}) =>
+      MergedTrip(
+        id: id ?? this.id,
+        uuid: uuid ?? this.uuid,
+        name: name ?? this.name,
+        segmentsJson: segmentsJson ?? this.segmentsJson,
+        createdAt: createdAt ?? this.createdAt,
+        updatedAt: updatedAt.present ? updatedAt.value : this.updatedAt,
+      );
+  MergedTrip copyWithCompanion(MergedTripsCompanion data) {
+    return MergedTrip(
+      id: data.id.present ? data.id.value : this.id,
+      uuid: data.uuid.present ? data.uuid.value : this.uuid,
+      name: data.name.present ? data.name.value : this.name,
+      segmentsJson: data.segmentsJson.present
+          ? data.segmentsJson.value
+          : this.segmentsJson,
+      createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
+      updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('MergedTrip(')
+          ..write('id: $id, ')
+          ..write('uuid: $uuid, ')
+          ..write('name: $name, ')
+          ..write('segmentsJson: $segmentsJson, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('updatedAt: $updatedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode =>
+      Object.hash(id, uuid, name, segmentsJson, createdAt, updatedAt);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is MergedTrip &&
+          other.id == this.id &&
+          other.uuid == this.uuid &&
+          other.name == this.name &&
+          other.segmentsJson == this.segmentsJson &&
+          other.createdAt == this.createdAt &&
+          other.updatedAt == this.updatedAt);
+}
+
+class MergedTripsCompanion extends UpdateCompanion<MergedTrip> {
+  final Value<int> id;
+  final Value<String> uuid;
+  final Value<String> name;
+  final Value<String> segmentsJson;
+  final Value<DateTime> createdAt;
+  final Value<DateTime?> updatedAt;
+  const MergedTripsCompanion({
+    this.id = const Value.absent(),
+    this.uuid = const Value.absent(),
+    this.name = const Value.absent(),
+    this.segmentsJson = const Value.absent(),
+    this.createdAt = const Value.absent(),
+    this.updatedAt = const Value.absent(),
+  });
+  MergedTripsCompanion.insert({
+    this.id = const Value.absent(),
+    this.uuid = const Value.absent(),
+    required String name,
+    required String segmentsJson,
+    required DateTime createdAt,
+    this.updatedAt = const Value.absent(),
+  })  : name = Value(name),
+        segmentsJson = Value(segmentsJson),
+        createdAt = Value(createdAt);
+  static Insertable<MergedTrip> custom({
+    Expression<int>? id,
+    Expression<String>? uuid,
+    Expression<String>? name,
+    Expression<String>? segmentsJson,
+    Expression<DateTime>? createdAt,
+    Expression<DateTime>? updatedAt,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (uuid != null) 'uuid': uuid,
+      if (name != null) 'name': name,
+      if (segmentsJson != null) 'segments_json': segmentsJson,
+      if (createdAt != null) 'created_at': createdAt,
+      if (updatedAt != null) 'updated_at': updatedAt,
+    });
+  }
+
+  MergedTripsCompanion copyWith(
+      {Value<int>? id,
+      Value<String>? uuid,
+      Value<String>? name,
+      Value<String>? segmentsJson,
+      Value<DateTime>? createdAt,
+      Value<DateTime?>? updatedAt}) {
+    return MergedTripsCompanion(
+      id: id ?? this.id,
+      uuid: uuid ?? this.uuid,
+      name: name ?? this.name,
+      segmentsJson: segmentsJson ?? this.segmentsJson,
+      createdAt: createdAt ?? this.createdAt,
+      updatedAt: updatedAt ?? this.updatedAt,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<int>(id.value);
+    }
+    if (uuid.present) {
+      map['uuid'] = Variable<String>(uuid.value);
+    }
+    if (name.present) {
+      map['name'] = Variable<String>(name.value);
+    }
+    if (segmentsJson.present) {
+      map['segments_json'] = Variable<String>(segmentsJson.value);
+    }
+    if (createdAt.present) {
+      map['created_at'] = Variable<DateTime>(createdAt.value);
+    }
+    if (updatedAt.present) {
+      map['updated_at'] = Variable<DateTime>(updatedAt.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('MergedTripsCompanion(')
+          ..write('id: $id, ')
+          ..write('uuid: $uuid, ')
+          ..write('name: $name, ')
+          ..write('segmentsJson: $segmentsJson, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('updatedAt: $updatedAt')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$AppDb extends GeneratedDatabase {
   _$AppDb(QueryExecutor e) : super(e);
   $AppDbManager get managers => $AppDbManager(this);
@@ -3732,6 +5513,9 @@ abstract class _$AppDb extends GeneratedDatabase {
   late final $PeerLocationsTable peerLocations = $PeerLocationsTable(this);
   late final $TombstonesTable tombstones = $TombstonesTable(this);
   late final $FogErasesTable fogErases = $FogErasesTable(this);
+  late final $PlacesTable places = $PlacesTable(this);
+  late final $VisitsTable visits = $VisitsTable(this);
+  late final $MergedTripsTable mergedTrips = $MergedTripsTable(this);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -3745,7 +5529,10 @@ abstract class _$AppDb extends GeneratedDatabase {
         songFavorites,
         peerLocations,
         tombstones,
-        fogErases
+        fogErases,
+        places,
+        visits,
+        mergedTrips
       ];
 }
 
@@ -3761,6 +5548,7 @@ typedef $$TrackPointsTableCreateCompanionBuilder = TrackPointsCompanion
   Value<double?> speed,
   Value<double?> width,
   required int layerId,
+  Value<int> flags,
 });
 typedef $$TrackPointsTableUpdateCompanionBuilder = TrackPointsCompanion
     Function({
@@ -3774,6 +5562,7 @@ typedef $$TrackPointsTableUpdateCompanionBuilder = TrackPointsCompanion
   Value<double?> speed,
   Value<double?> width,
   Value<int> layerId,
+  Value<int> flags,
 });
 
 class $$TrackPointsTableFilterComposer
@@ -3814,6 +5603,9 @@ class $$TrackPointsTableFilterComposer
 
   ColumnFilters<int> get layerId => $composableBuilder(
       column: $table.layerId, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<int> get flags => $composableBuilder(
+      column: $table.flags, builder: (column) => ColumnFilters(column));
 }
 
 class $$TrackPointsTableOrderingComposer
@@ -3854,6 +5646,9 @@ class $$TrackPointsTableOrderingComposer
 
   ColumnOrderings<int> get layerId => $composableBuilder(
       column: $table.layerId, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<int> get flags => $composableBuilder(
+      column: $table.flags, builder: (column) => ColumnOrderings(column));
 }
 
 class $$TrackPointsTableAnnotationComposer
@@ -3894,6 +5689,9 @@ class $$TrackPointsTableAnnotationComposer
 
   GeneratedColumn<int> get layerId =>
       $composableBuilder(column: $table.layerId, builder: (column) => column);
+
+  GeneratedColumn<int> get flags =>
+      $composableBuilder(column: $table.flags, builder: (column) => column);
 }
 
 class $$TrackPointsTableTableManager extends RootTableManager<
@@ -3929,6 +5727,7 @@ class $$TrackPointsTableTableManager extends RootTableManager<
             Value<double?> speed = const Value.absent(),
             Value<double?> width = const Value.absent(),
             Value<int> layerId = const Value.absent(),
+            Value<int> flags = const Value.absent(),
           }) =>
               TrackPointsCompanion(
             id: id,
@@ -3941,6 +5740,7 @@ class $$TrackPointsTableTableManager extends RootTableManager<
             speed: speed,
             width: width,
             layerId: layerId,
+            flags: flags,
           ),
           createCompanionCallback: ({
             Value<int> id = const Value.absent(),
@@ -3953,6 +5753,7 @@ class $$TrackPointsTableTableManager extends RootTableManager<
             Value<double?> speed = const Value.absent(),
             Value<double?> width = const Value.absent(),
             required int layerId,
+            Value<int> flags = const Value.absent(),
           }) =>
               TrackPointsCompanion.insert(
             id: id,
@@ -3965,6 +5766,7 @@ class $$TrackPointsTableTableManager extends RootTableManager<
             speed: speed,
             width: width,
             layerId: layerId,
+            flags: flags,
           ),
           withReferenceMapper: (p0) => p0
               .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
@@ -5599,6 +7401,799 @@ typedef $$FogErasesTableProcessedTableManager = ProcessedTableManager<
     (FogErase, BaseReferences<_$AppDb, $FogErasesTable, FogErase>),
     FogErase,
     PrefetchHooks Function()>;
+typedef $$PlacesTableCreateCompanionBuilder = PlacesCompanion Function({
+  Value<int> id,
+  Value<String> uuid,
+  required String name,
+  required double lat,
+  required double lng,
+  Value<double> radius,
+  Value<int> source,
+  Value<String?> country,
+  Value<String?> province,
+  Value<String?> city,
+  required DateTime createdAt,
+  Value<DateTime?> updatedAt,
+});
+typedef $$PlacesTableUpdateCompanionBuilder = PlacesCompanion Function({
+  Value<int> id,
+  Value<String> uuid,
+  Value<String> name,
+  Value<double> lat,
+  Value<double> lng,
+  Value<double> radius,
+  Value<int> source,
+  Value<String?> country,
+  Value<String?> province,
+  Value<String?> city,
+  Value<DateTime> createdAt,
+  Value<DateTime?> updatedAt,
+});
+
+class $$PlacesTableFilterComposer extends Composer<_$AppDb, $PlacesTable> {
+  $$PlacesTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<int> get id => $composableBuilder(
+      column: $table.id, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<String> get uuid => $composableBuilder(
+      column: $table.uuid, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<String> get name => $composableBuilder(
+      column: $table.name, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<double> get lat => $composableBuilder(
+      column: $table.lat, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<double> get lng => $composableBuilder(
+      column: $table.lng, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<double> get radius => $composableBuilder(
+      column: $table.radius, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<int> get source => $composableBuilder(
+      column: $table.source, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<String> get country => $composableBuilder(
+      column: $table.country, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<String> get province => $composableBuilder(
+      column: $table.province, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<String> get city => $composableBuilder(
+      column: $table.city, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<DateTime> get createdAt => $composableBuilder(
+      column: $table.createdAt, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<DateTime> get updatedAt => $composableBuilder(
+      column: $table.updatedAt, builder: (column) => ColumnFilters(column));
+}
+
+class $$PlacesTableOrderingComposer extends Composer<_$AppDb, $PlacesTable> {
+  $$PlacesTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<int> get id => $composableBuilder(
+      column: $table.id, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<String> get uuid => $composableBuilder(
+      column: $table.uuid, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<String> get name => $composableBuilder(
+      column: $table.name, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<double> get lat => $composableBuilder(
+      column: $table.lat, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<double> get lng => $composableBuilder(
+      column: $table.lng, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<double> get radius => $composableBuilder(
+      column: $table.radius, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<int> get source => $composableBuilder(
+      column: $table.source, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<String> get country => $composableBuilder(
+      column: $table.country, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<String> get province => $composableBuilder(
+      column: $table.province, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<String> get city => $composableBuilder(
+      column: $table.city, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<DateTime> get createdAt => $composableBuilder(
+      column: $table.createdAt, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<DateTime> get updatedAt => $composableBuilder(
+      column: $table.updatedAt, builder: (column) => ColumnOrderings(column));
+}
+
+class $$PlacesTableAnnotationComposer extends Composer<_$AppDb, $PlacesTable> {
+  $$PlacesTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<int> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<String> get uuid =>
+      $composableBuilder(column: $table.uuid, builder: (column) => column);
+
+  GeneratedColumn<String> get name =>
+      $composableBuilder(column: $table.name, builder: (column) => column);
+
+  GeneratedColumn<double> get lat =>
+      $composableBuilder(column: $table.lat, builder: (column) => column);
+
+  GeneratedColumn<double> get lng =>
+      $composableBuilder(column: $table.lng, builder: (column) => column);
+
+  GeneratedColumn<double> get radius =>
+      $composableBuilder(column: $table.radius, builder: (column) => column);
+
+  GeneratedColumn<int> get source =>
+      $composableBuilder(column: $table.source, builder: (column) => column);
+
+  GeneratedColumn<String> get country =>
+      $composableBuilder(column: $table.country, builder: (column) => column);
+
+  GeneratedColumn<String> get province =>
+      $composableBuilder(column: $table.province, builder: (column) => column);
+
+  GeneratedColumn<String> get city =>
+      $composableBuilder(column: $table.city, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get createdAt =>
+      $composableBuilder(column: $table.createdAt, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get updatedAt =>
+      $composableBuilder(column: $table.updatedAt, builder: (column) => column);
+}
+
+class $$PlacesTableTableManager extends RootTableManager<
+    _$AppDb,
+    $PlacesTable,
+    Place,
+    $$PlacesTableFilterComposer,
+    $$PlacesTableOrderingComposer,
+    $$PlacesTableAnnotationComposer,
+    $$PlacesTableCreateCompanionBuilder,
+    $$PlacesTableUpdateCompanionBuilder,
+    (Place, BaseReferences<_$AppDb, $PlacesTable, Place>),
+    Place,
+    PrefetchHooks Function()> {
+  $$PlacesTableTableManager(_$AppDb db, $PlacesTable table)
+      : super(TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$PlacesTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$PlacesTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$PlacesTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback: ({
+            Value<int> id = const Value.absent(),
+            Value<String> uuid = const Value.absent(),
+            Value<String> name = const Value.absent(),
+            Value<double> lat = const Value.absent(),
+            Value<double> lng = const Value.absent(),
+            Value<double> radius = const Value.absent(),
+            Value<int> source = const Value.absent(),
+            Value<String?> country = const Value.absent(),
+            Value<String?> province = const Value.absent(),
+            Value<String?> city = const Value.absent(),
+            Value<DateTime> createdAt = const Value.absent(),
+            Value<DateTime?> updatedAt = const Value.absent(),
+          }) =>
+              PlacesCompanion(
+            id: id,
+            uuid: uuid,
+            name: name,
+            lat: lat,
+            lng: lng,
+            radius: radius,
+            source: source,
+            country: country,
+            province: province,
+            city: city,
+            createdAt: createdAt,
+            updatedAt: updatedAt,
+          ),
+          createCompanionCallback: ({
+            Value<int> id = const Value.absent(),
+            Value<String> uuid = const Value.absent(),
+            required String name,
+            required double lat,
+            required double lng,
+            Value<double> radius = const Value.absent(),
+            Value<int> source = const Value.absent(),
+            Value<String?> country = const Value.absent(),
+            Value<String?> province = const Value.absent(),
+            Value<String?> city = const Value.absent(),
+            required DateTime createdAt,
+            Value<DateTime?> updatedAt = const Value.absent(),
+          }) =>
+              PlacesCompanion.insert(
+            id: id,
+            uuid: uuid,
+            name: name,
+            lat: lat,
+            lng: lng,
+            radius: radius,
+            source: source,
+            country: country,
+            province: province,
+            city: city,
+            createdAt: createdAt,
+            updatedAt: updatedAt,
+          ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ));
+}
+
+typedef $$PlacesTableProcessedTableManager = ProcessedTableManager<
+    _$AppDb,
+    $PlacesTable,
+    Place,
+    $$PlacesTableFilterComposer,
+    $$PlacesTableOrderingComposer,
+    $$PlacesTableAnnotationComposer,
+    $$PlacesTableCreateCompanionBuilder,
+    $$PlacesTableUpdateCompanionBuilder,
+    (Place, BaseReferences<_$AppDb, $PlacesTable, Place>),
+    Place,
+    PrefetchHooks Function()>;
+typedef $$VisitsTableCreateCompanionBuilder = VisitsCompanion Function({
+  Value<int> id,
+  Value<String> uuid,
+  Value<int?> placeId,
+  required int layerId,
+  required DateTime startedAt,
+  required DateTime endedAt,
+  required double lat,
+  required double lng,
+  required double radius,
+  required int pointCount,
+  Value<int> bridgedSec,
+  Value<int> status,
+  Value<int> confidence,
+  Value<String> confidenceJson,
+  Value<int> detectionVersion,
+  Value<DateTime?> deletedAt,
+  required DateTime createdAt,
+  Value<DateTime?> updatedAt,
+});
+typedef $$VisitsTableUpdateCompanionBuilder = VisitsCompanion Function({
+  Value<int> id,
+  Value<String> uuid,
+  Value<int?> placeId,
+  Value<int> layerId,
+  Value<DateTime> startedAt,
+  Value<DateTime> endedAt,
+  Value<double> lat,
+  Value<double> lng,
+  Value<double> radius,
+  Value<int> pointCount,
+  Value<int> bridgedSec,
+  Value<int> status,
+  Value<int> confidence,
+  Value<String> confidenceJson,
+  Value<int> detectionVersion,
+  Value<DateTime?> deletedAt,
+  Value<DateTime> createdAt,
+  Value<DateTime?> updatedAt,
+});
+
+class $$VisitsTableFilterComposer extends Composer<_$AppDb, $VisitsTable> {
+  $$VisitsTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<int> get id => $composableBuilder(
+      column: $table.id, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<String> get uuid => $composableBuilder(
+      column: $table.uuid, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<int> get placeId => $composableBuilder(
+      column: $table.placeId, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<int> get layerId => $composableBuilder(
+      column: $table.layerId, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<DateTime> get startedAt => $composableBuilder(
+      column: $table.startedAt, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<DateTime> get endedAt => $composableBuilder(
+      column: $table.endedAt, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<double> get lat => $composableBuilder(
+      column: $table.lat, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<double> get lng => $composableBuilder(
+      column: $table.lng, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<double> get radius => $composableBuilder(
+      column: $table.radius, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<int> get pointCount => $composableBuilder(
+      column: $table.pointCount, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<int> get bridgedSec => $composableBuilder(
+      column: $table.bridgedSec, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<int> get status => $composableBuilder(
+      column: $table.status, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<int> get confidence => $composableBuilder(
+      column: $table.confidence, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<String> get confidenceJson => $composableBuilder(
+      column: $table.confidenceJson,
+      builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<int> get detectionVersion => $composableBuilder(
+      column: $table.detectionVersion,
+      builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<DateTime> get deletedAt => $composableBuilder(
+      column: $table.deletedAt, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<DateTime> get createdAt => $composableBuilder(
+      column: $table.createdAt, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<DateTime> get updatedAt => $composableBuilder(
+      column: $table.updatedAt, builder: (column) => ColumnFilters(column));
+}
+
+class $$VisitsTableOrderingComposer extends Composer<_$AppDb, $VisitsTable> {
+  $$VisitsTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<int> get id => $composableBuilder(
+      column: $table.id, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<String> get uuid => $composableBuilder(
+      column: $table.uuid, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<int> get placeId => $composableBuilder(
+      column: $table.placeId, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<int> get layerId => $composableBuilder(
+      column: $table.layerId, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<DateTime> get startedAt => $composableBuilder(
+      column: $table.startedAt, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<DateTime> get endedAt => $composableBuilder(
+      column: $table.endedAt, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<double> get lat => $composableBuilder(
+      column: $table.lat, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<double> get lng => $composableBuilder(
+      column: $table.lng, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<double> get radius => $composableBuilder(
+      column: $table.radius, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<int> get pointCount => $composableBuilder(
+      column: $table.pointCount, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<int> get bridgedSec => $composableBuilder(
+      column: $table.bridgedSec, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<int> get status => $composableBuilder(
+      column: $table.status, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<int> get confidence => $composableBuilder(
+      column: $table.confidence, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<String> get confidenceJson => $composableBuilder(
+      column: $table.confidenceJson,
+      builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<int> get detectionVersion => $composableBuilder(
+      column: $table.detectionVersion,
+      builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<DateTime> get deletedAt => $composableBuilder(
+      column: $table.deletedAt, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<DateTime> get createdAt => $composableBuilder(
+      column: $table.createdAt, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<DateTime> get updatedAt => $composableBuilder(
+      column: $table.updatedAt, builder: (column) => ColumnOrderings(column));
+}
+
+class $$VisitsTableAnnotationComposer extends Composer<_$AppDb, $VisitsTable> {
+  $$VisitsTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<int> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<String> get uuid =>
+      $composableBuilder(column: $table.uuid, builder: (column) => column);
+
+  GeneratedColumn<int> get placeId =>
+      $composableBuilder(column: $table.placeId, builder: (column) => column);
+
+  GeneratedColumn<int> get layerId =>
+      $composableBuilder(column: $table.layerId, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get startedAt =>
+      $composableBuilder(column: $table.startedAt, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get endedAt =>
+      $composableBuilder(column: $table.endedAt, builder: (column) => column);
+
+  GeneratedColumn<double> get lat =>
+      $composableBuilder(column: $table.lat, builder: (column) => column);
+
+  GeneratedColumn<double> get lng =>
+      $composableBuilder(column: $table.lng, builder: (column) => column);
+
+  GeneratedColumn<double> get radius =>
+      $composableBuilder(column: $table.radius, builder: (column) => column);
+
+  GeneratedColumn<int> get pointCount => $composableBuilder(
+      column: $table.pointCount, builder: (column) => column);
+
+  GeneratedColumn<int> get bridgedSec => $composableBuilder(
+      column: $table.bridgedSec, builder: (column) => column);
+
+  GeneratedColumn<int> get status =>
+      $composableBuilder(column: $table.status, builder: (column) => column);
+
+  GeneratedColumn<int> get confidence => $composableBuilder(
+      column: $table.confidence, builder: (column) => column);
+
+  GeneratedColumn<String> get confidenceJson => $composableBuilder(
+      column: $table.confidenceJson, builder: (column) => column);
+
+  GeneratedColumn<int> get detectionVersion => $composableBuilder(
+      column: $table.detectionVersion, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get deletedAt =>
+      $composableBuilder(column: $table.deletedAt, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get createdAt =>
+      $composableBuilder(column: $table.createdAt, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get updatedAt =>
+      $composableBuilder(column: $table.updatedAt, builder: (column) => column);
+}
+
+class $$VisitsTableTableManager extends RootTableManager<
+    _$AppDb,
+    $VisitsTable,
+    Visit,
+    $$VisitsTableFilterComposer,
+    $$VisitsTableOrderingComposer,
+    $$VisitsTableAnnotationComposer,
+    $$VisitsTableCreateCompanionBuilder,
+    $$VisitsTableUpdateCompanionBuilder,
+    (Visit, BaseReferences<_$AppDb, $VisitsTable, Visit>),
+    Visit,
+    PrefetchHooks Function()> {
+  $$VisitsTableTableManager(_$AppDb db, $VisitsTable table)
+      : super(TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$VisitsTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$VisitsTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$VisitsTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback: ({
+            Value<int> id = const Value.absent(),
+            Value<String> uuid = const Value.absent(),
+            Value<int?> placeId = const Value.absent(),
+            Value<int> layerId = const Value.absent(),
+            Value<DateTime> startedAt = const Value.absent(),
+            Value<DateTime> endedAt = const Value.absent(),
+            Value<double> lat = const Value.absent(),
+            Value<double> lng = const Value.absent(),
+            Value<double> radius = const Value.absent(),
+            Value<int> pointCount = const Value.absent(),
+            Value<int> bridgedSec = const Value.absent(),
+            Value<int> status = const Value.absent(),
+            Value<int> confidence = const Value.absent(),
+            Value<String> confidenceJson = const Value.absent(),
+            Value<int> detectionVersion = const Value.absent(),
+            Value<DateTime?> deletedAt = const Value.absent(),
+            Value<DateTime> createdAt = const Value.absent(),
+            Value<DateTime?> updatedAt = const Value.absent(),
+          }) =>
+              VisitsCompanion(
+            id: id,
+            uuid: uuid,
+            placeId: placeId,
+            layerId: layerId,
+            startedAt: startedAt,
+            endedAt: endedAt,
+            lat: lat,
+            lng: lng,
+            radius: radius,
+            pointCount: pointCount,
+            bridgedSec: bridgedSec,
+            status: status,
+            confidence: confidence,
+            confidenceJson: confidenceJson,
+            detectionVersion: detectionVersion,
+            deletedAt: deletedAt,
+            createdAt: createdAt,
+            updatedAt: updatedAt,
+          ),
+          createCompanionCallback: ({
+            Value<int> id = const Value.absent(),
+            Value<String> uuid = const Value.absent(),
+            Value<int?> placeId = const Value.absent(),
+            required int layerId,
+            required DateTime startedAt,
+            required DateTime endedAt,
+            required double lat,
+            required double lng,
+            required double radius,
+            required int pointCount,
+            Value<int> bridgedSec = const Value.absent(),
+            Value<int> status = const Value.absent(),
+            Value<int> confidence = const Value.absent(),
+            Value<String> confidenceJson = const Value.absent(),
+            Value<int> detectionVersion = const Value.absent(),
+            Value<DateTime?> deletedAt = const Value.absent(),
+            required DateTime createdAt,
+            Value<DateTime?> updatedAt = const Value.absent(),
+          }) =>
+              VisitsCompanion.insert(
+            id: id,
+            uuid: uuid,
+            placeId: placeId,
+            layerId: layerId,
+            startedAt: startedAt,
+            endedAt: endedAt,
+            lat: lat,
+            lng: lng,
+            radius: radius,
+            pointCount: pointCount,
+            bridgedSec: bridgedSec,
+            status: status,
+            confidence: confidence,
+            confidenceJson: confidenceJson,
+            detectionVersion: detectionVersion,
+            deletedAt: deletedAt,
+            createdAt: createdAt,
+            updatedAt: updatedAt,
+          ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ));
+}
+
+typedef $$VisitsTableProcessedTableManager = ProcessedTableManager<
+    _$AppDb,
+    $VisitsTable,
+    Visit,
+    $$VisitsTableFilterComposer,
+    $$VisitsTableOrderingComposer,
+    $$VisitsTableAnnotationComposer,
+    $$VisitsTableCreateCompanionBuilder,
+    $$VisitsTableUpdateCompanionBuilder,
+    (Visit, BaseReferences<_$AppDb, $VisitsTable, Visit>),
+    Visit,
+    PrefetchHooks Function()>;
+typedef $$MergedTripsTableCreateCompanionBuilder = MergedTripsCompanion
+    Function({
+  Value<int> id,
+  Value<String> uuid,
+  required String name,
+  required String segmentsJson,
+  required DateTime createdAt,
+  Value<DateTime?> updatedAt,
+});
+typedef $$MergedTripsTableUpdateCompanionBuilder = MergedTripsCompanion
+    Function({
+  Value<int> id,
+  Value<String> uuid,
+  Value<String> name,
+  Value<String> segmentsJson,
+  Value<DateTime> createdAt,
+  Value<DateTime?> updatedAt,
+});
+
+class $$MergedTripsTableFilterComposer
+    extends Composer<_$AppDb, $MergedTripsTable> {
+  $$MergedTripsTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<int> get id => $composableBuilder(
+      column: $table.id, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<String> get uuid => $composableBuilder(
+      column: $table.uuid, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<String> get name => $composableBuilder(
+      column: $table.name, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<String> get segmentsJson => $composableBuilder(
+      column: $table.segmentsJson, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<DateTime> get createdAt => $composableBuilder(
+      column: $table.createdAt, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<DateTime> get updatedAt => $composableBuilder(
+      column: $table.updatedAt, builder: (column) => ColumnFilters(column));
+}
+
+class $$MergedTripsTableOrderingComposer
+    extends Composer<_$AppDb, $MergedTripsTable> {
+  $$MergedTripsTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<int> get id => $composableBuilder(
+      column: $table.id, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<String> get uuid => $composableBuilder(
+      column: $table.uuid, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<String> get name => $composableBuilder(
+      column: $table.name, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<String> get segmentsJson => $composableBuilder(
+      column: $table.segmentsJson,
+      builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<DateTime> get createdAt => $composableBuilder(
+      column: $table.createdAt, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<DateTime> get updatedAt => $composableBuilder(
+      column: $table.updatedAt, builder: (column) => ColumnOrderings(column));
+}
+
+class $$MergedTripsTableAnnotationComposer
+    extends Composer<_$AppDb, $MergedTripsTable> {
+  $$MergedTripsTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<int> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<String> get uuid =>
+      $composableBuilder(column: $table.uuid, builder: (column) => column);
+
+  GeneratedColumn<String> get name =>
+      $composableBuilder(column: $table.name, builder: (column) => column);
+
+  GeneratedColumn<String> get segmentsJson => $composableBuilder(
+      column: $table.segmentsJson, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get createdAt =>
+      $composableBuilder(column: $table.createdAt, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get updatedAt =>
+      $composableBuilder(column: $table.updatedAt, builder: (column) => column);
+}
+
+class $$MergedTripsTableTableManager extends RootTableManager<
+    _$AppDb,
+    $MergedTripsTable,
+    MergedTrip,
+    $$MergedTripsTableFilterComposer,
+    $$MergedTripsTableOrderingComposer,
+    $$MergedTripsTableAnnotationComposer,
+    $$MergedTripsTableCreateCompanionBuilder,
+    $$MergedTripsTableUpdateCompanionBuilder,
+    (MergedTrip, BaseReferences<_$AppDb, $MergedTripsTable, MergedTrip>),
+    MergedTrip,
+    PrefetchHooks Function()> {
+  $$MergedTripsTableTableManager(_$AppDb db, $MergedTripsTable table)
+      : super(TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$MergedTripsTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$MergedTripsTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$MergedTripsTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback: ({
+            Value<int> id = const Value.absent(),
+            Value<String> uuid = const Value.absent(),
+            Value<String> name = const Value.absent(),
+            Value<String> segmentsJson = const Value.absent(),
+            Value<DateTime> createdAt = const Value.absent(),
+            Value<DateTime?> updatedAt = const Value.absent(),
+          }) =>
+              MergedTripsCompanion(
+            id: id,
+            uuid: uuid,
+            name: name,
+            segmentsJson: segmentsJson,
+            createdAt: createdAt,
+            updatedAt: updatedAt,
+          ),
+          createCompanionCallback: ({
+            Value<int> id = const Value.absent(),
+            Value<String> uuid = const Value.absent(),
+            required String name,
+            required String segmentsJson,
+            required DateTime createdAt,
+            Value<DateTime?> updatedAt = const Value.absent(),
+          }) =>
+              MergedTripsCompanion.insert(
+            id: id,
+            uuid: uuid,
+            name: name,
+            segmentsJson: segmentsJson,
+            createdAt: createdAt,
+            updatedAt: updatedAt,
+          ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ));
+}
+
+typedef $$MergedTripsTableProcessedTableManager = ProcessedTableManager<
+    _$AppDb,
+    $MergedTripsTable,
+    MergedTrip,
+    $$MergedTripsTableFilterComposer,
+    $$MergedTripsTableOrderingComposer,
+    $$MergedTripsTableAnnotationComposer,
+    $$MergedTripsTableCreateCompanionBuilder,
+    $$MergedTripsTableUpdateCompanionBuilder,
+    (MergedTrip, BaseReferences<_$AppDb, $MergedTripsTable, MergedTrip>),
+    MergedTrip,
+    PrefetchHooks Function()>;
 
 class $AppDbManager {
   final _$AppDb _db;
@@ -5621,4 +8216,10 @@ class $AppDbManager {
       $$TombstonesTableTableManager(_db, _db.tombstones);
   $$FogErasesTableTableManager get fogErases =>
       $$FogErasesTableTableManager(_db, _db.fogErases);
+  $$PlacesTableTableManager get places =>
+      $$PlacesTableTableManager(_db, _db.places);
+  $$VisitsTableTableManager get visits =>
+      $$VisitsTableTableManager(_db, _db.visits);
+  $$MergedTripsTableTableManager get mergedTrips =>
+      $$MergedTripsTableTableManager(_db, _db.mergedTrips);
 }

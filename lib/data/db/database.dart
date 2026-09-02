@@ -30,6 +30,10 @@ class TrackPoints extends Table {
   /// renderer's default width.
   RealColumn get width => real().nullable()();
   IntColumn get layerId => integer()();
+  /// Bit flags (see `PointFlags`). bit0 = GPS anomaly: the fix is kept for
+  /// the record but heat map / visits / stats skip it. Marked, never
+  /// deleted — a wrong "anomaly" call is recoverable, a delete isn't.
+  IntColumn get flags => integer().withDefault(const Constant(0))();
 }
 
 class TrackLayers extends Table {
@@ -157,6 +161,69 @@ class PeerLocations extends Table {
   DateTimeColumn get time => dateTime()();
 }
 
+/// A named spot the user keeps coming back to — the target of [Visits].
+/// Machine-minted (source 0) when a stay is detected somewhere no place
+/// exists yet; the user can rename it (→ source 1, name locked against
+/// re-geocoding) or fold other places into it.
+class Places extends Table {
+  IntColumn get id => integer().autoIncrement()();
+  TextColumn get uuid => text().withDefault(const Constant(''))();
+  TextColumn get name => text()();
+  RealColumn get lat => real()();
+  RealColumn get lng => real()();
+  /// Match radius in metres for attributing new stays (default 100).
+  RealColumn get radius => real().withDefault(const Constant(100))();
+  /// 0 = auto (detected), 1 = manual (user named / created).
+  IntColumn get source => integer().withDefault(const Constant(0))();
+  TextColumn get country => text().nullable()();
+  TextColumn get province => text().nullable()();
+  TextColumn get city => text().nullable()();
+  DateTimeColumn get createdAt => dateTime()();
+  DateTimeColumn get updatedAt => dateTime().nullable()();
+}
+
+/// One stay at a [Places] row: "you were HERE from A to B". Detected from
+/// track points (Dawarich's stay-detection pipeline ported to Dart) or
+/// created by hand. `status` 0 suggested / 1 confirmed / 2 declined;
+/// `deletedAt` is a soft-delete tombstone so the detector never re-suggests
+/// a stay the user threw away. Machine rows (status 0, no tombstone) are
+/// rebuilt wholesale on every detection run; user rows are anchors.
+class Visits extends Table {
+  IntColumn get id => integer().autoIncrement()();
+  TextColumn get uuid => text().withDefault(const Constant(''))();
+  IntColumn get placeId => integer().nullable()();
+  IntColumn get layerId => integer()();
+  DateTimeColumn get startedAt => dateTime()();
+  DateTimeColumn get endedAt => dateTime()();
+  RealColumn get lat => real()();
+  RealColumn get lng => real()();
+  RealColumn get radius => real()();
+  IntColumn get pointCount => integer()();
+  /// Seconds of silence bridged into this stay (same place, gap > 1 h).
+  IntColumn get bridgedSec => integer().withDefault(const Constant(0))();
+  IntColumn get status => integer().withDefault(const Constant(0))();
+  IntColumn get confidence => integer().withDefault(const Constant(0))();
+  TextColumn get confidenceJson => text().withDefault(const Constant(''))();
+  IntColumn get detectionVersion => integer().withDefault(const Constant(0))();
+  DateTimeColumn get deletedAt => dateTime().nullable()();
+  DateTimeColumn get createdAt => dateTime()();
+  DateTimeColumn get updatedAt => dateTime().nullable()();
+}
+
+/// A user-made bundle of replay sessions ("把这几段合成一次旅行"). Purely
+/// referential: [segmentsJson] is a list of `{layer: layerUuid, startMs,
+/// endMs}` windows — the underlying track points are never moved or retimed,
+/// so layers, fog and sync stay untouched and the bundle survives layer-id
+/// remapping on other devices (layers are referenced by uuid).
+class MergedTrips extends Table {
+  IntColumn get id => integer().autoIncrement()();
+  TextColumn get uuid => text().withDefault(const Constant(''))();
+  TextColumn get name => text()();
+  TextColumn get segmentsJson => text()();
+  DateTimeColumn get createdAt => dateTime()();
+  DateTimeColumn get updatedAt => dateTime().nullable()();
+}
+
 @DriftDatabase(tables: [
   TrackPoints,
   TrackLayers,
@@ -167,6 +234,9 @@ class PeerLocations extends Table {
   PeerLocations,
   Tombstones,
   FogErases,
+  Places,
+  Visits,
+  MergedTrips,
 ])
 class AppDb extends _$AppDb {
   AppDb() : super(openConnection());
@@ -175,10 +245,28 @@ class AppDb extends _$AppDb {
   AppDb.forTesting(super.e);
 
   @override
-  int get schemaVersion => 9;
+  int get schemaVersion => 11;
+
+  /// Secondary indexes, created idempotently on every open (so a DB that
+  /// predates them gets them without a schema bump, and a fresh one gets
+  /// them right after createAll). Every reader of track_points filters by
+  /// layer and/or time; without these each map open / replay / stats pass
+  /// was a full scan of the whole history.
+  static const _indexStatements = <String>[
+    'CREATE INDEX IF NOT EXISTS idx_track_points_layer_time '
+        'ON track_points(layer_id, time)',
+    'CREATE INDEX IF NOT EXISTS idx_track_points_time ON track_points(time)',
+    'CREATE INDEX IF NOT EXISTS idx_visits_started ON visits(started_at)',
+    'CREATE INDEX IF NOT EXISTS idx_visits_place ON visits(place_id)',
+  ];
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
+        beforeOpen: (details) async {
+          for (final s in _indexStatements) {
+            await customStatement(s);
+          }
+        },
         onCreate: (m) async {
           await m.createAll();
           await into(trackLayers).insert(TrackLayersCompanion.insert(
@@ -274,6 +362,16 @@ class AppDb extends _$AppDb {
                 [kDefaultLayerUuid],
               );
             }
+          }
+          if (from < 10) {
+            // v10: GPS anomaly flag on points + visits/places (stay detection).
+            await m.addColumn(trackPoints, trackPoints.flags);
+            await m.createTable(places);
+            await m.createTable(visits);
+          }
+          if (from < 11) {
+            // v11: user-named bundles of replay sessions.
+            await m.createTable(mergedTrips);
           }
         },
       );
@@ -453,6 +551,56 @@ class AppDb extends _$AppDb {
   Future<List<TrackPoint>> pointsForLayer(int layerId) =>
       (select(trackPoints)..where((t) => t.layerId.equals(layerId))).get();
 
+  /// Clean (non-anomaly) points of [layerIds], optionally windowed by time,
+  /// ordered by (layer, time) — the shape every analytic reader wants (heat
+  /// map, stay detection, stats). Hits idx_track_points_layer_time.
+  Future<List<TrackPoint>> cleanPoints(
+    List<int> layerIds, {
+    DateTime? from,
+    DateTime? to,
+  }) {
+    final q = select(trackPoints)
+      ..where((t) {
+        var e = t.layerId.isIn(layerIds) & t.flags.equals(0);
+        if (from != null) e = e & t.time.isBiggerOrEqualValue(from);
+        if (to != null) e = e & t.time.isSmallerOrEqualValue(to);
+        return e;
+      })
+      ..orderBy([
+        (t) => OrderingTerm.asc(t.layerId),
+        (t) => OrderingTerm.asc(t.time),
+      ]);
+    return q.get();
+  }
+
+  /// Dedup keys (`timeMs|lat6|lng6`) of the points already on [layerId]
+  /// inside [from, to]. Track-file import uses this so re-importing the
+  /// same GPX twice (or a GPX that overlaps a recorded session) doesn't
+  /// double every point — Dawarich's `(user, timestamp, lonlat)` unique
+  /// index, done at ingest time because our sync identity is the uuid.
+  Future<Set<String>> pointDedupKeys(
+      int layerId, DateTime from, DateTime to) async {
+    final rows = await (select(trackPoints)
+          ..where((t) =>
+              t.layerId.equals(layerId) & t.time.isBetweenValues(from, to)))
+        .get();
+    return {for (final r in rows) pointDedupKey(r.time, r.lat, r.lng)};
+  }
+
+  static String pointDedupKey(DateTime t, double lat, double lng) =>
+      '${t.millisecondsSinceEpoch}|${(lat * 1e6).round()}|${(lng * 1e6).round()}';
+
+  /// Earliest / latest point time across all layers (null when empty).
+  Future<(DateTime, DateTime)?> pointTimeSpan() async {
+    final q = selectOnly(trackPoints)
+      ..addColumns([trackPoints.time.min(), trackPoints.time.max()]);
+    final row = await q.getSingleOrNull();
+    final lo = row?.read(trackPoints.time.min());
+    final hi = row?.read(trackPoints.time.max());
+    if (lo == null || hi == null) return null;
+    return (lo, hi);
+  }
+
   /// Newest sample time stored for a layer, or null if it has no points.
   /// Used to dedup the background sample-buffer drain — only file samples
   /// newer than this were captured while the main isolate wasn't writing.
@@ -614,6 +762,138 @@ class AppDb extends _$AppDb {
       await recordTombstones('song_favorites', [row.uuid]);
     }
     await (delete(songFavorites)..where((f) => f.id.equals(id))).go();
+  }
+
+  // ─── Places & visits（到访地点）──────────────────────────────────────────
+
+  Future<List<Place>> allPlaces() => select(places).get();
+
+  Future<int> insertPlace(PlacesCompanion p) =>
+      into(places).insert((p.uuid.present && p.uuid.value.isNotEmpty)
+          ? p
+          : p.copyWith(uuid: Value(_newUuid())));
+
+  Future<void> updatePlace(int id, PlacesCompanion patch) =>
+      (update(places)..where((p) => p.id.equals(id)))
+          .write(patch.copyWith(updatedAt: Value(DateTime.now())));
+
+  /// Delete a place; its visits are re-pointed to [reassignTo] (or left
+  /// place-less) so history is never lost with a rename-and-merge.
+  Future<void> deletePlace(int id, {int? reassignTo}) async {
+    await (update(visits)..where((v) => v.placeId.equals(id)))
+        .write(VisitsCompanion(
+      placeId: Value(reassignTo),
+      updatedAt: Value(DateTime.now()),
+    ));
+    final row =
+        await (select(places)..where((p) => p.id.equals(id))).getSingleOrNull();
+    if (row != null && row.uuid.isNotEmpty) {
+      await recordTombstones('places', [row.uuid]);
+    }
+    await (delete(places)..where((p) => p.id.equals(id))).go();
+  }
+
+  /// Visits whose interval intersects [from, to]. Soft-deleted rows are
+  /// excluded unless [includeDeleted]; declined rows are included (they're
+  /// anchors for the detector) — UI filters on status.
+  Future<List<Visit>> visitsBetween(DateTime from, DateTime to,
+      {bool includeDeleted = false, List<int>? layerIds}) {
+    final q = select(visits)
+      ..where((v) {
+        var e = v.startedAt.isSmallerOrEqualValue(to) &
+            v.endedAt.isBiggerOrEqualValue(from);
+        if (!includeDeleted) e = e & v.deletedAt.isNull();
+        if (layerIds != null) e = e & v.layerId.isIn(layerIds);
+        return e;
+      })
+      ..orderBy([(v) => OrderingTerm.asc(v.startedAt)]);
+    return q.get();
+  }
+
+  Future<void> insertVisits(List<VisitsCompanion> rows) => batch((b) =>
+      b.insertAll(
+          visits,
+          rows
+              .map((v) => (v.uuid.present && v.uuid.value.isNotEmpty)
+                  ? v
+                  : v.copyWith(uuid: Value(_newUuid())))
+              .toList()));
+
+  /// Hard-delete machine rows (status 0, never touched by the user) — the
+  /// detector rebuilds them wholesale; there is nothing to tombstone.
+  Future<int> deleteMachineVisits(List<int> ids) => ids.isEmpty
+      ? Future.value(0)
+      : (delete(visits)
+            ..where((v) =>
+                v.id.isIn(ids) & v.status.equals(0) & v.deletedAt.isNull()))
+          .go();
+
+  Future<void> updateVisit(int id, VisitsCompanion patch) =>
+      (update(visits)..where((v) => v.id.equals(id)))
+          .write(patch.copyWith(updatedAt: Value(DateTime.now())));
+
+  /// Soft delete: the row stays as a tombstone so detection never suggests
+  /// this stay again. (A confirmed visit the user deletes is still an anchor.)
+  Future<void> softDeleteVisit(int id) => updateVisit(
+      id, VisitsCompanion(deletedAt: Value(DateTime.now())));
+
+  /// (placeId → visit count) over live, non-declined visits.
+  Future<Map<int, int>> visitCountsByPlace() async {
+    final rows = await customSelect(
+      'SELECT place_id AS pid, COUNT(*) AS c FROM visits '
+      'WHERE deleted_at IS NULL AND status != 2 AND place_id IS NOT NULL '
+      'GROUP BY place_id',
+      readsFrom: {visits},
+    ).get();
+    return {for (final r in rows) r.read<int>('pid'): r.read<int>('c')};
+  }
+
+  /// Local calendar days (yyyy-mm-dd) that have any clean point, within
+  /// [from, to]. Drives the timeline's date strip weight.
+  Future<Set<String>> daysWithPoints(DateTime from, DateTime to) async {
+    final rows = await customSelect(
+      "SELECT DISTINCT date(time, 'unixepoch', 'localtime') AS d "
+      'FROM track_points WHERE time BETWEEN ? AND ? AND flags = 0',
+      variables: [
+        Variable.withInt(from.millisecondsSinceEpoch ~/ 1000),
+        Variable.withInt(to.millisecondsSinceEpoch ~/ 1000),
+      ],
+      readsFrom: {trackPoints},
+    ).get();
+    return {for (final r in rows) r.read<String>('d')};
+  }
+
+  Future<List<JournalEntry>> journalBetween(DateTime from, DateTime to) =>
+      (select(journalEntries)
+            ..where((j) => j.time.isBetweenValues(from, to))
+            ..orderBy([(j) => OrderingTerm.asc(j.time)]))
+          .get();
+
+  // ─── Merged trips（合并记录）─────────────────────────────────────────────
+
+  Future<List<MergedTrip>> allMergedTrips() => (select(mergedTrips)
+        ..orderBy([(t) => OrderingTerm.desc(t.createdAt)]))
+      .get();
+
+  Future<int> insertMergedTrip(MergedTripsCompanion t) =>
+      into(mergedTrips).insert((t.uuid.present && t.uuid.value.isNotEmpty)
+          ? t
+          : t.copyWith(uuid: Value(_newUuid())));
+
+  Future<void> renameMergedTrip(int id, String name) =>
+      (update(mergedTrips)..where((t) => t.id.equals(id))).write(
+          MergedTripsCompanion(
+              name: Value(name), updatedAt: Value(DateTime.now())));
+
+  /// 解散合并记录：只删这条“捆绑”，原始轨迹段一个点都不动。
+  Future<void> deleteMergedTrip(int id) async {
+    final row = await (select(mergedTrips)..where((t) => t.id.equals(id)))
+        .getSingleOrNull();
+    if (row == null) return;
+    if (row.uuid.isNotEmpty) {
+      await recordTombstones('merged_trips', [row.uuid]);
+    }
+    await (delete(mergedTrips)..where((t) => t.id.equals(id))).go();
   }
 
   // ─── Tombstones（增量减）────────────────────────────────────────────────
