@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../app/providers.dart';
 import '../../services/debug/log_buffer.dart';
 import '../../services/storage/storage_inspector.dart';
+import '../common/format.dart' show fmtBytes;
 
 /// 存储空间 —— 数据库 / 照片 / 各类缓存的占用统计，以及安全的清理入口。
 /// 手账照片虽然落在缓存目录（image_picker 产物），但属于用户数据：
@@ -405,15 +406,6 @@ class _SectionHeader extends StatelessWidget {
                 color: Theme.of(context).colorScheme.primary,
                 letterSpacing: 1.5)),
       );
-}
-
-String fmtBytes(int b) {
-  if (b < 1024) return '$b B';
-  if (b < 1024 * 1024) return '${(b / 1024).toStringAsFixed(1)} KB';
-  if (b < 1024 * 1024 * 1024) {
-    return '${(b / 1024 / 1024).toStringAsFixed(1)} MB';
-  }
-  return '${(b / 1024 / 1024 / 1024).toStringAsFixed(2)} GB';
 }
 
 String fmtWan(int n) =>

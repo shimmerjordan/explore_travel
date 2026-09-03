@@ -1,11 +1,11 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:math' as math;
 import 'dart:typed_data';
 import 'package:archive/archive.dart';
 import 'package:drift/drift.dart' show Value;
 import 'package:path/path.dart' as p;
 import 'package:xml/xml.dart';
+import '../../core/geo_math.dart' show haversineMeters;
 import '../../data/db/database.dart';
 import '../fog/fog_engine.dart';
 import '../location/point_filter.dart';
@@ -377,7 +377,7 @@ class TrackImport {
               layerId: layerId);
         } else {
           final prev = seg[i - 1];
-          final gap = _haversine(prev.lat, prev.lng, cur.lat, cur.lng);
+          final gap = haversineMeters(prev.lat, prev.lng, cur.lat, cur.lng);
           if (gap <= maxGap) {
             await fog.revealLine(
               lat0: prev.lat,
@@ -409,16 +409,5 @@ class TrackImport {
       from: lo,
       to: hi,
     );
-  }
-
-  static double _haversine(
-      double lat1, double lng1, double lat2, double lng2) {
-    const r = 6371000.0;
-    const deg = math.pi / 180;
-    final dLat = (lat2 - lat1) * deg;
-    final dLng = (lng2 - lng1) * deg;
-    final a = (1 - math.cos(dLat)) / 2 +
-        math.cos(lat1 * deg) * math.cos(lat2 * deg) * (1 - math.cos(dLng)) / 2;
-    return 2 * r * math.asin(math.sqrt(a));
   }
 }

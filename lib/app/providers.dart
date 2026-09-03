@@ -18,8 +18,7 @@ import '../services/group/group_service.dart';
 import '../services/group/group_sync_controller.dart';
 import '../services/location/location_service.dart';
 import '../services/music/music_service.dart';
-import '../services/p2p/crypto.dart';
-import '../services/p2p/p2p_service.dart';
+import '../services/group/p2p_crypto.dart';
 import '../services/webdav/webdav_service.dart';
 import '../services/sync/sync_storage.dart';
 import '../services/sync/onedrive_service.dart';
@@ -275,14 +274,6 @@ final configSyncControllerProvider = Provider<ConfigSyncController>((ref) {
   final c = ConfigSyncController(ref);
   ref.onDispose(c.dispose);
   return c;
-});
-
-final p2pServiceProvider = Provider<P2PService>((ref) {
-  final s = ref.watch(settingsProvider);
-  final crypto = (s.p2pPassphrase == null || s.p2pPassphrase!.isEmpty)
-      ? null
-      : P2PCrypto.fromPassphrase(s.p2pPassphrase!);
-  return P2PService(s.displayName, crypto: crypto);
 });
 
 /// Live state shared with map screen for rendering peer trails.

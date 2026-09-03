@@ -6,7 +6,7 @@ import '../../security/http_guard.dart';
 /// Direct kuwo (酷我音乐) backend.
 ///
 /// Kuwo's www endpoints expect three things:
-///   - `Cookie: kw_token=<token>` where <token> is any arbitrary 10-char
+///   - `Cookie: kw_token=<token>` where `<token>` is any arbitrary 10-char
 ///     uppercase string the client picks; the server only checks that
 ///     `Cookie.kw_token == X-Csrf-Token`.
 ///   - `csrf: <token>` header, same value.

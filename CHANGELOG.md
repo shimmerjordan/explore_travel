@@ -3,6 +3,29 @@
 All notable changes to Explore Journal are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow SemVer once releases start.
 
+## [Unreleased] — 2026-09-03
+
+持续优化第一轮：清冗余 + CI 门禁。
+
+### 清理
+
+- 删除三块整体死代码（约 560 行）：从未挂载的 2D `HeatTileLayer` 栈、被 GroupService 取代的 `P2PService` 栈（含一个无法取消的 15 s mDNS 定时器）、孤儿 ZeroTier helper 及 `zerotierNetworkId` 设置字段。仍在用的 `p2p/crypto.dart` 迁为 `group/p2p_crypto.dart`。
+- 删除零散死符号：`_FogDiagBadge`、`_platformGuard`、`pttActiveProvider`、`groupDiagnosticsProvider`、`kCountryToContinent`、`emojiFlagsSupportedOverride`、`TrackExport.importGpx`/`TrackPointImport`、`pixel.dart` 的 `PixelBadge`/`PixelScanlines`/5 个 `pixel*` 工具、`leaderboardServerSyncMin` 字段。
+- 合并重复实现：新建 `lib/core/geo_math.dart`（haversine 与 Web Mercator 正反投影，此前 haversine 5 份、反投影 3 份）与 `lib/ui/common/format.dart`（`fmtBytes` / `fmtRelativeTime`，此前字节格式化 3 份且输出不一致、相对时间 2 份）。`FogEngine` / `HeatIndex` / `PointFilter` 上的同名静态方法保留为委托，80 个调用点不动。
+- 地图页手账卡片预览改用 `quillToPreview`，修掉正则硬刮 Delta JSON 漏掉图片 embed、转义处理不全的问题。
+- 移除 7 个零导入依赖：`video_player`、`photo_view`、`flutter_map_location_marker`、`web_socket_channel`、`audio_session`、`collection`、`riverpod_annotation`（连带 dev 的 `riverpod_generator`）。`pubspec.yaml` 补上 `flutter: '>=3.32.0'` 约束，本地与 CI 的 SDK 下限一致。
+- `flutter analyze --fatal-infos` 清零（原 16 条 info）。
+
+### CI
+
+- 新增 composite `.github/actions/flutter-setup`：Flutter 版本号全仓库只钉这一处（原三条流水线各自硬编码 `3.32.1`），并统一开启 SDK 缓存。
+- 新增 `flutter-check.yml`：push / PR 上跑 `flutter analyze --fatal-infos` + 全量 `flutter test`（此前 55 个测试文件从未在 CI 里跑过）。
+- `deploy-web.yml`、`web-front.yml` 在构建前内联同一对门禁；`release.yml` 新增 `check` job（analyze 致命 + test），android / ios 依赖它，删掉原来的 `|| true`。
+
+### 测试
+
+- 新增 `test/core/geo_math_test.dart`（与合并前 5 处实现数值一致性、FogEngine 像素投影逐位不变）、`test/ui/format_test.dart`。全量 518 通过。
+
 ## [Unreleased] — 2026-08-27
 
 借鉴「人生点点 2.0」的 3D 热图与自托管项目 Dawarich 的数据层算法（调研与

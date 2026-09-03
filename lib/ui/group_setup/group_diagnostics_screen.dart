@@ -63,9 +63,10 @@ class _GroupDiagnosticsScreenState
             icon: const Icon(Icons.copy_all_outlined),
             onPressed: () async {
               final text = all.map((e) => e.format()).join('\n');
+              final messenger = ScaffoldMessenger.of(context);
               await Clipboard.setData(ClipboardData(text: text));
               if (!mounted) return;
-              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              messenger.showSnackBar(SnackBar(
                   content: Text('已复制 ${all.length} 行到剪贴板')));
             },
           ),

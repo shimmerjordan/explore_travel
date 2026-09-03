@@ -1,10 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:webdav_client/webdav_client.dart' as webdav;
-import '../p2p/crypto.dart';
+import 'p2p_crypto.dart';
 import 'group_service_io.dart' show GroupService;
 import 'group_types.dart';
 
@@ -493,7 +492,3 @@ class _PeerConn {
     } catch (_) {}
   }
 }
-
-// Avoid an unused-import warning when Platform isn't referenced elsewhere.
-// ignore: unused_element
-final _platformGuard = Platform.numberOfProcessors;

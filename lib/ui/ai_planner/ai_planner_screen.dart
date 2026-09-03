@@ -656,8 +656,8 @@ class _MessageBubble extends StatelessWidget {
                   : MarkdownBody(
                       data: prose,
                       selectable: true,
-                      imageBuilder: (uri, _, __) {
-                        final u = uri.toString();
+                      sizedImageBuilder: (config) {
+                        final u = config.uri.toString();
                         if (!u.startsWith('http')) {
                           return const SizedBox.shrink();
                         }

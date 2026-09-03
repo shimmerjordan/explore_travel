@@ -78,33 +78,5 @@ class TrackExport {
     return file;
   }
 
-  /// Parses a GPX file and returns ordered (lat, lng, time, ele) points.
-  /// Useful for importing tracks recorded by other apps.
-  static Future<List<TrackPointImport>> importGpx(File file) async {
-    final doc = XmlDocument.parse(await file.readAsString());
-    final out = <TrackPointImport>[];
-    for (final pt in doc.findAllElements('trkpt')) {
-      final lat = double.tryParse(pt.getAttribute('lat') ?? '');
-      final lon = double.tryParse(pt.getAttribute('lon') ?? '');
-      if (lat == null || lon == null) continue;
-      final ele = double.tryParse(
-          pt.getElement('ele')?.innerText.trim() ?? '');
-      final t = DateTime.tryParse(
-          pt.getElement('time')?.innerText.trim() ?? '');
-      out.add(TrackPointImport(
-          lat: lat, lng: lon, altitude: ele, time: t ?? DateTime.now()));
-    }
-    return out;
-  }
-
   static String _safe(String s) => s.replaceAll(RegExp(r'[^\w一-龥-]'), '_');
-}
-
-class TrackPointImport {
-  final double lat;
-  final double lng;
-  final double? altitude;
-  final DateTime time;
-  TrackPointImport(
-      {required this.lat, required this.lng, this.altitude, required this.time});
 }

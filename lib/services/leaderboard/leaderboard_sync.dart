@@ -9,7 +9,7 @@ import 'leaderboard_service.dart';
 /// Wire protocol (all sent via `broadcastCustom`):
 ///
 ///   * `lb_hello`  — on connect, both sides emit their stateHash + count.
-///                   { h: "<hash>", n: <count>, t: "<iso8601>" }
+///                   `{ h: "<hash>", n: <count>, t: "<iso8601>" }`
 ///   * `lb_pull`   — "your hash differs from mine; send me everything".
 ///                   { }   (broadcast, but recipients should `to:` reply)
 ///   * `lb_batch`  — entries payload (array of full entry JSONs).

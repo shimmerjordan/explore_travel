@@ -9,6 +9,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/providers.dart';
+import '../../ui/common/format.dart' show fmtBytes;
 import '../backup/backup_service.dart';
 import 'sync_storage.dart';
 
@@ -141,12 +142,6 @@ class SyncEngine {
     if (path.startsWith('journal/')) return 'journal.zip';
     return 'meta.zip';
   }
-
-  static String _fmtSize(int b) => b < 1024
-      ? '${b}B'
-      : b < 1024 * 1024
-          ? '${(b / 1024).toStringAsFixed(0)}KB'
-          : '${(b / 1024 / 1024).toStringAsFixed(1)}MB';
 
   static void _throwIfCancelled(CancelToken? t) {
     if (t != null && t.isCancelled) throw StateError('已取消');
@@ -403,7 +398,7 @@ class SyncEngine {
       Future<void> upload(String s) async {
         final size = packed[s]!.length;
         report(480 + (505 * doneWeight / totalWeight).round(),
-            '上传分片 ${doneCount + 1}/$opCount · $s（${_fmtSize(size)}）');
+            '上传分片 ${doneCount + 1}/$opCount · $s（${fmtBytes(size)}）');
         await od.putSyncFile(s, packed[s]!, cancelToken: cancelToken);
         doneWeight += size;
         doneCount++;

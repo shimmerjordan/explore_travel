@@ -4,6 +4,7 @@ import 'package:drift/drift.dart' show Value;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart' show WidgetsBinding, WidgetsBindingObserver, AppLifecycleState;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../core/geo_math.dart' show haversineMeters;
 import '../data/db/database.dart';
 import '../services/location/background_task.dart'
     if (dart.library.js_interop) '../services/location/background_task_stub.dart';
@@ -334,7 +335,7 @@ class RecordingController with WidgetsBindingObserver {
       final maxGap = math.max(penR * 5, 30.0);
       bool chained = false;
       if (last != null) {
-        final gap = _haversineMeters(last.lat, last.lng, lat, lng);
+        final gap = haversineMeters(last.lat, last.lng, lat, lng);
         final age = sampleAt.difference(last.t);
         if (gap > 0.5 &&
             gap <= maxGap &&
@@ -415,15 +416,3 @@ class RecordingController with WidgetsBindingObserver {
 
 final recordingControllerProvider =
     Provider((ref) => RecordingController(ref));
-
-double _haversineMeters(double lat1, double lng1, double lat2, double lng2) {
-  const r = 6371000.0;
-  final dLat = (lat2 - lat1) * math.pi / 180;
-  final dLng = (lng2 - lng1) * math.pi / 180;
-  final a = math.sin(dLat / 2) * math.sin(dLat / 2) +
-      math.cos(lat1 * math.pi / 180) *
-          math.cos(lat2 * math.pi / 180) *
-          math.sin(dLng / 2) *
-          math.sin(dLng / 2);
-  return 2 * r * math.atan2(math.sqrt(a), math.sqrt(1 - a));
-}

@@ -16,6 +16,7 @@ import '../../core/prefs.dart';
 import '../../services/backup/backup_service.dart';
 import '../../services/sync/local_folder_storage.dart';
 import '../../services/sync/onedrive_service.dart';
+import '../common/format.dart' show fmtBytes;
 import '../../services/sync/onedrive_sync_engine.dart';
 import '../../services/fog/fog_engine.dart';
 import '../../services/fog/fow_compat.dart';
@@ -628,7 +629,7 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
     });
     if (path == null || !mounted) return;
     final size = await File(path).length();
-    setState(() => _status = '已写入：$path\n大小：${_fmtBytes(size)}');
+    setState(() => _status = '已写入：$path\n大小：${fmtBytes(size)}');
     await Share.shareXFiles([XFile(path)], subject: 'Explore Journal backup');
   }
 
@@ -710,7 +711,7 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
       final filename = 'explore_journal_backup_$ts.zip';
       report(null, '上传 $filename…');
       await ref.read(webdavServiceProvider).uploadArchive(filename, bytes);
-      return '已上传：$filename\n大小：${_fmtBytes(bytes.length)}';
+      return '已上传：$filename\n大小：${fmtBytes(bytes.length)}';
     });
     if (status != null && mounted) setState(() => _status = status);
   }
@@ -1174,7 +1175,7 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
       }
       if (!mounted) return;
       setState(() => _status =
-          '已导出 FOW Sync.zip（${_fmtBytes(bytes.length)}）：\n$path\n'
+          '已导出 FOW Sync.zip（${fmtBytes(bytes.length)}）：\n$path\n'
           '内部结构与世界迷雾原生 Sync.zip 一致（Sync/ 目录 + 混淆名瓦片），'
           '可直接用于 FOW 云同步，也可再导回本应用。');
     } catch (e) {
@@ -1182,12 +1183,6 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
     } finally {
       if (mounted) setState(() => _busy = false);
     }
-  }
-
-  String _fmtBytes(int n) {
-    if (n < 1024) return '$n B';
-    if (n < 1024 * 1024) return '${(n / 1024).toStringAsFixed(1)} KB';
-    return '${(n / 1024 / 1024).toStringAsFixed(2)} MB';
   }
 }
 

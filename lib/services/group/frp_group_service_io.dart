@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import '../p2p/crypto.dart';
+import 'p2p_crypto.dart';
 import 'frp_config.dart';
 import 'frp_engine.dart';
 import 'group_diagnostics.dart';

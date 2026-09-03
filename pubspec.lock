@@ -17,14 +17,6 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "7.6.0"
-  analyzer_plugin:
-    dependency: transitive
-    description:
-      name: analyzer_plugin
-      sha256: a5ab7590c27b779f3d4de67f31c4109dbe13dd7339f86461a6f2a8ab2594d8ce
-      url: "https://pub.dev"
-    source: hosted
-    version: "0.13.4"
   android_intent_plus:
     dependency: "direct main"
     description:
@@ -66,7 +58,7 @@ packages:
     source: hosted
     version: "2.13.0"
   audio_session:
-    dependency: "direct main"
+    dependency: transitive
     description:
       name: audio_session
       sha256: "2b7fff16a552486d078bfc09a8cde19f426dc6d6329262b684182597bec5b1ac"
@@ -218,7 +210,7 @@ packages:
     source: hosted
     version: "4.11.1"
   collection:
-    dependency: "direct main"
+    dependency: transitive
     description:
       name: collection
       sha256: "2f5709ae4d3d59dd8f7cd309b4e023046b57d8a6c82130785d2b0e5868084e76"
@@ -273,22 +265,6 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.0.8"
-  custom_lint_core:
-    dependency: transitive
-    description:
-      name: custom_lint_core
-      sha256: "31110af3dde9d29fb10828ca33f1dce24d2798477b167675543ce3d208dee8be"
-      url: "https://pub.dev"
-    source: hosted
-    version: "0.7.5"
-  custom_lint_visitor:
-    dependency: transitive
-    description:
-      name: custom_lint_visitor
-      sha256: "4a86a0d8415a91fbb8298d6ef03e9034dc8e323a599ddc4120a0e36c433983a2"
-      url: "https://pub.dev"
-    source: hosted
-    version: "1.0.0+7.7.0"
   dart_earcut:
     dependency: transitive
     description:
@@ -478,14 +454,6 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.1.0"
-  flutter_compass:
-    dependency: transitive
-    description:
-      name: flutter_compass
-      sha256: "1b4d7e6c95a675ec8482b5c9c9ccf1ebf0ced3dbec59dce28ad609da953de850"
-      url: "https://pub.dev"
-    source: hosted
-    version: "0.8.1"
   flutter_foreground_task:
     dependency: "direct main"
     description:
@@ -555,14 +523,6 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "7.0.2"
-  flutter_map_location_marker:
-    dependency: "direct main"
-    description:
-      name: flutter_map_location_marker
-      sha256: "1971d9ad7c8bedb15cb6a03598c0a3ad66ac6f7f165ad90d801bd5f636120f38"
-      url: "https://pub.dev"
-    source: hosted
-    version: "9.1.1"
   flutter_markdown:
     dependency: "direct main"
     description:
@@ -701,14 +661,6 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.4.1"
-  freezed_annotation:
-    dependency: transitive
-    description:
-      name: freezed_annotation
-      sha256: "7294967ff0a6d98638e7acb774aac3af2550777accd8149c90af5b014e6d44d8"
-      url: "https://pub.dev"
-    source: hosted
-    version: "3.1.0"
   frontend_server_client:
     dependency: transitive
     description:
@@ -1221,14 +1173,6 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "7.0.2"
-  photo_view:
-    dependency: "direct main"
-    description:
-      name: photo_view
-      sha256: "1fc3d970a91295fbd1364296575f854c9863f225505c28c46e0a03e48960c75e"
-      url: "https://pub.dev"
-    source: hosted
-    version: "0.15.0"
   platform:
     dependency: transitive
     description:
@@ -1429,30 +1373,6 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.6.1"
-  riverpod_analyzer_utils:
-    dependency: transitive
-    description:
-      name: riverpod_analyzer_utils
-      sha256: "03a17170088c63aab6c54c44456f5ab78876a1ddb6032ffde1662ddab4959611"
-      url: "https://pub.dev"
-    source: hosted
-    version: "0.5.10"
-  riverpod_annotation:
-    dependency: "direct main"
-    description:
-      name: riverpod_annotation
-      sha256: e14b0bf45b71326654e2705d462f21b958f987087be850afd60578fcd502d1b8
-      url: "https://pub.dev"
-    source: hosted
-    version: "2.6.1"
-  riverpod_generator:
-    dependency: "direct dev"
-    description:
-      name: riverpod_generator
-      sha256: "44a0992d54473eb199ede00e2260bd3c262a86560e3c6f6374503d86d0580e36"
-      url: "https://pub.dev"
-    source: hosted
-    version: "2.6.5"
   rxdart:
     dependency: transitive
     description:
@@ -1810,46 +1730,6 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.1.4"
-  video_player:
-    dependency: "direct main"
-    description:
-      name: video_player
-      sha256: "096bc28ce10d131be80dfb00c223024eb0fba301315a406728ab43dd99c45bdf"
-      url: "https://pub.dev"
-    source: hosted
-    version: "2.10.1"
-  video_player_android:
-    dependency: transitive
-    description:
-      name: video_player_android
-      sha256: a8dc4324f67705de057678372bedb66cd08572fe7c495605ac68c5f503324a39
-      url: "https://pub.dev"
-    source: hosted
-    version: "2.8.15"
-  video_player_avfoundation:
-    dependency: transitive
-    description:
-      name: video_player_avfoundation
-      sha256: f9a780aac57802b2892f93787e5ea53b5f43cc57dc107bee9436458365be71cd
-      url: "https://pub.dev"
-    source: hosted
-    version: "2.8.4"
-  video_player_platform_interface:
-    dependency: transitive
-    description:
-      name: video_player_platform_interface
-      sha256: "57c5d73173f76d801129d0531c2774052c5a7c11ccb962f1830630decd9f24ec"
-      url: "https://pub.dev"
-    source: hosted
-    version: "6.6.0"
-  video_player_web:
-    dependency: transitive
-    description:
-      name: video_player_web
-      sha256: "9f3c00be2ef9b76a95d94ac5119fb843dca6f2c69e6c9968f6f2b6c9e7afbdeb"
-      url: "https://pub.dev"
-    source: hosted
-    version: "2.4.0"
   vm_service:
     dependency: transitive
     description:
@@ -1883,7 +1763,7 @@ packages:
     source: hosted
     version: "1.0.1"
   web_socket_channel:
-    dependency: "direct main"
+    dependency: transitive
     description:
       name: web_socket_channel
       sha256: d645757fb0f4773d602444000a8131ff5d48c9e47adfe9772652dd1a4f2d45c8

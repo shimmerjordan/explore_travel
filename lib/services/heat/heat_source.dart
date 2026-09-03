@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import '../../core/geo_math.dart' as geo;
 import '../fog/fog_engine.dart';
 import '../geo/coord_converter.dart';
 import '../location/point_filter.dart';
@@ -72,21 +73,12 @@ class HeatIndex {
     }
   }
 
-  // ─── Projection helpers ───
+  // ─── Projection helpers（实现在 core/geo_math，这里只是保留调用名） ───
 
-  static double lngToWorldX(double lng) => (lng + 180.0) / 360.0;
-
-  static double latToWorldY(double lat) {
-    final l = lat.clamp(-85.05112878, 85.05112878) * math.pi / 180.0;
-    return (1.0 - math.log(math.tan(l) + 1.0 / math.cos(l)) / math.pi) / 2.0;
-  }
-
-  static double worldXToLng(double x) => x * 360.0 - 180.0;
-
-  static double worldYToLat(double y) {
-    final n = math.pi - 2.0 * math.pi * y;
-    return 180.0 / math.pi * math.atan(0.5 * (math.exp(n) - math.exp(-n)));
-  }
+  static double lngToWorldX(double lng) => geo.lngToWorldX(lng);
+  static double latToWorldY(double lat) => geo.latToWorldY(lat);
+  static double worldXToLng(double x) => geo.worldXToLng(x);
+  static double worldYToLat(double y) => geo.worldYToLat(y);
 }
 
 /// Packed input for [buildHeatIndex]. Points must be sorted by (layer, time)

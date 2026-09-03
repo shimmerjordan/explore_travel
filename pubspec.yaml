@@ -5,6 +5,8 @@ version: 0.1.0+1
 
 environment:
   sdk: ^3.5.0
+  # CI 与 README 都要求 3.32；不写这条的话 pub get 在 3.24 上也能过，本地与 CI 会悄悄漂移。
+  flutter: '>=3.32.0'
 
 dependencies:
   flutter:
@@ -15,7 +17,6 @@ dependencies:
 
   # State management
   flutter_riverpod: ^2.5.1
-  riverpod_annotation: ^2.3.5
 
   # Routing
   go_router: ^14.2.7
@@ -23,7 +24,6 @@ dependencies:
   # Map (open-source, free, supports custom tiles for Amap/Google/satellite/hybrid)
   flutter_map: ^7.0.2
   latlong2: ^0.9.1
-  flutter_map_location_marker: ^9.1.1
 
   # Location & background tracking
   geolocator: ^13.0.1
@@ -41,8 +41,6 @@ dependencies:
 
   # Media
   image_picker: ^1.1.2
-  video_player: ^2.9.1
-  photo_view: ^0.15.0
   flutter_quill: ^11.0.0
   exif: ^3.3.0
   xml: ^6.5.0
@@ -50,7 +48,6 @@ dependencies:
 
   # Audio (music + voice capture for PTT)
   just_audio: ^0.9.40
-  audio_session: ^0.1.21
   record: ^5.1.2
 
   # Offline tile cache
@@ -75,7 +72,6 @@ dependencies:
 
   # P2P
   multicast_dns: ^0.3.2+6
-  web_socket_channel: ^3.0.1
   # WebRTC transport. Mobile-only in practice — on Linux/Web we expose a
   # stub that refuses to start. flutter_webrtc 0.11 supports iOS, Android,
   # macOS, Windows; Linux support is experimental.
@@ -94,7 +90,6 @@ dependencies:
   flutter_secure_storage: ^9.2.2
 
   # Utilities
-  collection: ^1.18.0
   intl: ^0.20.2
   crypto: ^3.0.5
   shared_preferences: ^2.3.2
@@ -119,7 +114,6 @@ dev_dependencies:
   flutter_lints: ^6.0.0
   build_runner: ^2.4.13
   drift_dev: ^2.20.2
-  riverpod_generator: ^2.4.3
 
 flutter:
   uses-material-design: true

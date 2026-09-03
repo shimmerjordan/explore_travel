@@ -126,5 +126,3 @@ final pttControllerProvider = Provider<PttController>((ref) {
   ref.onDispose(() => c.dispose());
   return c;
 });
-
-final pttActiveProvider = StateProvider<bool>((ref) => false);

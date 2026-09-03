@@ -13,7 +13,7 @@ import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:explore_journal/services/group/relay_group_service_io.dart';
 import 'package:explore_journal/services/group/group_types.dart';
-import 'package:explore_journal/services/p2p/crypto.dart';
+import 'package:explore_journal/services/group/p2p_crypto.dart';
 
 import 'helpers/spawn_backend.dart';
 

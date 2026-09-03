@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import '../p2p/crypto.dart';
+import 'p2p_crypto.dart';
 import 'frp_engine.dart';
 import 'frp_group_service_io.dart';
 import 'group_diagnostics.dart';
@@ -45,10 +45,10 @@ abstract class GroupService {
   /// paste the other device's IP (and optionally port).
   ///
   /// Returns a short human-readable status:
-  ///   - "ok: <port>"         connected & hello sent
+  ///   - `ok: <port>`         connected & hello sent
   ///   - "service-not-running" the service hasn't been started yet
   ///   - "unsupported"         this transport doesn't use TCP
-  ///   - "<errno>: <details>"  connect failed; what was tried + last error
+  ///   - `<errno>: <details>`  connect failed; what was tried + last error
   Future<String> addManualPeer(String host, {int? port});
 
   /// Trigger an active subnet scan immediately. Returns the number of new

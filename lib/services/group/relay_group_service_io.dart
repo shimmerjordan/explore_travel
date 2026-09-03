@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import '../p2p/crypto.dart';
+import 'p2p_crypto.dart';
 import 'group_diagnostics.dart';
 import 'group_service_io.dart' show GroupService;
 import 'group_types.dart';

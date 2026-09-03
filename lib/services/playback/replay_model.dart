@@ -1,7 +1,7 @@
-import 'dart:math' as math;
 
 import 'package:latlong2/latlong.dart';
 
+import '../../core/geo_math.dart' show haversineMeters;
 import '../../data/db/database.dart' show TrackPoint;
 
 /// Pure-Dart playback model, shared by the replay screen and the video
@@ -218,16 +218,4 @@ class MergedTimeline {
       }
     }
   }
-}
-
-double haversineMeters(double lat1, double lng1, double lat2, double lng2) {
-  const r = 6371000.0;
-  final dLat = (lat2 - lat1) * math.pi / 180;
-  final dLng = (lng2 - lng1) * math.pi / 180;
-  final h = math.sin(dLat / 2) * math.sin(dLat / 2) +
-      math.cos(lat1 * math.pi / 180) *
-          math.cos(lat2 * math.pi / 180) *
-          math.sin(dLng / 2) *
-          math.sin(dLng / 2);
-  return 2 * r * math.atan2(math.sqrt(h), math.sqrt(1 - h));
 }

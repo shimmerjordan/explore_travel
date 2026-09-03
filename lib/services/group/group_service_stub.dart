@@ -1,5 +1,5 @@
 import 'dart:async';
-import '../p2p/crypto.dart';
+import 'p2p_crypto.dart';
 import 'group_types.dart';
 export 'group_types.dart';
 

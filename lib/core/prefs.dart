@@ -93,7 +93,6 @@ class AppSettings {
   final String? syncCredentialsPassphrase;
 
   final String? nasServerUrl;
-  final String? zerotierNetworkId;
   final String displayName;
   final String? p2pPassphrase;
   final String? groupId;
@@ -255,8 +254,6 @@ class AppSettings {
   /// docs/leaderboard-server-api.md for the contract. Empty = disabled.
   final String? leaderboardServerUrl;
   final String? leaderboardServerToken;
-  /// Auto-sync to/from the configured server every N minutes (0 = manual).
-  final int leaderboardServerSyncMin;
 
   // ── AI 旅伴（地图页悬浮聊天 + 语音通话）────────────────────────────────
   /// 人设 system prompt；空 = 用内置默认旅行搭子人设。
@@ -323,7 +320,6 @@ class AppSettings {
     this.syncBackend = 'onedrive',
     this.syncCredentialsPassphrase,
     this.nasServerUrl,
-    this.zerotierNetworkId,
     this.displayName = '旅人',
     this.p2pPassphrase,
     this.groupId,
@@ -383,7 +379,6 @@ class AppSettings {
     this.leaderboardRepoPat,
     this.leaderboardServerUrl,
     this.leaderboardServerToken,
-    this.leaderboardServerSyncMin = 0,
     this.aiPersona = '',
     this.aiVisionModel = '',
     this.sttBaseUrl = 'https://api.siliconflow.cn/v1',
@@ -438,7 +433,6 @@ class AppSettings {
     String? syncBackend,
     String? syncCredentialsPassphrase,
     String? nasServerUrl,
-    String? zerotierNetworkId,
     String? displayName,
     String? p2pPassphrase,
     String? groupId,
@@ -497,7 +491,6 @@ class AppSettings {
     String? leaderboardRepoPat,
     String? leaderboardServerUrl,
     String? leaderboardServerToken,
-    int? leaderboardServerSyncMin,
     String? aiPersona,
     String? aiVisionModel,
     String? sttBaseUrl,
@@ -552,7 +545,6 @@ class AppSettings {
         syncCredentialsPassphrase:
             syncCredentialsPassphrase ?? this.syncCredentialsPassphrase,
         nasServerUrl: nasServerUrl ?? this.nasServerUrl,
-        zerotierNetworkId: zerotierNetworkId ?? this.zerotierNetworkId,
         displayName: displayName ?? this.displayName,
         p2pPassphrase: p2pPassphrase ?? this.p2pPassphrase,
         groupId: groupId ?? this.groupId,
@@ -625,8 +617,6 @@ class AppSettings {
             leaderboardServerUrl ?? this.leaderboardServerUrl,
         leaderboardServerToken:
             leaderboardServerToken ?? this.leaderboardServerToken,
-        leaderboardServerSyncMin:
-            leaderboardServerSyncMin ?? this.leaderboardServerSyncMin,
         aiPersona: aiPersona ?? this.aiPersona,
         aiVisionModel: aiVisionModel ?? this.aiVisionModel,
         sttBaseUrl: sttBaseUrl ?? this.sttBaseUrl,
@@ -680,7 +670,6 @@ class AppSettings {
         'syncBackend': syncBackend,
         'syncCredentialsPassphrase': syncCredentialsPassphrase,
         'nasServerUrl': nasServerUrl,
-        'zerotierNetworkId': zerotierNetworkId,
         'displayName': displayName,
         'p2pPassphrase': p2pPassphrase,
         'groupId': groupId,
@@ -739,7 +728,6 @@ class AppSettings {
         'leaderboardRepoPat': leaderboardRepoPat,
         'leaderboardServerUrl': leaderboardServerUrl,
         'leaderboardServerToken': leaderboardServerToken,
-        'leaderboardServerSyncMin': leaderboardServerSyncMin,
         'aiPersona': aiPersona,
         'aiVisionModel': aiVisionModel,
         'sttBaseUrl': sttBaseUrl,
@@ -824,7 +812,6 @@ class AppSettings {
         syncBackend: j['syncBackend']?.toString() ?? 'onedrive',
         syncCredentialsPassphrase: j['syncCredentialsPassphrase']?.toString(),
         nasServerUrl: j['nasServerUrl']?.toString(),
-        zerotierNetworkId: j['zerotierNetworkId'],
         displayName: j['displayName'] ?? '旅人',
         p2pPassphrase: j['p2pPassphrase'],
         groupId: j['groupId'],
@@ -898,8 +885,6 @@ class AppSettings {
         leaderboardRepoPat: j['leaderboardRepoPat']?.toString(),
         leaderboardServerUrl: j['leaderboardServerUrl']?.toString(),
         leaderboardServerToken: j['leaderboardServerToken']?.toString(),
-        leaderboardServerSyncMin:
-            (j['leaderboardServerSyncMin'] as num?)?.toInt() ?? 0,
         aiPersona: j['aiPersona']?.toString() ?? '',
         aiVisionModel: j['aiVisionModel']?.toString() ?? '',
         sttBaseUrl:

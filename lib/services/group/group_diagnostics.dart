@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 enum DiagLevel { trace, info, warn, error }
 
@@ -57,9 +56,5 @@ class GroupDiagnostics {
 
 /// Single global instance. Transports are plain Dart objects with no [Ref]
 /// and they fire events from background timers/sockets, so a process-wide
-/// static is the path of least resistance. The Riverpod provider just hands
-/// out the same instance.
+/// static is the path of least resistance.
 final GroupDiagnostics groupDiagnostics = GroupDiagnostics();
-
-final groupDiagnosticsProvider =
-    Provider<GroupDiagnostics>((ref) => groupDiagnostics);

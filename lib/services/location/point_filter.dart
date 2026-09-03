@@ -1,4 +1,4 @@
-import 'dart:math' as math;
+import '../../core/geo_math.dart' as geo;
 
 /// GPS 噪点判定（录制与导入共用）。规则移植自 Dawarich `Points::AnomalyFilter`
 /// 的保守子集：
@@ -70,17 +70,8 @@ class PointFilter {
   }
 
   static double haversineMeters(
-      double lat1, double lng1, double lat2, double lng2) {
-    const r = 6371000.0;
-    final dLat = (lat2 - lat1) * math.pi / 180;
-    final dLng = (lng2 - lng1) * math.pi / 180;
-    final a = math.sin(dLat / 2) * math.sin(dLat / 2) +
-        math.cos(lat1 * math.pi / 180) *
-            math.cos(lat2 * math.pi / 180) *
-            math.sin(dLng / 2) *
-            math.sin(dLng / 2);
-    return 2 * r * math.atan2(math.sqrt(a), math.sqrt(1 - a));
-  }
+          double lat1, double lng1, double lat2, double lng2) =>
+      geo.haversineMeters(lat1, lng1, lat2, lng2);
 }
 
 /// `track_points.flags` 位定义。

@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart'
 import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_map/flutter_map.dart';
+import '../../core/geo_math.dart' as geo;
 import '../../data/db/database.dart';
 import '../../models/models.dart';
 import '../fog/fog_engine.dart';
@@ -339,8 +340,10 @@ Future<ui.Image> _maskToImage(Uint8List mask, int mdim) {
   // plain WGS formula, vs the centre. The GCJ↔WGS offset varies slowly, so
   // one value per tile is accurate to a fraction of a px.
   final worldPx = dim * (1 << z).toDouble();
-  final cLatGcj = _mercPxToLat(tyPpt.toDouble() * scale + dim / 2, worldPx);
-  final cLngGcj = _mercPxToLng(txPpt.toDouble() * scale + dim / 2, worldPx);
+  final cLatGcj =
+      geo.worldYToLat((tyPpt.toDouble() * scale + dim / 2) / worldPx);
+  final cLngGcj =
+      geo.worldXToLng((txPpt.toDouble() * scale + dim / 2) / worldPx);
   final wgs = CoordConverter.gcj02ToWgs84(cLatGcj, cLngGcj);
   final wgsGx = FogEngine.lngToGlobalX(wgs.lng).toDouble();
   final wgsGy = FogEngine.latToGlobalY(wgs.lat).toDouble();
@@ -650,13 +653,6 @@ bool _maskSpan(Uint8List mask, int x0, int x1, int y0, int y1, int mdim) {
     }
   }
   return true;
-}
-
-double _mercPxToLng(double px, double worldPx) => px / worldPx * 360.0 - 180.0;
-
-double _mercPxToLat(double px, double worldPx) {
-  final n = math.pi - 2.0 * math.pi * px / worldPx;
-  return 180.0 / math.pi * math.atan(0.5 * (math.exp(n) - math.exp(-n)));
 }
 
 Future<ui.Image> _decode(Uint8List rgba, int dim) {

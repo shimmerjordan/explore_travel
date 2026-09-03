@@ -43,6 +43,7 @@ on:
       - 'pubspec.yaml'
       - 'pubspec.lock'
       - '.github/actions/image-build-setup/**'
+      - '.github/actions/flutter-setup/**'   # Flutter 版本钉在那里，改钉点要重建镜像
       - '.github/workflows/web-front.yml'
   pull_request:
     paths: *paths
@@ -75,24 +76,22 @@ jobs:
       # Flutter 只构建一次，两个架构共用：web 产物是纯静态资源，与架构无关。
       # 放在这里（Rust 测试之后、镜像构建之前）是因为 docker build 的 context
       # 需要 web-dist/ 里已经有产物；Dockerfile 的 COPY 不是可选的。
-      # flutter-version 必须钉住，不能只写 channel: stable。裸 stable 会取
-      # 「当时最新」的 stable，于是这条流水线的红绿由上游发版时间决定，而不是由
-      # 本仓库的提交决定 —— 实际发生过一次：stable 走到 3.44.8 时，Flutter 给
-      # TextInputClient 加了 onFocusReceived，而 flutter_quill 11.5.0 是用
-      # `implements TextInputClient` 接入的（implements 不继承默认实现体），
-      # 于是少一个必须的 override，dart2js 直接编译失败。没有任何一次提交碰过
-      # 这里，构建却自己坏了。
-      # 版本与 deploy-web.yml、本地开发环境保持一致；升级 Flutter 是一次独立的、
-      # 需要连 flutter_quill 一起动的改动，不该由 CI 悄悄替我们决定什么时候做。
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          flutter-version: '3.32.1' # 与 deploy-web.yml / 本地一致
-          cache: true
+      # Flutter 版本钉在 .github/actions/flutter-setup 里（为什么必须钉、不能裸
+      # stable 的那段 flutter_quill 事故记录也搬去了那里），这里不再硬编码，
+      # 连 pub get 也由它做。
+      - uses: ./.github/actions/flutter-setup
+
+      # 与 deploy-web.yml 同一对门禁：这份产物会被 COPY 进镜像推到 GHCR，NAS 上
+      # 一次 `compose pull` 就拿到。flutter-check.yml 红了并不会拦住这里发布
+      # （两条流水线互不等待），所以构建前自己拦一次。
+      - name: flutter analyze
+        run: flutter analyze --fatal-infos
+      - name: flutter test
+        run: flutter test
+
       - name: 构建 Flutter web 产物
         run: |
           set -euo pipefail
-          flutter pub get
           flutter build web --release
           # 先清空再拷：残留的上一次产物会被一起打进镜像，而 Flutter 的文件名
           # 并非全都带内容哈希，旧文件不会被新文件覆盖掉。

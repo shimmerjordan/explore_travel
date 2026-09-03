@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 import 'dart:typed_data';
 import 'package:flutter/foundation.dart' show compute;
+import '../../core/geo_math.dart' as geo;
 import '../../data/db/database.dart';
 
 /// Fog of war engine — **Fog of World compatible**.
@@ -55,28 +56,21 @@ class FogEngine {
     if (rows.isNotEmpty && _changes.hasListener) _changes.add(rows);
   }
 
-  // ─── Web Mercator projection (matches FOW exactly) ───
+  // ─── Web Mercator projection (matches FOW exactly; math in core/geo_math) ───
 
   /// Longitude → global pixel X  (0 .. FULL-1).
   static int lngToGlobalX(double lng) =>
-      ((lng + 180.0) / 360.0 * full).floor().clamp(0, full - 1);
+      (geo.lngToWorldX(lng) * full).floor().clamp(0, full - 1);
 
   /// Latitude → global pixel Y  (0 .. FULL-1).
-  static int latToGlobalY(double lat) {
-    final latRad = lat * math.pi / 180.0;
-    final y = (1.0 - math.log(math.tan(latRad) + 1.0 / math.cos(latRad)) / math.pi) /
-        2.0 * full;
-    return y.floor().clamp(0, full - 1);
-  }
+  static int latToGlobalY(double lat) =>
+      (geo.latToWorldY(lat) * full).floor().clamp(0, full - 1);
 
   /// Global pixel X → longitude.
-  static double globalXToLng(int gx) => gx / full * 360.0 - 180.0;
+  static double globalXToLng(int gx) => geo.worldXToLng(gx / full);
 
   /// Global pixel Y → latitude.
-  static double globalYToLat(int gy) {
-    final n = math.pi - 2.0 * math.pi * gy / full;
-    return 180.0 / math.pi * math.atan(0.5 * (math.exp(n) - math.exp(-n)));
-  }
+  static double globalYToLat(int gy) => geo.worldYToLat(gy / full);
 
   /// Decompose a global pixel coordinate into (tile, block, pixel).
   static ({int tile, int block, int pixel}) decompose(int global) {

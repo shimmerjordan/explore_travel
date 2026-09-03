@@ -14,7 +14,7 @@ import '../fog/fow_compat.dart'
     show tileIdToFilename, buildFowTile, fowBlocksFromFile,
         looksLikeFowTileName;
 import '../leaderboard/leaderboard_model.dart';
-import '../location/point_filter.dart' show PointFilter;
+import '../../core/geo_math.dart' show haversineMeters;
 import '../leaderboard/leaderboard_service.dart';
 
 /// Modular chunked zip backup. Schema v2.
@@ -1399,7 +1399,7 @@ class BackupService {
           } else {
             Place? near;
             for (final p in placeById.values) {
-              if (_haversineMeters(p.lat, p.lng, lat, lng) <= 30) {
+              if (haversineMeters(p.lat, p.lng, lat, lng) <= 30) {
                 near = p;
                 break;
               }
@@ -2342,6 +2342,3 @@ class ImportSummary {
         : parts.join('\n');
   }
 }
-
-double _haversineMeters(double lat1, double lng1, double lat2, double lng2) =>
-    PointFilter.haversineMeters(lat1, lng1, lat2, lng2);

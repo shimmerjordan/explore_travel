@@ -34,6 +34,7 @@ on:
       - 'pubspec.yaml'
       - 'pubspec.lock'
       - 'scripts/build-site.sh'
+      - '.github/actions/flutter-setup/**'   # Flutter 版本钉在那里，改钉点要重新部署
       - '.github/workflows/deploy-web.yml'
   workflow_dispatch: {}
 
@@ -52,11 +53,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          flutter-version: '3.32.1' # keep in sync with your local Flutter
-      - run: flutter pub get
+      # Flutter 版本钉在这个 composite 里（连 pub get 一起做），此处不再硬编码。
+      - uses: ./.github/actions/flutter-setup
+
+      # 门禁放在这里的原因：这条流水线把 lib/ 直接发到公网生产（web-build →
+      # Vercel / Cloudflare Pages），中间没有人工环节。flutter-check.yml 在同一次
+      # push 上也会跑，但两条流水线互不等待 —— 它红了这里照样发布。所以构建前
+      # 必须自己拦一次：analyze 红或测试红，就不产出、不推 web-build。
+      - run: flutter analyze --fatal-infos
+      - run: flutter test
       - run: bash scripts/build-site.sh # → ./dist  (landing at /, app at /app/)
 
       - name: Publish ./dist to web-build branch

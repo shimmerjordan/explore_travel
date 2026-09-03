@@ -1,0 +1,61 @@
+name: Flutter 静态检查与测试
+
+# ════════════════════════════════════════════════════════════════════════
+# lib/ 与 test/ 的质量门禁：flutter analyze（--fatal-infos）+ 全量 flutter test。
+#
+# 为什么现在才有：在这之前 test/ 下的 50 多个测试文件从来没有在 CI 里跑过 ——
+# 三条 Flutter 流水线（deploy-web / web-front / release）只管「能不能编出来」；
+# release 里虽然有一步 analyze，却是 `|| true` 的非致命版，红了也不拦。于是
+# 「本地忘了跑测试就 push」和「analyze 警告越攒越多」都没有任何信号。
+#
+# 这条流水线只做检查、不产出任何产物，所以 test/** 与 analysis_options.yaml 的
+# 改动只触发它，不会触发部署 / 镜像重建（那些流水线的 paths 刻意不含 test/**，
+# 测试不改变产物）。部署与发版流水线各自也内联了同一对门禁 —— 这里管的是 PR
+# 与 main 上「每次改动」的快速反馈，那边管的是「别把红的发出去」；两条流水线
+# 互不等待，所以缺一不可。
+#
+# 规模：约 500 个测试，本地约 70 s。test/tool/gen_app_icon_test.dart 会往
+# build/ 下写几张 PNG，是预期行为，不是泄漏。
+# ════════════════════════════════════════════════════════════════════════
+
+on:
+  push:
+    branches: [main]
+    paths: &paths
+      - 'lib/**'
+      - 'test/**'
+      - 'pubspec.yaml'
+      - 'pubspec.lock'
+      - 'analysis_options.yaml'
+      - '.github/actions/flutter-setup/**'
+      - '.github/workflows/flutter-check.yml'
+  pull_request:
+    paths: *paths
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: flutter-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: analyze + test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      # Flutter 版本钉在这个 composite 里（连 pub get 一起做），此处不传版本。
+      - uses: ./.github/actions/flutter-setup
+
+      # --fatal-infos：info 级别（多半是 lint 建议）也算失败。宁可门禁严一点，
+      # 也别让「只是 info」慢慢攒成没人敢看的几百条。
+      - name: flutter analyze
+        run: flutter analyze --fatal-infos
+
+      # expanded 逐条打印用例名：失败时能直接在日志里定位到是哪一个；默认的
+      # compact 输出靠原地刷新一行，在 CI 日志里什么都看不见。
+      - name: flutter test
+        run: flutter test --reporter expanded

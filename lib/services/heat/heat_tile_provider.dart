@@ -4,79 +4,22 @@ import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter/widgets.dart';
-import 'package:flutter_map/flutter_map.dart';
 
 import '../../data/db/database.dart';
 import '../../models/models.dart';
 import '../fog/fog_engine.dart';
 import '../geo/coord_converter.dart';
-import '../map/fog_tile_provider.dart' show coalescedTileUpdates;
-import '../map/tile_providers.dart';
 import 'heat_palette.dart';
 import 'heat_source.dart';
 
-/// Baked "personal heat map" tiles: every walked segment is stroked twice
-/// (a wide soft halo + a narrow core) with **additive** blending, so streets
-/// walked ten times glow ten times brighter and saturate to the palette's
-/// white peak — the Strava / 人生点点 look. The accumulated coverage is then
-/// pushed through the palette LUT.
-///
-/// Same lifecycle as the fog tiles: an immutable [HeatSnapshot] with a
-/// generation number in the image-cache key; swapping the snapshot re-bakes
-/// in place.
-class HeatTileProvider extends TileProvider {
-  HeatSnapshot snapshot;
-  HeatTileProvider(this.snapshot);
-
-  @override
-  ImageProvider getImage(TileCoordinates coordinates, TileLayer options) =>
-      _HeatTileImage(snapshot, coordinates.x, coordinates.y, coordinates.z,
-          options.tileSize.round());
-}
-
-@immutable
-class _HeatTileKey {
-  final HeatSnapshot snapshot;
-  final int x, y, z, dim;
-  const _HeatTileKey(this.snapshot, this.x, this.y, this.z, this.dim);
-
-  @override
-  bool operator ==(Object other) =>
-      other is _HeatTileKey &&
-      other.x == x &&
-      other.y == y &&
-      other.z == z &&
-      other.dim == dim &&
-      other.snapshot.generation == snapshot.generation;
-
-  @override
-  int get hashCode => Object.hash(x, y, z, dim, snapshot.generation);
-}
-
-class _HeatTileImage extends ImageProvider<_HeatTileKey> {
-  final _HeatTileKey _key;
-  _HeatTileImage(HeatSnapshot snapshot, int x, int y, int z, int dim)
-      : _key = _HeatTileKey(snapshot, x, y, z, dim);
-
-  @override
-  Future<_HeatTileKey> obtainKey(ImageConfiguration configuration) =>
-      SynchronousFuture(_key);
-
-  @override
-  ImageStreamCompleter loadImage(_HeatTileKey key, ImageDecoderCallback decode) =>
-      OneFrameImageStreamCompleter(_bake(key));
-
-  static Future<ImageInfo> _bake(_HeatTileKey key) async {
-    final img =
-        await bakeHeatTile(key.snapshot, key.x, key.y, key.z, key.dim);
-    return ImageInfo(image: img, scale: 1.0);
-  }
-}
-
-/// Zoom above which flutter_map overzooms the last baked level instead of
-/// asking for finer tiles (the halo is already soft; scaling it is fine).
-const int kHeatMaxNativeZoom = 18;
+// Baked "personal heat map" tiles: every walked segment is stroked twice
+// (a wide soft halo + a narrow core) with **additive** blending, so streets
+// walked ten times glow ten times brighter and saturate to the palette's
+// white peak — the Strava / 人生点点 look. The accumulated coverage is then
+// pushed through the palette LUT.
+//
+// 只有 3D 热图（heat_tilt_screen / tile3d_engine）在用：它直接调 loadHeatSnapshot
+// 拿快照、按需 bakeHeatTile。曾经的 2D flutter_map 图层已删除。
 
 /// Core stroke width in *tile pixels* at zoom [z] for a tile of [dim] px.
 /// 3 px at z14 (one fog cell), doubling per zoom, clamped so a street is at
@@ -262,41 +205,8 @@ class HeatStyle {
   int get hashCode => Object.hash(palette, exposure, width);
 }
 
-/// flutter_map layer that draws the heat map for [layerIds] within an
-/// optional time window. Loads clean track points (+ fog blocks when
-/// [includeFog]) and builds the segment index off the UI isolate.
-class HeatTileLayer extends StatefulWidget {
-  final AppDb db;
-  final List<int> layerIds;
-  final MapProvider mapProvider;
-  final HeatStyle style;
-  final DateTime? from;
-  final DateTime? to;
-  final bool includeFog;
-  final Object? refreshKey;
-  const HeatTileLayer({
-    super.key,
-    required this.db,
-    required this.layerIds,
-    required this.mapProvider,
-    required this.style,
-    this.from,
-    this.to,
-    this.includeFog = true,
-    this.refreshKey,
-  });
-
-  /// Latest published snapshot of the mounted layer (null when none). The
-  /// tilt view reads the segment index from here instead of re-querying.
-  static final ValueNotifier<HeatSnapshot?> latest = ValueNotifier(null);
-
-  @override
-  State<HeatTileLayer> createState() => _HeatTileLayerState();
-}
-
 /// Load clean points (+ fog blocks) and build a ready-to-bake [HeatSnapshot]
-/// — shared by the (test-covered) 2D tile layer and the 3D heat mode, which
-/// builds its snapshot directly instead of mounting a map layer first.
+/// for the 3D heat mode.
 Future<HeatSnapshot> loadHeatSnapshot({
   required AppDb db,
   required List<int> layerIds,
@@ -354,145 +264,6 @@ Future<HeatSnapshot> loadHeatSnapshot({
     width: style.width,
     generation: generation,
   );
-}
-
-class _HeatTileLayerState extends State<HeatTileLayer> {
-  static int _generationSeed = 0;
-  late int _generation = (_generationSeed += 1 << 20);
-  late final HeatTileProvider _provider = HeatTileProvider(HeatSnapshot(
-    index: HeatIndex.empty,
-    lut: HeatPalette.byIndex(widget.style.palette).lut(),
-    exposure: widget.style.exposure,
-    width: widget.style.width,
-    generation: _generation,
-  ));
-  HeatIndex _index = HeatIndex.empty;
-  String _dataKey = '';
-  String _styleKey = '';
-  int _loadSeq = 0;
-
-  @override
-  void initState() {
-    super.initState();
-    _maybeReload();
-  }
-
-  @override
-  void didUpdateWidget(covariant HeatTileLayer old) {
-    super.didUpdateWidget(old);
-    _maybeReload();
-  }
-
-  @override
-  void dispose() {
-    if (HeatTileLayer.latest.value == _provider.snapshot) {
-      HeatTileLayer.latest.value = null;
-    }
-    super.dispose();
-  }
-
-  void _maybeReload() {
-    final data = '${widget.layerIds.join(",")}|${widget.refreshKey}'
-        '|${widget.mapProvider}|${widget.from?.millisecondsSinceEpoch}'
-        '|${widget.to?.millisecondsSinceEpoch}|${widget.includeFog}';
-    final style =
-        '${widget.style.palette}|${widget.style.exposure}|${widget.style.width}';
-    if (data != _dataKey) {
-      _dataKey = data;
-      _styleKey = style;
-      _reload();
-    } else if (style != _styleKey) {
-      _styleKey = style;
-      _publish();
-    }
-  }
-
-  Future<void> _reload() async {
-    final seq = ++_loadSeq;
-    final ids = widget.layerIds;
-    if (ids.isEmpty) {
-      _index = HeatIndex.empty;
-      _publish();
-      return;
-    }
-    final sw = Stopwatch()..start();
-    final pts = await widget.db.cleanPoints(ids, from: widget.from, to: widget.to);
-    final fog = widget.includeFog
-        ? await widget.db.fogTilesForLayers(ids, FogEngine.tileZoom)
-        : const <FogTile>[];
-    if (!mounted || seq != _loadSeq) return;
-
-    final n = pts.length;
-    final lat = Float64List(n), lng = Float64List(n);
-    final timeMs = Int64List(n);
-    final layer = Int32List(n);
-    for (var i = 0; i < n; i++) {
-      final p = pts[i];
-      lat[i] = p.lat;
-      lng[i] = p.lng;
-      timeMs[i] = p.time.millisecondsSinceEpoch;
-      layer[i] = p.layerId;
-    }
-    final fogBx = Int32List(fog.length), fogBy = Int32List(fog.length);
-    final fogPop = Int32List(fog.length);
-    for (var i = 0; i < fog.length; i++) {
-      final t = fog[i];
-      fogBx[i] = t.tileX;
-      fogBy[i] = t.tileY;
-      var c = 0;
-      for (final b in t.bitmap) {
-        if (b != 0) c += _popcount8(b);
-      }
-      fogPop[i] = c;
-    }
-    final input = HeatBuildInput(
-      lat: lat,
-      lng: lng,
-      timeMs: timeMs,
-      layer: layer,
-      gcj02: CoordConverter.needsGcj02(widget.mapProvider),
-      fogBx: fogBx,
-      fogBy: fogBy,
-      fogPop: fogPop,
-    );
-    final index = kIsWeb
-        ? buildHeatIndex(input)
-        : await compute(buildHeatIndexFromMap, input.toMap());
-    if (!mounted || seq != _loadSeq) return;
-    debugPrint('[HEAT] index points=$n fog=${fog.length} → segs=${index.count} '
-        'in ${sw.elapsedMilliseconds} ms');
-    _index = index;
-    _publish();
-  }
-
-  void _publish() {
-    setState(() {
-      _generation++;
-      final snap = HeatSnapshot(
-        index: _index,
-        lut: HeatPalette.byIndex(widget.style.palette).lut(),
-        exposure: widget.style.exposure,
-        width: widget.style.width,
-        generation: _generation,
-      );
-      _provider.snapshot = snap;
-      HeatTileLayer.latest.value = snap;
-    });
-  }
-
-  @override
-  Widget build(BuildContext context) => TileLayer(
-        key: ValueKey('heat-${_index.isEmpty ? 'empty' : 'data'}'),
-        tileProvider: _provider,
-        additionalOptions: {'gen': '$_generation'},
-        tileSize: 256,
-        maxNativeZoom: kHeatMaxNativeZoom,
-        keepBuffer: kNativeTileKeepBuffer,
-        panBuffer: kNativeTilePanBuffer,
-        tileUpdateTransformer: coalescedTileUpdates,
-        tileDisplay: const TileDisplay.instantaneous(),
-        evictErrorTileStrategy: EvictErrorTileStrategy.dispose,
-      );
 }
 
 int _popcount8(int b) {

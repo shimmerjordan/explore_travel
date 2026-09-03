@@ -42,9 +42,12 @@ on:
         type: boolean
         default: true
       flutter_version:
-        # 与 web-front.yml / deploy-web.yml / 本地开发环境一致。这是发版产物的
-        # 工具链版本，改它等于改交付给用户的那个 APK/IPA 是用什么编出来的，
-        # 所以三处必须同版本 —— 否则 CI 绿、发版包却是另一套 SDK 编的。
+        # 默认值必须与 .github/actions/flutter-setup 的 default 一致 —— 那是全仓库
+        # 唯一的钉点，其余流水线都不传版本、吃它的默认；升级 Flutter 时两处一起改。
+        # 这里之所以还保留一个可覆盖的输入：这是发版产物的工具链版本，改它等于改
+        # 交付给用户的那个 APK/IPA 是用什么编出来的，手动发版时要能临时指定，
+        # 而不是被钉点锁死。下面的 check 门禁与 android/ios 用的是同一个值，保证
+        # 查的和发的是同一套 SDK —— 否则 CI 绿、发版包却是另一套 SDK 编的。
         description: 'Flutter SDK version'
         required: true
         default: '3.32.1'
@@ -55,8 +58,32 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # ───────────────────────── 门禁 ─────────────────────────
+  # 先 analyze + test，红了就不编任何一个平台的包。以前 android 里那步 analyze
+  # 是 `|| true` 的非致命版，测试则从来没在发版前跑过 —— 发出去的 APK/IPA 可能
+  # 带着本地早就红了的用例。做成独立 job 而不是塞进 android/ios：两个平台只需
+  # 要拦一次，而且在 ubuntu 上跑一次比在 macos-14 上再跑一遍便宜得多。
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: ./.github/actions/flutter-setup
+        with:
+          # 发版产物用哪个 SDK 编，门禁就用哪个 SDK 查；不吃 composite 的默认。
+          flutter-version: ${{ github.event.inputs.flutter_version }}
+
+      - name: Analyze
+        run: flutter analyze --fatal-infos
+
+      - name: Test
+        run: flutter test
+
   # ───────────────────────── Android ─────────────────────────
   android:
+    needs: check
     if: ${{ github.event.inputs.build_android == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -71,12 +98,13 @@ jobs:
           distribution: zulu
           java-version: '17'
 
+      # composite 顺带做了 flutter pub get（以前是后面单独一步，放在签名配置之后）。
+      # 提前是安全的：中间的 gomobile 只写 android/app/libs/*.aar、签名步只写
+      # android/key.properties，两者与 pub get 互不读写。
       - name: Set up Flutter
-        uses: subosito/flutter-action@v2
+        uses: ./.github/actions/flutter-setup
         with:
           flutter-version: ${{ github.event.inputs.flutter_version }}
-          channel: stable
-          cache: true
 
       # Embedded frpc for the `frp` group transport. Best-effort: if the
       # gomobile build fails, the APK still builds WITHOUT frp (gradle only
@@ -140,14 +168,6 @@ jobs:
           EOF
           echo "::notice::Upload keystore wired — release APK will be production-signed."
 
-      - name: Pub get
-        working-directory: .
-        run: flutter pub get
-
-      - name: Analyze (non-fatal)
-        working-directory: .
-        run: flutter analyze --no-fatal-infos || true
-
       - name: Build APK (universal)
         working-directory: .
         # Universal APK — one binary that contains armv7, arm64 AND
@@ -188,6 +208,7 @@ jobs:
 
   # ─────────────────────────── iOS ───────────────────────────
   ios:
+    needs: check
     if: ${{ github.event.inputs.build_ios == 'true' }}
     runs-on: macos-14
     timeout-minutes: 45
@@ -196,12 +217,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # composite 顺带做了 flutter pub get（以前和 pod install 合在后面一步）。
+      # 提前是安全的：gomobile 只写 ios/frpmobile/，与 pub get 互不读写；而
+      # pod install 仍留在原位 —— 它必须同时晚于 pub get 与 gomobile，见下。
       - name: Set up Flutter
-        uses: subosito/flutter-action@v2
+        uses: ./.github/actions/flutter-setup
         with:
           flutter-version: ${{ github.event.inputs.flutter_version }}
-          channel: stable
-          cache: true
 
       # Embedded frpc for the `frp` group transport. Best-effort: if the
       # gomobile build fails, the IPA still builds WITHOUT frp (the Podfile
@@ -229,11 +251,12 @@ jobs:
           gomobile bind -target=ios -o ../../ios/frpmobile/Frpmobile.xcframework .
           ls -lah ../../ios/frpmobile/ || true
 
-      - name: Pub get + iOS pod install
+      # Podfile 读 ios/Flutter/Generated.xcconfig 与 .flutter-plugins-dependencies，
+      # 两者都由 pub get 生成（上面的 composite 已做）；xcframework 是否 vendor 也在
+      # 这时判定，所以这一步必须晚于 gomobile 那步 —— 别把它往上挪。
+      - name: iOS pod install
         working-directory: .
-        run: |
-          flutter pub get
-          cd ios && pod install --repo-update
+        run: cd ios && pod install --repo-update
 
       # We can't put `secrets.X != ''` directly in a step-level `if:` —
       # GitHub's expression parser rejects the `secrets` context in

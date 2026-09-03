@@ -1,0 +1,47 @@
+name: Flutter SDK 安装（版本的唯一钉点）
+description: >-
+  subosito/flutter-action + flutter pub get。Flutter 版本号**只在这里**钉一次。
+  以前 deploy-web / web-front / release 三条流水线各自硬编码同一个版本号，靠一行
+  「与 xx 保持一致」的注释互相提醒 —— 注释不会让 CI 变红，漂了也没人知道。
+  现在升级 Flutter 只改这里的 default（release 的手动输入可临时覆盖）。
+
+# 为什么必须钉版本，不能只写 channel: stable（钉点在哪，理由就放在哪）：
+#
+# 裸 stable 会取「当时最新」的 stable，于是流水线的红绿由上游发版时间决定，而不是由
+# 本仓库的提交决定 —— 实际发生过一次：stable 走到 3.44.8 时，Flutter 给
+# TextInputClient 加了 onFocusReceived，而 flutter_quill 11.5.0 是用
+# `implements TextInputClient` 接入的（implements 不继承默认实现体），
+# 于是少一个必须的 override，dart2js 直接编译失败。没有任何一次提交碰过
+# 这里，构建却自己坏了。
+#
+# 版本与本地开发环境保持一致；升级 Flutter 是一次独立的、需要连 flutter_quill
+# 一起动的改动，不该由 CI 悄悄替我们决定什么时候做。
+
+inputs:
+  flutter-version:
+    description: >-
+      Flutter SDK 版本。默认值就是全仓库的钉点；只有 release 的手动输入会覆盖它，
+      其余流水线一律不传、吃默认。
+    required: false
+    default: '3.32.1'
+  pub-get:
+    description: >-
+      装完 SDK 是否顺手 flutter pub get。几乎总是要的；留个开关给必须自己控制
+      pub get 时机的调用方。
+    required: false
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    - uses: subosito/flutter-action@v2
+      with:
+        channel: stable
+        flutter-version: ${{ inputs.flutter-version }}
+        # 缓存 SDK 本体，省下每次几百 MB 的下载。缓存 key 含版本号，改钉点自动失效。
+        cache: true
+
+    - name: flutter pub get
+      if: inputs.pub-get == 'true'
+      shell: bash
+      run: flutter pub get

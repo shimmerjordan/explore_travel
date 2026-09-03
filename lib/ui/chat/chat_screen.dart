@@ -5,6 +5,7 @@ import 'package:intl/intl.dart';
 import '../../app/providers.dart';
 import '../../core/prefs.dart' show PeerOverrideX;
 import '../../services/group/group_service.dart';
+import '../common/format.dart' show fmtRelativeTime;
 import 'private_chat_screen.dart';
 
 /// Group screen.
@@ -291,8 +292,8 @@ class _MembersTab extends ConsumerWidget {
               subtitle: Text(
                 p.lat != null
                     ? '${p.lat!.toStringAsFixed(3)}, ${p.lng!.toStringAsFixed(3)} · '
-                        '${_lastSeen(p.lastSeen)}'
-                    : '位置未知 · ${_lastSeen(p.lastSeen)}',
+                        '${fmtRelativeTime(p.lastSeen)}'
+                    : '位置未知 · ${fmtRelativeTime(p.lastSeen)}',
               ),
               trailing: Row(
                 mainAxisSize: MainAxisSize.min,
@@ -325,14 +326,6 @@ class _MembersTab extends ConsumerWidget {
           }),
       ],
     );
-  }
-
-  String _lastSeen(DateTime t) {
-    final d = DateTime.now().difference(t);
-    if (d.inSeconds < 60) return '${d.inSeconds}秒前';
-    if (d.inMinutes < 60) return '${d.inMinutes}分钟前';
-    if (d.inHours < 24) return '${d.inHours}小时前';
-    return '${d.inDays}天前';
   }
 
   Future<void> _editPeer(

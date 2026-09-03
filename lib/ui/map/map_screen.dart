@@ -13,6 +13,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../app/providers.dart';
+import '../../core/geo_math.dart' show haversineMeters;
 import '../../core/prefs.dart' show AppSettings, PeerOverrideX;
 import '../../app/recording_controller.dart';
 import '../../data/db/database.dart' as db_t show JournalEntry, TrackLayer;
@@ -27,7 +28,9 @@ import '../../services/heat/heat_source.dart';
 import '../../services/heat/heat_tile_provider.dart';
 import '../../services/map/fog_tile_provider.dart';
 import '../../services/map/tile_providers.dart';
+import '../common/format.dart' show fmtRelativeTime;
 import '../common/pixel.dart';
+import '../journal/quill_editor_screen.dart' show quillToPreview;
 import '../heat/heat_style_sheet.dart';
 import '../heat/heat_tilt_screen.dart';
 import '../companion/companion_card.dart';
@@ -710,10 +713,10 @@ class _MapScreenState extends ConsumerState<MapScreen>
           final ctrl = ref.read(recordingControllerProvider);
           if (recording) {
             await ctrl.stop();
-            if (mounted) TopToast.show(context, '已停止记录');
+            if (context.mounted) TopToast.show(context, '已停止记录');
           } else {
             final err = await ctrl.start();
-            if (!mounted) return;
+            if (!context.mounted) return;
             if (err == null) {
               // Each fresh recording starts in centred-follow mode and snaps
               // the camera onto the user, regardless of where they'd panned.
@@ -1604,7 +1607,7 @@ class _MapScreenState extends ConsumerState<MapScreen>
                         itemBuilder: (_, i) {
                           final j = near[i];
                           final distance =
-                              _distanceMeters(lat, lng, j.lat, j.lng);
+                              haversineMeters(lat, lng, j.lat, j.lng);
                           return _JournalCard(
                             entry: j,
                             distanceMeters: distance,
@@ -2334,18 +2337,6 @@ class _MapFab extends StatelessWidget {
   }
 }
 
-double _distanceMeters(double lat1, double lng1, double lat2, double lng2) {
-  const r = 6371000.0;
-  final dLat = (lat2 - lat1) * math.pi / 180;
-  final dLng = (lng2 - lng1) * math.pi / 180;
-  final a = math.sin(dLat / 2) * math.sin(dLat / 2) +
-      math.cos(lat1 * math.pi / 180) *
-          math.cos(lat2 * math.pi / 180) *
-          math.sin(dLng / 2) *
-          math.sin(dLng / 2);
-  return 2 * r * math.asin(math.min(1, math.sqrt(a)));
-}
-
 class _JournalCard extends StatelessWidget {
   final db_t.JournalEntry entry;
   final double distanceMeters;
@@ -2444,7 +2435,7 @@ class _JournalCard extends StatelessWidget {
                       ),
                     const SizedBox(height: 4),
                     Text(
-                      _formatTime(entry.time),
+                      fmtRelativeTime(entry.time),
                       style: TextStyle(
                           fontSize: 11,
                           color: Theme.of(context)
@@ -2462,36 +2453,9 @@ class _JournalCard extends StatelessWidget {
     );
   }
 
-  static String _previewText(String richContent) {
-    if (richContent.isEmpty) return '';
-    if (richContent.trimLeft().startsWith('[')) {
-      // Looks like a Quill delta JSON — extract insert strings.
-      try {
-        final dynamic d =
-            (richContent.contains('"insert"') ? richContent : null);
-        if (d != null) {
-          final reg = RegExp(r'"insert"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"');
-          return reg
-              .allMatches(richContent)
-              .map((m) => m.group(1) ?? '')
-              .join(' ')
-              .replaceAll(r'\n', ' ')
-              .trim();
-        }
-      } catch (_) {}
-    }
-    return richContent;
-  }
-
-  static String _formatTime(DateTime t) {
-    final now = DateTime.now();
-    final diff = now.difference(t);
-    if (diff.inMinutes < 1) return '刚刚';
-    if (diff.inMinutes < 60) return '${diff.inMinutes} 分钟前';
-    if (diff.inHours < 24) return '${diff.inHours} 小时前';
-    if (diff.inDays < 7) return '${diff.inDays} 天前';
-    return '${t.year}-${t.month.toString().padLeft(2, '0')}-${t.day.toString().padLeft(2, '0')}';
-  }
+  /// 卡片里只有一两行位置，换行压成空格。
+  static String _previewText(String richContent) =>
+      quillToPreview(richContent).replaceAll('\n', ' ').trim();
 }
 
 class _Thumb extends StatelessWidget {
@@ -3067,27 +3031,6 @@ class _PinTailPainter extends CustomPainter {
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
-// Removed: _FogDiagBadge corner overlay. Diagnostics now live in the
-// debug screen so they don't overlap the map style button. Stub kept to
-// silence stale references — if Dart's tree-shaker complains, delete.
-// ignore: unused_element
-class _FogDiagBadge extends StatelessWidget {
-  const _FogDiagBadge();
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      child: const Text(
-        '',
-        style: TextStyle(
-            color: Colors.white,
-            fontSize: 10,
-            fontFamily: 'monospace',
-            fontWeight: FontWeight.w600),
-      ),
-    );
-  }
-}
-
 /// Small chip on the top-left of the map. Shows the active layer's name
 /// and color, and pops a menu of all layers — tap to set active, eye icon
 /// to toggle visibility, "管理…" to jump to the layers screen.
@@ -3333,24 +3276,27 @@ class _SignalChipState extends State<_SignalChip> {
       return (bars: 0, color: Colors.grey, label: '无定位');
     }
     final acc = widget.accuracyMeters ?? 9999;
-    if (acc <= 10)
+    if (acc <= 10) {
       return (
         bars: 4,
         color: const Color(0xFF66BB6A),
         label: '强 · ±${acc.toStringAsFixed(0)} m'
       );
-    if (acc <= 30)
+    }
+    if (acc <= 30) {
       return (
         bars: 3,
         color: const Color(0xFFAED581),
         label: '良好 · ±${acc.toStringAsFixed(0)} m'
       );
-    if (acc <= 80)
+    }
+    if (acc <= 80) {
       return (
         bars: 2,
         color: const Color(0xFFFFB74D),
         label: '一般 · ±${acc.toStringAsFixed(0)} m'
       );
+    }
     return (
       bars: 1,
       color: const Color(0xFFE57373),

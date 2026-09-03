@@ -56,10 +56,6 @@ bool? _supported;
 /// Whether this device composes regional-indicator pairs into flags.
 bool get emojiFlagsSupported => _supported ??= _detect();
 
-/// Test seam: force the answer (and reset with null).
-@visibleForTesting
-set emojiFlagsSupportedOverride(bool? v) => _supported = v;
-
 bool _detect() {
   try {
     final valid = _width('\u{1F1E8}\u{1F1F3}'); // CN — a real flag

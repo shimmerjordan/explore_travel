@@ -1,4 +1,3 @@
-import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 /// Pixel design language for Explore Journal.
@@ -329,49 +328,6 @@ class _DitherFadePainter extends CustomPainter {
       old.color != color || old.cell != cell;
 }
 
-// ─── Pixel badge ─────────────────────────────────────────────────────────────
-
-/// Small hard-cornered status chip with an optional leading icon. Text stays
-/// a normal label face for readability; the silhouette carries the style.
-class PixelBadge extends StatelessWidget {
-  final String text;
-  final IconData? icon;
-  final Color color; // background
-  final Color onColor; // content
-  final Color? borderColor;
-  const PixelBadge({
-    super.key,
-    required this.text,
-    required this.color,
-    required this.onColor,
-    this.icon,
-    this.borderColor,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-      decoration: BoxDecoration(
-        color: color,
-        border: borderColor == null ? null : Border.all(color: borderColor!),
-      ),
-      child: Row(mainAxisSize: MainAxisSize.min, children: [
-        if (icon != null) ...[
-          Icon(icon, size: 12, color: onColor),
-          const SizedBox(width: 4),
-        ],
-        Text(text,
-            style: TextStyle(
-                fontSize: 11,
-                height: 1.2,
-                fontWeight: FontWeight.w600,
-                color: onColor)),
-      ]),
-    );
-  }
-}
-
 // ─── Pixel sprite icon ───────────────────────────────────────────────────────
 
 /// Draws a tiny pixel sprite from a string map ('.' empty, any other char =
@@ -511,68 +467,3 @@ abstract final class PixelSprites {
     '.########.',
   ];
 }
-
-// ─── Scanline sheen (optional, very subtle) ─────────────────────────────────
-
-/// Ultra-subtle horizontal scanlines, for hero surfaces only. Alpha is so low
-/// it reads as texture, not as a CRT gimmick. Skip on busy surfaces.
-class PixelScanlines extends StatelessWidget {
-  final Color color;
-  final double opacity;
-  const PixelScanlines({super.key, required this.color, this.opacity = 0.05});
-
-  @override
-  Widget build(BuildContext context) {
-    return IgnorePointer(
-      child: CustomPaint(
-        painter: _ScanlinePainter(color: color.withValues(alpha: opacity)),
-        size: Size.infinite,
-      ),
-    );
-  }
-}
-
-class _ScanlinePainter extends CustomPainter {
-  final Color color;
-  const _ScanlinePainter({required this.color});
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()..color = color;
-    for (var y = 0.0; y < size.height; y += 4) {
-      canvas.drawRect(Rect.fromLTWH(0, y, size.width, 1), paint);
-    }
-  }
-
-  @override
-  bool shouldRepaint(_ScanlinePainter old) => old.color != color;
-}
-
-// ─── Utilities ───────────────────────────────────────────────────────────────
-
-/// Quantize [v] (0..1) to [levels] discrete positions — stepped, game-like
-/// motion instead of continuous glide.
-double pixelQuantize(double v, int levels) =>
-    (v * levels).floorToDouble() / levels;
-
-/// Snap a pixel-space offset onto an integer grid of [grid] logical px.
-Offset pixelSnap(Offset o, double grid) => Offset(
-      (o.dx / grid).floorToDouble() * grid,
-      (o.dy / grid).floorToDouble() * grid,
-    );
-
-/// Deterministic tiny hash noise for per-cell variation without Random.
-double pixelNoise(int x, int y) {
-  var h = x * 374761393 + y * 668265263;
-  h = (h ^ (h >> 13)) * 1274126177;
-  return ((h ^ (h >> 16)) & 0xFFFF) / 0xFFFF;
-}
-
-/// Ease helper for stepped reveals: returns how many of [total] items should
-/// be visible at animation position [t] (0..1).
-int pixelRevealCount(double t, int total) =>
-    (t.clamp(0.0, 1.0) * total).floor();
-
-// A grab-bag `math` re-export guard so callers don't re-import dart:math for
-// trivial needs.
-double pixelSin01(double p) => 0.5 + 0.5 * math.sin(p * math.pi * 2);

@@ -237,17 +237,3 @@ const Map<String, List<CountryEntry>> kContinents = {
     CountryEntry('AQ', '南极洲', ['Antarctica']),
   ],
 };
-
-/// Flat lookup: country name (zh) → continent.
-final Map<String, String> kCountryToContinent = () {
-  final m = <String, String>{};
-  for (final c in kContinents.entries) {
-    for (final e in c.value) {
-      m[e.name] = c.key;
-      for (final a in e.aliases) {
-        m[a] = c.key;
-      }
-    }
-  }
-  return m;
-}();
