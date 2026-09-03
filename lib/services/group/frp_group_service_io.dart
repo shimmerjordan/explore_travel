@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'p2p_crypto.dart';
 import 'frp_config.dart';
 import 'frp_engine.dart';
@@ -29,6 +30,18 @@ GroupDiagnostics get _diag => groupDiagnostics;
 class FrpGroupService implements GroupService {
   static const int kPortBase = 47830;
   static const int kProbeCount = 5;
+  static const _kRosterRefresh = Duration(seconds: 15);
+  /// 后台名册刷新上限。每次刷新是一次 dashboard HTTP 往返，后台没人看名册，
+  /// 60 s 一次足够；已连通的 socket 不受影响。
+  static const _kRosterRefreshBackground = Duration(seconds: 60);
+  /// 重连退避：5 → 10 → 20 → 40 → 60 s 封顶，收到对方的帧即归零。以前是固定
+  /// 每 5 s 对每个未连通成员 connect 一次——成员离线时 frpc 会不停打洞，
+  /// 前后台都白耗电。
+  static const kReconnectMin = Duration(seconds: 5);
+  static const kReconnectMax = Duration(seconds: 60);
+  /// 重连检查的节拍。只有到期的成员才真正发起连接；全员在线时空转，与原先
+  /// "每 5 s 扫一遍、已连通的跳过"的行为完全一致。
+  static const _kReconnectTick = Duration(seconds: 5);
 
   final String selfId;
   final String selfName;
@@ -52,9 +65,14 @@ class FrpGroupService implements GroupService {
   Timer? _rosterTimer;
   Timer? _reconnectTimer;
   StreamSubscription<String>? _engineSub;
+  bool _background = false;
 
   /// peerId → loopback bind port assigned by the last config build.
   final _visitorPort = <String, int>{};
+  /// 未连通成员的退避状态：peerId → 最早允许再试的时刻 / 下一次的等待时长。
+  /// 只对 [_visitorPort] 里的成员有意义，名册变化时同步清理。
+  final _nextAttemptAt = <String, DateTime>{};
+  final _reconnectDelay = <String, Duration>{};
   /// Manually added peer ids (when dashboard discovery isn't configured).
   final _manualRoster = <String>{};
   /// Peers we've decided to actively connect to (selfId < peerId).
@@ -142,10 +160,9 @@ class FrpGroupService implements GroupService {
 
     // 3) Roster discovery + reconnect loops.
     await _refreshRoster();
-    _rosterTimer =
-        Timer.periodic(const Duration(seconds: 15), (_) => _refreshRoster());
+    _startRosterTimer();
     _reconnectTimer =
-        Timer.periodic(const Duration(seconds: 5), (_) => _reconnectAll());
+        Timer.periodic(_kReconnectTick, (_) => _reconnectAll());
   }
 
   @override
@@ -164,6 +181,8 @@ class FrpGroupService implements GroupService {
     _peers.clear();
     _visitorPort.clear();
     _wantConnect.clear();
+    _nextAttemptAt.clear();
+    _reconnectDelay.clear();
     _peersCtrl.add(const []);
     await _server?.close();
     _server = null;
@@ -171,6 +190,25 @@ class FrpGroupService implements GroupService {
       await _engine.stop();
     } catch (_) {}
     _diag.info(_tag, 'Stopped');
+  }
+
+  /// 当前应生效的名册刷新周期（随前后台切换）。
+  @visibleForTesting
+  Duration get rosterPeriod =>
+      _background ? _kRosterRefreshBackground : _kRosterRefresh;
+
+  @override
+  void setBackground(bool background) {
+    if (_background == background) return;
+    _background = background;
+    // start() 之前只记标志，start() 会按它建 timer。重连节拍不随前后台变：
+    // 退避本身已经把离线成员的尝试压到 60 s 一次，全员在线时它是空转。
+    if (_server != null) _startRosterTimer();
+  }
+
+  void _startRosterTimer() {
+    _rosterTimer?.cancel();
+    _rosterTimer = Timer.periodic(rosterPeriod, (_) => _refreshRoster());
   }
 
   /// Rebuild + (re)apply the frpc config for the current want-connect roster.
@@ -185,6 +223,9 @@ class FrpGroupService implements GroupService {
     _visitorPort
       ..clear()
       ..addEntries(cfg.visitors.map((v) => MapEntry(v.peerId, v.bindPort)));
+    // 退出名册的成员不再重连，顺手把它们的退避状态清掉，免得越积越多。
+    _nextAttemptAt.removeWhere((id, _) => !_visitorPort.containsKey(id));
+    _reconnectDelay.removeWhere((id, _) => !_visitorPort.containsKey(id));
     try {
       if (await _engine.isRunning()) {
         await _engine.reload(cfg.toml);
@@ -265,10 +306,25 @@ class FrpGroupService implements GroupService {
 
   // ── Connection management ───────────────────────────────────────────────
 
+  /// 下一档退避时长：翻倍，夹在 [kReconnectMin, kReconnectMax] 之间。纯函数，
+  /// 便于单测锁定 5/10/20/40/60 这条序列。
+  static Duration nextReconnectDelay(Duration prev) {
+    final doubled = prev * 2;
+    if (doubled < kReconnectMin) return kReconnectMin;
+    if (doubled > kReconnectMax) return kReconnectMax;
+    return doubled;
+  }
+
   void _reconnectAll() {
+    final now = DateTime.now();
     for (final entry in _visitorPort.entries) {
       final peerId = entry.key;
       if (_outgoing.containsKey(peerId)) continue; // already linked
+      final due = _nextAttemptAt[peerId];
+      if (due != null && now.isBefore(due)) continue; // 还在退避期
+      final delay = _reconnectDelay[peerId] ?? kReconnectMin;
+      _nextAttemptAt[peerId] = now.add(delay);
+      _reconnectDelay[peerId] = nextReconnectDelay(delay);
       _connectVisitor(peerId, entry.value);
     }
   }
@@ -330,7 +386,13 @@ class FrpGroupService implements GroupService {
           if (to is String && to.isNotEmpty && to != selfId) return;
           final isFirst = !_peerByConn.containsValue(msg.fromId);
           _peerByConn[socket] = msg.fromId;
-          if (outgoing) _outgoing[msg.fromId] = socket;
+          if (outgoing) {
+            _outgoing[msg.fromId] = socket;
+            // 对方的帧到了才算真连通（loopback connect 成功只说明 frpc 在听，
+            // 打洞仍可能失败并被关掉），此时才把该成员的退避归零。
+            _nextAttemptAt.remove(msg.fromId);
+            _reconnectDelay.remove(msg.fromId);
+          }
           if (isFirst) {
             _diag.info(_tag, 'HANDSHAKE OK ($dir) ↔ ${msg.fromName}');
           }

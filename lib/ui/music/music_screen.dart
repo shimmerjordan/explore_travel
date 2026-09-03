@@ -17,7 +17,8 @@ class MusicScreen extends ConsumerStatefulWidget {
   ConsumerState<MusicScreen> createState() => _MusicScreenState();
 }
 
-class _MusicScreenState extends ConsumerState<MusicScreen> {
+class _MusicScreenState extends ConsumerState<MusicScreen>
+    with SingleTickerProviderStateMixin {
   final _searchCtrl = TextEditingController();
   final _moodCtrl = TextEditingController(text: '惬意的下午，公路旅行');
   String _source = 'gd';
@@ -28,6 +29,20 @@ class _MusicScreenState extends ConsumerState<MusicScreen> {
   String _aiStatus = '';
   int _aiPlaylistCount = 10;
   StreamSubscription<PlayerState>? _playerSub;
+
+  static const _favoritesTab = 2;
+  late final TabController _tabs;
+  int _lastTab = 0;
+
+  /// 收藏列表查询只在这里持有。本页随播放器状态事件频繁 setState，以前在
+  /// build() 里每次 new Future，FutureBuilder 每次都退回转圈并重查一遍。
+  /// 只在收藏增删、重新切到收藏页时刷新；首次打开收藏页时懒建。
+  Future<List<SongFavorite>>? _favsFuture;
+
+  /// 已划掉、但列表还没重查回来的收藏 id。Dismissible 要求 onDismissed 一返回这
+  /// 行就不在树里（否则 debug 断言），删库是异步的，先在本地藏起来。id 是自增主
+  /// 键、删除走墓碑，不会再出现，所以不必清理。
+  final Set<int> _dismissedFavIds = {};
   // Five user-facing sources. "gd" is the GD音乐台 aggregator (no auth, just
   // works); the other four are the platforms that gdstudio proxies behind
   // the scenes. They appear as first-class options in the dropdown so the
@@ -53,6 +68,8 @@ class _MusicScreenState extends ConsumerState<MusicScreen> {
   void initState() {
     super.initState();
     _svc = ref.read(musicServiceProvider);
+    _tabs = TabController(length: 3, vsync: this);
+    _tabs.addListener(_onTabChanged);
     // Auto-clear the "正在解析 N 首" status as soon as the player actually
     // starts playing — used to be sticky which was confusing.
     _playerSub = _svc?.player.playerStateStream.listen((s) {
@@ -92,8 +109,29 @@ class _MusicScreenState extends ConsumerState<MusicScreen> {
   void dispose() {
     _syncTimer?.cancel();
     _playerSub?.cancel();
+    _tabs.dispose();
     _svc?.stop();
     super.dispose();
+  }
+
+  /// 重新切回收藏页时刷一次：收藏可能在别处变了（收藏地图、同步合并进来的）。
+  /// TabController 一次切换会通知两回（起手 / 落定），用 _lastTab 折成一次。
+  void _onTabChanged() {
+    final i = _tabs.index;
+    if (i == _favoritesTab && _lastTab != _favoritesTab && _favsFuture != null) {
+      _reloadFavorites();
+    }
+    _lastTab = i;
+  }
+
+  Future<List<SongFavorite>> _queryFavorites() {
+    final db = ref.read(dbProvider);
+    return db.select(db.songFavorites).get();
+  }
+
+  void _reloadFavorites() {
+    if (!mounted) return;
+    setState(() => _favsFuture = _queryFavorites());
   }
 
   Future<void> _doSearch(String keyword) async {
@@ -199,6 +237,8 @@ class _MusicScreenState extends ConsumerState<MusicScreen> {
           lng: Value(pos?.longitude),
         ));
     if (mounted) {
+      // 收藏页已经建过列表才重查；还没打开过就等它首次打开时懒建。
+      if (_favsFuture != null) _reloadFavorites();
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text('收藏：${t.name}')));
     }
@@ -236,100 +276,100 @@ class _MusicScreenState extends ConsumerState<MusicScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return DefaultTabController(
-      length: 3,
-      child: Scaffold(
-        appBar: AppBar(
-          title: Text('旅行歌单',
-              style: PixelText.headline
-                  .copyWith(color: Theme.of(context).colorScheme.onSurface)),
-          actions: [
-            Consumer(builder: (context, ref, _) {
-              final s = ref.watch(settingsProvider);
-              final inGroup = (s.groupId ?? '').isNotEmpty;
-              return IconButton(
-                icon: Icon(
-                  s.groupBroadcastMusic && inGroup
-                      ? Icons.cast_connected
-                      : Icons.cast,
-                  color: s.groupBroadcastMusic && inGroup
-                      ? Colors.greenAccent
-                      : null,
-                ),
-                tooltip: inGroup
-                    ? (s.groupBroadcastMusic ? '正在与群组同步播放' : '广播到群组')
-                    : '需先加入群组',
-                onPressed: inGroup
-                    ? () => ref
-                        .read(settingsProvider.notifier)
-                        .update((p) => p.copyWith(
-                            groupBroadcastMusic: !s.groupBroadcastMusic))
+    // 显式 TabController（而不是 DefaultTabController）：要听「切到收藏页」。
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('旅行歌单',
+            style: PixelText.headline
+                .copyWith(color: Theme.of(context).colorScheme.onSurface)),
+        actions: [
+          Consumer(builder: (context, ref, _) {
+            final s = ref.watch(settingsProvider);
+            final inGroup = (s.groupId ?? '').isNotEmpty;
+            return IconButton(
+              icon: Icon(
+                s.groupBroadcastMusic && inGroup
+                    ? Icons.cast_connected
+                    : Icons.cast,
+                color: s.groupBroadcastMusic && inGroup
+                    ? Colors.greenAccent
                     : null,
-              );
-            }),
-            IconButton(
-              icon: const Icon(Icons.map_outlined),
-              tooltip: '收藏地图',
-              onPressed: () => context.push('/music/map'),
-            ),
-            IconButton(
-              icon: const Icon(Icons.tune_rounded),
-              tooltip: '音乐平台配置',
-              onPressed: () => context.push('/music/sources'),
-            ),
-          ],
-          bottom: const TabBar(
-            tabs: [
-              Tab(text: '搜索'),
-              Tab(text: 'AI 歌单'),
-              Tab(text: '我的收藏'),
-            ],
-          ),
-        ),
-        body: Column(
-          children: [
-            // Source-aware banner. Only shown when the user has picked GD;
-            // for direct backends the source is shown via the dropdown
-            // label and platform config page already.
-            if (_source == 'gd')
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.symmetric(
-                    horizontal: 12, vertical: 4),
-                color: Theme.of(context)
-                    .colorScheme
-                    .surfaceContainerHigh,
-                child: Row(
-                  children: [
-                    const Icon(Icons.library_music_outlined, size: 14),
-                    const SizedBox(width: 6),
-                    Expanded(
-                      child: Text(
-                        '数据来源：GD 音乐台 (music.gdstudio.xyz)',
-                        style: TextStyle(
-                            fontSize: 11,
-                            color: Theme.of(context).hintColor),
-                      ),
-                    ),
-                    Text('频率 ≤50 次/5 分钟',
-                        style: TextStyle(
-                            fontSize: 11,
-                            color: Theme.of(context).hintColor)),
-                  ],
-                ),
               ),
-            Expanded(
-              child: TabBarView(
+              tooltip: inGroup
+                  ? (s.groupBroadcastMusic ? '正在与群组同步播放' : '广播到群组')
+                  : '需先加入群组',
+              onPressed: inGroup
+                  ? () => ref
+                      .read(settingsProvider.notifier)
+                      .update((p) => p.copyWith(
+                          groupBroadcastMusic: !s.groupBroadcastMusic))
+                  : null,
+            );
+          }),
+          IconButton(
+            icon: const Icon(Icons.map_outlined),
+            tooltip: '收藏地图',
+            onPressed: () => context.push('/music/map'),
+          ),
+          IconButton(
+            icon: const Icon(Icons.tune_rounded),
+            tooltip: '音乐平台配置',
+            onPressed: () => context.push('/music/sources'),
+          ),
+        ],
+        bottom: TabBar(
+          controller: _tabs,
+          tabs: const [
+            Tab(text: '搜索'),
+            Tab(text: 'AI 歌单'),
+            Tab(text: '我的收藏'),
+          ],
+        ),
+      ),
+      body: Column(
+        children: [
+          // Source-aware banner. Only shown when the user has picked GD;
+          // for direct backends the source is shown via the dropdown
+          // label and platform config page already.
+          if (_source == 'gd')
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(
+                  horizontal: 12, vertical: 4),
+              color: Theme.of(context)
+                  .colorScheme
+                  .surfaceContainerHigh,
+              child: Row(
                 children: [
-                  _buildSearchTab(),
-                  _buildAiTab(),
-                  _buildFavoritesTab(),
+                  const Icon(Icons.library_music_outlined, size: 14),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      '数据来源：GD 音乐台 (music.gdstudio.xyz)',
+                      style: TextStyle(
+                          fontSize: 11,
+                          color: Theme.of(context).hintColor),
+                    ),
+                  ),
+                  Text('频率 ≤50 次/5 分钟',
+                      style: TextStyle(
+                          fontSize: 11,
+                          color: Theme.of(context).hintColor)),
                 ],
               ),
             ),
-            if (_now != null) _buildPlayerBar(),
-          ],
-        ),
+          Expanded(
+            child: TabBarView(
+              controller: _tabs,
+              children: [
+                _buildSearchTab(),
+                _buildAiTab(),
+                _buildFavoritesTab(),
+              ],
+            ),
+          ),
+          if (_now != null) _buildPlayerBar(),
+        ],
       ),
     );
   }
@@ -500,13 +540,17 @@ class _MusicScreenState extends ConsumerState<MusicScreen> {
 
   Widget _buildFavoritesTab() {
     final db = ref.watch(dbProvider);
+    // TabBarView 只在滑到 / 切到这页时才 build 它，所以首次查询在这里懒建；
+    // 之后 build 再跑多少次都复用同一个 future。
     return FutureBuilder<List<SongFavorite>>(
-      future: db.select(db.songFavorites).get(),
+      future: _favsFuture ??= _queryFavorites(),
       builder: (context, snap) {
         if (!snap.hasData) {
           return const Center(child: CircularProgressIndicator());
         }
-        final favs = snap.data!;
+        final favs = snap.data!
+            .where((f) => !_dismissedFavIds.contains(f.id))
+            .toList();
         if (favs.isEmpty) {
           final cs = Theme.of(context).colorScheme;
           return Center(
@@ -527,9 +571,12 @@ class _MusicScreenState extends ConsumerState<MusicScreen> {
               direction: DismissDirection.endToStart,
               background: Container(color: Colors.red),
               onDismissed: (_) async {
+                // 先把这行从列表里藏掉（Dismissible 要求回调一返回它就不在树里），
+                // 再落库、重查。
+                setState(() => _dismissedFavIds.add(f.id));
                 // Tombstoning delete — survives future sync merges.
                 await db.deleteSongFavoriteById(f.id);
-                setState(() {});
+                _reloadFavorites();
               },
               child: ListTile(
                 leading: const Icon(Icons.favorite, color: Colors.red),

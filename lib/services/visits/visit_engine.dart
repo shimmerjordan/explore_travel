@@ -46,7 +46,11 @@ class VisitEngine {
   VisitEngine(this.db, {required this.geocoder, this.params = StayParams.defaults});
 
   Timer? _debounce;
-  bool _running = false;
+
+  /// Tail of the serial run queue: every run awaits the previous one instead
+  /// of polling a `_running` flag every 50 ms (which burned a timer tick per
+  /// waiter and woke the UI isolate for nothing while a full-history scan ran).
+  Future<void> _tail = Future<void>.value();
   final _changes = StreamController<void>.broadcast();
 
   /// Fires after every run that wrote something.
@@ -70,46 +74,75 @@ class VisitEngine {
   }
 
   /// Walk the whole history month by month. Returns total machine visits.
-  Future<int> detectAll({void Function(double progress)? onProgress}) async {
-    final span = await db.pointTimeSpan();
-    if (span == null) return 0;
-    var (lo, hi) = span;
-    lo = DateTime(lo.year, lo.month);
-    var total = 0;
-    var cursor = lo;
-    final months = (hi.year - lo.year) * 12 + hi.month - lo.month + 1;
-    var done = 0;
-    while (!cursor.isAfter(hi)) {
-      final next = DateTime(cursor.year, cursor.month + 1);
-      total += await detectRange(cursor, next.subtract(const Duration(milliseconds: 1)));
-      cursor = next;
-      done++;
-      onProgress?.call((done / months).clamp(0.0, 1.0));
-    }
-    return total;
-  }
+  ///
+  /// Holds the run queue for the WHOLE walk (not per month) so an incremental
+  /// [detectRecent] cannot slip in between two months and mint a place the
+  /// shared in-memory place list below would never hear about.
+  Future<int> detectAll({void Function(double progress)? onProgress}) =>
+      _serialised(() async {
+        final span = await db.pointTimeSpan();
+        if (span == null) return 0;
+        var (lo, hi) = span;
+        lo = DateTime(lo.year, lo.month);
+        // 地点表和每地点到访数只读一次：以前每个月都 allPlaces() +
+        // visitCountsByPlace() 各查一遍，几年的历史就是上百次全表查询。
+        // _attribute 铸造新地点时 add 进同一个列表、计数在内存里累加，
+        // 后面的月份看到的仍是最新状态。
+        final places = await db.allPlaces();
+        final counts = await db.visitCountsByPlace();
+        var total = 0;
+        var cursor = lo;
+        final months = (hi.year - lo.year) * 12 + hi.month - lo.month + 1;
+        var done = 0;
+        while (!cursor.isAfter(hi)) {
+          final next = DateTime(cursor.year, cursor.month + 1);
+          total += await _detectRangeSafe(
+              cursor, next.subtract(const Duration(milliseconds: 1)),
+              bulk: true, places: places, counts: counts);
+          cursor = next;
+          done++;
+          onProgress?.call((done / months).clamp(0.0, 1.0));
+        }
+        return total;
+      });
 
   /// Detect + persist for every layer with points in [from, to]. Returns the
   /// number of machine visits now stored for the window.
-  Future<int> detectRange(DateTime from, DateTime to) async {
-    if (_running) {
-      // Serialise: a second caller waits for the first to finish.
-      while (_running) {
-        await Future<void>.delayed(const Duration(milliseconds: 50));
+  Future<int> detectRange(DateTime from, DateTime to) =>
+      _serialised(() => _detectRangeSafe(from, to, bulk: false));
+
+  /// Run [body] after every earlier run has finished — one detection at a
+  /// time, in call order. The queue never fails: a run's error is handled in
+  /// [_detectRangeSafe], so a waiter only ever sees "the previous one is done".
+  Future<T> _serialised<T>(Future<T> Function() body) {
+    final prev = _tail;
+    final done = Completer<void>();
+    _tail = done.future;
+    return () async {
+      await prev;
+      try {
+        return await body();
+      } finally {
+        done.complete();
       }
-    }
-    _running = true;
+    }();
+  }
+
+  Future<int> _detectRangeSafe(DateTime from, DateTime to,
+      {required bool bulk, List<Place>? places, Map<int, int>? counts}) async {
     try {
-      return await _detectRange(from, to);
+      return await _detectRange(from, to,
+          bulk: bulk, places: places, counts: counts);
     } catch (e, st) {
       debugPrint('[VISITS] detect failed: $e\n$st');
       return 0;
-    } finally {
-      _running = false;
     }
   }
 
-  Future<int> _detectRange(DateTime from, DateTime to) async {
+  /// [places] / [counts] — pass the caller's live copies to reuse them across
+  /// windows (see [detectAll]); null loads fresh ones for this window.
+  Future<int> _detectRange(DateTime from, DateTime to,
+      {required bool bulk, List<Place>? places, Map<int, int>? counts}) async {
     final pFrom = from.subtract(windowPad), pTo = to.add(windowPad);
     final layers = await db.allLayers();
     final pts = await db.cleanPoints(layers.map((l) => l.id).toList(),
@@ -125,14 +158,14 @@ class VisitEngine {
     }
 
     final existing = await db.visitsBetween(pFrom, pTo, includeDeleted: true);
-    final places = await db.allPlaces();
-    final counts = await db.visitCountsByPlace();
+    places ??= await db.allPlaces();
+    counts ??= await db.visitCountsByPlace();
     var written = 0;
     var changed = false;
 
     for (final e in byLayer.entries) {
       final layerId = e.key;
-      final stays = await _detect(e.value);
+      final stays = await _detect(e.value, bulk: bulk);
       final anchors = existing
           .where((v) => v.layerId == layerId &&
               (v.status != 0 || v.deletedAt != null))
@@ -199,13 +232,39 @@ class VisitEngine {
     return written;
   }
 
-  Future<List<Stay>> _detect(List<StayPoint> pts) async {
-    if (kIsWeb || pts.length < 2000) return detectStays(pts, params: params);
-    final packed = await compute(detectStaysPacked, <String, Object>{
-      'lat': [for (final p in pts) p.lat],
-      'lng': [for (final p in pts) p.lng],
-      'tMs': [for (final p in pts) p.tMs],
-      'acc': [for (final p in pts) p.accuracy ?? double.nan],
+  /// [bulk] = part of the full-history walk: always off the UI isolate, even
+  /// for a thin month — 几十个月连着算，每月哪怕只卡十几毫秒，加起来就是首启
+  /// 时一段肉眼可见的掉帧。录制结束后的增量窗口点很少，原地算比起 isolate
+  /// 更快，只有大窗口才进 isolate。
+  Future<List<Stay>> _detect(List<StayPoint> pts, {required bool bulk}) async {
+    if (kIsWeb || (!bulk && pts.length < 2000)) {
+      return detectStays(pts, params: params);
+    }
+    final n = pts.length;
+    final lat = Float64List(n), lng = Float64List(n), acc = Float64List(n);
+    final tMs = Int64List(n);
+    for (var i = 0; i < n; i++) {
+      final p = pts[i];
+      lat[i] = p.lat;
+      lng[i] = p.lng;
+      tMs[i] = p.tMs;
+      acc[i] = p.accuracy ?? double.nan;
+    }
+    final packed = await compute(_detectStaysIsolate, <String, Object>{
+      'lat': lat,
+      'lng': lng,
+      'tMs': tMs,
+      'acc': acc,
+      'params': Float64List.fromList([
+        params.radiusM,
+        params.minPoints.toDouble(),
+        params.minDurationS.toDouble(),
+        params.mergeGapS.toDouble(),
+        params.sweepGapS.toDouble(),
+        params.bridgeCapS.toDouble(),
+        params.driftCapFactor,
+        params.minRadiusM,
+      ]),
     });
     return unpackStays(packed);
   }
@@ -328,4 +387,49 @@ class _Candidate {
   final int? placeId;
   final ConfidenceResult conf;
   const _Candidate(this.stay, this.placeId, this.conf);
+}
+
+/// `compute()` entry for [VisitEngine._detect]: typed columns + the engine's
+/// [StayParams] (as an 8-double vector, see `_detect`) in, stays out packed
+/// 8 doubles apiece in `detectStaysPacked`'s layout so [unpackStays] reads it.
+///
+/// 不复用 stay_detector 的 detectStaysPacked，是因为那个入口只认
+/// StayParams.defaults —— 引擎带自定义参数时，isolate 路径的结果就会和原地
+/// detectStays(params: params) 不一致。
+Float64List _detectStaysIsolate(Map<String, Object> m) {
+  final lat = m['lat'] as Float64List;
+  final lng = m['lng'] as Float64List;
+  final tMs = m['tMs'] as Int64List;
+  final acc = m['acc'] as Float64List; // NaN = unknown
+  final p = m['params'] as Float64List;
+  final params = StayParams(
+    radiusM: p[0],
+    minPoints: p[1].toInt(),
+    minDurationS: p[2].toInt(),
+    mergeGapS: p[3].toInt(),
+    sweepGapS: p[4].toInt(),
+    bridgeCapS: p[5].toInt(),
+    driftCapFactor: p[6],
+    minRadiusM: p[7],
+  );
+  final pts = <StayPoint>[
+    for (var i = 0; i < lat.length; i++)
+      StayPoint(lat[i], lng[i], tMs[i],
+          accuracy: acc[i].isNaN ? null : acc[i]),
+  ];
+  final stays = detectStays(pts, params: params);
+  final out = Float64List(stays.length * 8);
+  for (var i = 0; i < stays.length; i++) {
+    final s = stays[i];
+    final o = i * 8;
+    out[o] = s.startMs.toDouble();
+    out[o + 1] = s.endMs.toDouble();
+    out[o + 2] = s.lat;
+    out[o + 3] = s.lng;
+    out[o + 4] = s.radiusM;
+    out[o + 5] = s.count.toDouble();
+    out[o + 6] = s.bridgedS.toDouble();
+    out[o + 7] = s.medianAccM;
+  }
+  return out;
 }

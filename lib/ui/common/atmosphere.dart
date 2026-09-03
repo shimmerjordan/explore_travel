@@ -62,6 +62,13 @@ class _AtmosphereState extends State<Atmosphere> with TickerProviderStateMixin {
     vsync: this,
     duration: const Duration(seconds: 120),
   );
+  // 画布真正吃的相位。_drift 每个 vsync（60 fps）都在变，但一圈漂 120 s、像素风
+  // 的运动本来就是格子化的，60 fps 重画纯属浪费——「更多 / 探索」页只要开着就
+  // 一直烧。这里把相位量化到 24 fps：只在跨档时才通知画布。控制器本身保留，
+  // reduceMotion 的停 / 起和 120 s 无缝循环一点不动。
+  final ValueNotifier<double> _phase = ValueNotifier(0);
+  static const _phaseSteps = 120 * 24; // 一圈 120 s × 24 fps
+  int _phaseStep = -1;
   // Eases pointer influence in on touch, out on release.
   late final AnimationController _influence = AnimationController(
     vsync: this,
@@ -71,9 +78,17 @@ class _AtmosphereState extends State<Atmosphere> with TickerProviderStateMixin {
   final List<_Mote> _motes = [];
   Offset? _pointer; // normalized 0..1
 
+  void _onDrift() {
+    final step = (_drift.value * _phaseSteps).floor();
+    if (step == _phaseStep) return;
+    _phaseStep = step;
+    _phase.value = _drift.value;
+  }
+
   @override
   void initState() {
     super.initState();
+    _drift.addListener(_onDrift);
     final rnd = math.Random(7);
     const pick = _pick;
     for (var i = 0; i < 34; i++) {
@@ -97,6 +112,7 @@ class _AtmosphereState extends State<Atmosphere> with TickerProviderStateMixin {
   void dispose() {
     _drift.dispose();
     _influence.dispose();
+    _phase.dispose();
     super.dispose();
   }
 
@@ -105,8 +121,8 @@ class _AtmosphereState extends State<Atmosphere> with TickerProviderStateMixin {
     if (box is! RenderBox || !box.hasSize) return;
     final s = box.size;
     if (s.width <= 0 || s.height <= 0) return;
-    // No setState: the drift controller already repaints every frame, so the
-    // painter picks this up next tick without an extra rebuild.
+    // No setState: the 24 fps phase tick already repaints, so the painter
+    // picks this up within one tick (≤ 42 ms) without an extra rebuild.
     _pointer = Offset(local.dx / s.width, local.dy / s.height);
   }
 
@@ -123,12 +139,13 @@ class _AtmosphereState extends State<Atmosphere> with TickerProviderStateMixin {
 
     final paint = RepaintBoundary(
       child: AnimatedBuilder(
-        animation: Listenable.merge([_drift, _influence]),
+        // 听量化后的 _phase 而不是 _drift 本身，否则又回到每帧重画。
+        animation: Listenable.merge([_phase, _influence]),
         builder: (_, __) => CustomPaint(
           isComplex: true,
           willChange: !reduceMotion,
           painter: _AtmospherePainter(
-            p: reduceMotion ? 0.16 : _drift.value,
+            p: reduceMotion ? 0.16 : _phase.value,
             motes: _motes,
             pointer: reduceMotion ? null : _pointer,
             influence: reduceMotion ? 0 : _influence.value,

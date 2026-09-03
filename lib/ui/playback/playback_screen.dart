@@ -7,6 +7,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
+import 'package:flutter/scheduler.dart' show Ticker;
 import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
@@ -516,14 +517,41 @@ class _PlayerScreen extends ConsumerStatefulWidget {
   ConsumerState<_PlayerScreen> createState() => _PlayerScreenState();
 }
 
-class _PlayerScreenState extends ConsumerState<_PlayerScreen> {
+class _PlayerScreenState extends ConsumerState<_PlayerScreen>
+    with SingleTickerProviderStateMixin {
   late final MergedTimeline _tl = MergedTimeline(widget.sessions);
   final MapController _mapCtrl = MapController();
   final GlobalKey _captureKey = GlobalKey();
 
-  /// Position on the virtual (gap-free) timeline.
-  Duration _cursor = Duration.zero;
+  /// Position on the virtual (gap-free) timeline. 放在 ValueNotifier 里而不是
+  /// 普通字段：播放时它每帧都变，只让真正跟着动的几块（轨迹 / 头部图层、进度条
+  /// 与时间标签）经 ValueListenableBuilder 重建，整页 Scaffold 不再 setState。
+  final ValueNotifier<Duration> _cursor = ValueNotifier(Duration.zero);
+
+  /// 轨迹层专用的低频光标：只在 [_cursor] 跨过 125 ms 档时才跟进（≈8 Hz）。
+  /// 头部圆点与进度条仍吃 30 Hz 的 [_cursor]，肉眼看到的是它们在动；线本身
+  /// 每次一变，PolylineLayer 就要把全部点重新投影 + 抽稀，合并回放里两千多点
+  /// 30 次/秒重投影是回放期间 UI isolate 上最重的一笔——线每秒长 8 次和 30 次
+  /// 看不出区别，CPU 却差近 4 倍。
+  final ValueNotifier<Duration> _trailCursor = ValueNotifier(Duration.zero);
+  static const _trailStepMs = 125;
   bool _playing = false;
+
+  /// 推进虚拟时钟的 Ticker。用 createTicker 而不是 Future.delayed 循环：跟 vsync
+  /// 对齐，且路由被盖住 / 不可见时 TickerMode 会自动静音，不会在后台空转。
+  /// 在 initState 里建（不懒建），免得从没播过就 dispose 时才首次创建它。
+  late final Ticker _ticker;
+  Duration _lastElapsed = Duration.zero;
+
+  /// 最多每 30 ms 发布一次光标（≈ 原来 Future.delayed 循环的 30 次/秒）。跟满
+  /// vsync 没有意义：polylines 一换，PolylineLayer 就把全部点重新投影 + 抽稀
+  /// （flutter_map 的缓存在 didUpdateWidget 里整个作废），长途合并回放上这是
+  /// 回放期间最重的一笔，别把它翻倍到 60/120 Hz。
+  static const _minPublishInterval = Duration(milliseconds: 30);
+
+  /// 单次最多按这么多墙钟时间推进。更长的间隔不是卡顿就是被盖住 / 切后台又回来
+  /// （静音期间 Ticker 的 elapsed 照样累计），别让轨迹一下蹿出去。
+  static const _maxFrameGap = Duration(milliseconds: 100);
 
   /// Real-time multiplier: virtual seconds advanced per wall-clock second.
   double _speed = 128;
@@ -546,13 +574,23 @@ class _PlayerScreenState extends ConsumerState<_PlayerScreen> {
       _tl.realStart.month != _tl.realEnd.month ||
       _tl.realStart.day != _tl.realEnd.day;
 
-  DateTime get _real => _tl.realAt(_cursor);
-
   @override
   void initState() {
     super.initState();
+    _ticker = createTicker(_onTick);
+    _cursor.addListener(_syncTrailCursor);
     _loadJournals();
     _loadPeerTrails();
+  }
+
+  @override
+  void dispose() {
+    _ticker.dispose();
+    _cursor.removeListener(_syncTrailCursor);
+    _cursor.dispose();
+    _trailCursor.dispose();
+    _mapCtrl.dispose();
+    super.dispose();
   }
 
   /// Journals / peers "belong" to the replay when they fall inside one of
@@ -639,7 +677,6 @@ class _PlayerScreenState extends ConsumerState<_PlayerScreen> {
   @override
   Widget build(BuildContext context) {
     final s = ref.watch(settingsProvider);
-    final real = _real;
     final title = widget.sessions.length > 1
         ? '${widget.sessions.length} 段合并回放'
         : DateFormat('yyyy-MM-dd HH:mm').format(_tl.realStart);
@@ -730,70 +767,13 @@ class _PlayerScreenState extends ConsumerState<_PlayerScreen> {
                   customOsmUrl: s.customOsmTileUrl,
                   ovitalUrl: s.ovitalTileUrl,
                 ),
-                PolylineLayer(polylines: [
-                  for (final sess in widget.sessions)
-                    Polyline(
-                      points: sess.pathUntil(real).map(_toDisplay).toList(),
-                      color: _styleOf(widget.layers, sess.layerId).color,
-                      strokeWidth: 4,
-                    ),
-                  // Peer trails — clipped to the current playback time so
-                  // they sweep alongside the user's own trail rather than
-                  // appearing all at once.
-                  if (_showPeers)
-                    for (final entry in _peerTrails.entries)
-                      Polyline(
-                        points: entry.value
-                            .where((p) => !p.time.isAfter(real))
-                            .map((p) => _toDisplay(LatLng(p.lat, p.lng)))
-                            .toList(),
-                        color: _peerColor(entry.key).withValues(alpha: 0.85),
-                        strokeWidth: 3,
-                      ),
-                ]),
-                // Peer "where they are now" markers — one per peer, at the
-                // last location ≤ current playback time.
-                if (_showPeers && _peerTrails.isNotEmpty)
-                  MarkerLayer(markers: [
-                    for (final entry in _peerTrails.entries) ...[
-                      () {
-                        final upTo = entry.value
-                            .where((p) => !p.time.isAfter(real))
-                            .toList();
-                        if (upTo.isEmpty) return null;
-                        final last = upTo.last;
-                        final label = last.peerName.isNotEmpty
-                            ? last.peerName
-                            : entry.key.substring(
-                                0, math.min(4, entry.key.length));
-                        return Marker(
-                          point: _toDisplay(LatLng(last.lat, last.lng)),
-                          width: 32,
-                          height: 32,
-                          child: Tooltip(
-                            message: label,
-                            child: Container(
-                              decoration: BoxDecoration(
-                                color: _peerColor(entry.key),
-                                shape: BoxShape.circle,
-                                border:
-                                    Border.all(color: Colors.white, width: 2),
-                              ),
-                              alignment: Alignment.center,
-                              child: Text(
-                                label.characters.first,
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w700,
-                                ),
-                              ),
-                            ),
-                          ),
-                        );
-                      }(),
-                    ].whereType<Marker>(),
-                  ]),
+                // 随播放头移动的图层单独听 _cursor 重建；底图和手账气泡不动。
+                // 分两个 builder 夹着手账层，是为了保住原来的叠放顺序（头部圆点
+                // 压在气泡之上）。
+                ValueListenableBuilder<Duration>(
+                  valueListenable: _trailCursor,
+                  builder: (_, cursor, __) => _trailLayers(_tl.realAt(cursor)),
+                ),
                 if (_showJournals && _journalsInWindow.isNotEmpty)
                   MarkerLayer(
                     markers: [
@@ -824,34 +804,14 @@ class _PlayerScreenState extends ConsumerState<_PlayerScreen> {
                         ),
                     ],
                   ),
-                // One head dot per trail that has started, in its layer
-                // colour; trails still to come have no dot yet.
-                MarkerLayer(markers: [
-                  for (final sess in widget.sessions)
-                    if (sess.positionAt(real) case final pos?)
-                      Marker(
-                        point: _toDisplay(pos),
-                        width: 24,
-                        height: 24,
-                        child: Container(
-                          decoration: BoxDecoration(
-                            color: _styleOf(widget.layers, sess.layerId).color,
-                            shape: BoxShape.circle,
-                            border: Border.all(color: Colors.white, width: 2.5),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.black.withValues(alpha: 0.3),
-                                blurRadius: 6,
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                ]),
+                ValueListenableBuilder<Duration>(
+                  valueListenable: _cursor,
+                  builder: (_, cursor, __) => _headLayer(_tl.realAt(cursor)),
+                ),
               ],
             ),
           ),
-          if (!_exporting) _transportBar(real),
+          if (!_exporting) _transportBar(),
           Positioned(
             left: 16,
             right: 16,
@@ -865,7 +825,104 @@ class _PlayerScreenState extends ConsumerState<_PlayerScreen> {
     );
   }
 
-  Widget _transportBar(DateTime real) {
+  /// 画到 [real] 为止的轨迹：本人各段的线、队友的线，以及队友「现在在哪」的点。
+  /// 这几层每帧都要重建，所以从 build() 里拆出来只听 _cursor。
+  Widget _trailLayers(DateTime real) {
+    // 不裁剪：只是把两层打包成一个 child 放进 FlutterMap 的 Stack，裁剪交给
+    // 地图本身，和原先直接平铺在 children 里时一样。
+    return Stack(clipBehavior: Clip.none, children: [
+      PolylineLayer(polylines: [
+        for (final sess in widget.sessions)
+          Polyline(
+            points: sess.pathUntil(real).map(_toDisplay).toList(),
+            color: _styleOf(widget.layers, sess.layerId).color,
+            strokeWidth: 4,
+          ),
+        // Peer trails — clipped to the current playback time so
+        // they sweep alongside the user's own trail rather than
+        // appearing all at once.
+        if (_showPeers)
+          for (final entry in _peerTrails.entries)
+            Polyline(
+              points: entry.value
+                  .where((p) => !p.time.isAfter(real))
+                  .map((p) => _toDisplay(LatLng(p.lat, p.lng)))
+                  .toList(),
+              color: _peerColor(entry.key).withValues(alpha: 0.85),
+              strokeWidth: 3,
+            ),
+      ]),
+      // Peer "where they are now" markers — one per peer, at the
+      // last location ≤ current playback time.
+      if (_showPeers && _peerTrails.isNotEmpty)
+        MarkerLayer(markers: [
+          for (final entry in _peerTrails.entries) ...[
+            () {
+              final upTo =
+                  entry.value.where((p) => !p.time.isAfter(real)).toList();
+              if (upTo.isEmpty) return null;
+              final last = upTo.last;
+              final label = last.peerName.isNotEmpty
+                  ? last.peerName
+                  : entry.key.substring(0, math.min(4, entry.key.length));
+              return Marker(
+                point: _toDisplay(LatLng(last.lat, last.lng)),
+                width: 32,
+                height: 32,
+                child: Tooltip(
+                  message: label,
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: _peerColor(entry.key),
+                      shape: BoxShape.circle,
+                      border: Border.all(color: Colors.white, width: 2),
+                    ),
+                    alignment: Alignment.center,
+                    child: Text(
+                      label.characters.first,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            }(),
+          ].whereType<Marker>(),
+        ]),
+    ]);
+  }
+
+  /// One head dot per trail that has started, in its layer colour; trails
+  /// still to come have no dot yet.
+  Widget _headLayer(DateTime real) {
+    return MarkerLayer(markers: [
+      for (final sess in widget.sessions)
+        if (sess.positionAt(real) case final pos?)
+          Marker(
+            point: _toDisplay(pos),
+            width: 24,
+            height: 24,
+            child: Container(
+              decoration: BoxDecoration(
+                color: _styleOf(widget.layers, sess.layerId).color,
+                shape: BoxShape.circle,
+                border: Border.all(color: Colors.white, width: 2.5),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.3),
+                    blurRadius: 6,
+                  ),
+                ],
+              ),
+            ),
+          ),
+    ]);
+  }
+
+  Widget _transportBar() {
     final totalMs = math.max(1, _tl.total.inMilliseconds);
     return Positioned(
       left: 16,
@@ -899,31 +956,42 @@ class _PlayerScreenState extends ConsumerState<_PlayerScreen> {
               ),
             ),
             const SizedBox(width: 8),
+            // 进度条 + 时间标签是这一栏里唯二随播放头动的东西，只有它们听 _cursor。
             Expanded(
-              child: SliderTheme(
-                data: SliderThemeData(
-                  thumbShape:
-                      const RoundSliderThumbShape(enabledThumbRadius: 6),
-                  overlayShape:
-                      const RoundSliderOverlayShape(overlayRadius: 14),
-                  activeTrackColor: const Color(0xFF26A69A),
-                  inactiveTrackColor: Colors.white24,
-                  thumbColor: Colors.white,
-                  trackHeight: 3,
-                ),
-                child: Slider(
-                  value: _cursor.inMilliseconds.clamp(0, totalMs).toDouble(),
-                  min: 0,
-                  max: totalMs.toDouble(),
-                  onChanged: (v) => setState(
-                      () => _cursor = Duration(milliseconds: v.round())),
-                ),
+              child: ValueListenableBuilder<Duration>(
+                valueListenable: _cursor,
+                builder: (_, cursor, __) => Row(children: [
+                  Expanded(
+                    child: SliderTheme(
+                      data: SliderThemeData(
+                        thumbShape:
+                            const RoundSliderThumbShape(enabledThumbRadius: 6),
+                        overlayShape:
+                            const RoundSliderOverlayShape(overlayRadius: 14),
+                        activeTrackColor: const Color(0xFF26A69A),
+                        inactiveTrackColor: Colors.white24,
+                        thumbColor: Colors.white,
+                        trackHeight: 3,
+                      ),
+                      child: Slider(
+                        value:
+                            cursor.inMilliseconds.clamp(0, totalMs).toDouble(),
+                        min: 0,
+                        max: totalMs.toDouble(),
+                        onChanged: (v) =>
+                            _cursor.value = Duration(milliseconds: v.round()),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  Text(
+                      DateFormat(_multiDay ? 'MM-dd HH:mm' : 'HH:mm:ss')
+                          .format(_tl.realAt(cursor)),
+                      style: const TextStyle(
+                          color: Colors.white70, fontSize: 11)),
+                ]),
               ),
             ),
-            const SizedBox(width: 4),
-            Text(
-                DateFormat(_multiDay ? 'MM-dd HH:mm' : 'HH:mm:ss').format(real),
-                style: const TextStyle(color: Colors.white70, fontSize: 11)),
             const SizedBox(width: 8),
             PopupMenuButton<double>(
               initialValue: _speed,
@@ -992,30 +1060,53 @@ class _PlayerScreenState extends ConsumerState<_PlayerScreen> {
 
   void _togglePlay() {
     if (_tl.total <= Duration.zero) return;
-    if (!_playing && _cursor >= _tl.total) _cursor = Duration.zero;
-    setState(() => _playing = !_playing);
-    if (_playing) _run();
+    if (!_playing && _cursor.value >= _tl.total) _cursor.value = Duration.zero;
+    _setPlaying(!_playing);
   }
 
-  /// Advance the virtual clock by wall time × speed, ~30 updates/s.
-  Future<void> _run() async {
-    final sw = Stopwatch()..start();
-    while (_playing && mounted && !_exporting) {
-      await Future.delayed(const Duration(milliseconds: 33));
-      if (!mounted || !_playing || _exporting) break;
-      final dt = sw.elapsed;
-      sw.reset();
-      var next = _cursor + dt * _speed;
-      final done = next >= _tl.total;
-      if (done) next = _tl.total;
-      setState(() {
-        _cursor = next;
-        if (done) _playing = false;
-      });
-      if (_follow) {
-        final head = _leadHead(_tl.realAt(next));
-        if (head != null) _mapCtrl.move(head, _mapCtrl.camera.zoom);
-      }
+  /// 轨迹光标按 125 ms 档跟进 [_cursor]；停播、拖动、到末尾这些"落点"必须立刻
+  /// 对齐，否则线会停在上一档、差最多 125 ms 的虚拟时长。
+  void _syncTrailCursor({bool force = false}) {
+    final c = _cursor.value;
+    if (force ||
+        !_playing ||
+        c.inMilliseconds ~/ _trailStepMs !=
+            _trailCursor.value.inMilliseconds ~/ _trailStepMs) {
+      _trailCursor.value = c;
+    }
+  }
+
+  /// 播放态与 Ticker 同进同退：_playing 为真 ⇔ Ticker 在跑。setState 只为了换
+  /// 播放 / 暂停按钮的图标。
+  void _setPlaying(bool v) {
+    if (v == _playing) return;
+    if (v) {
+      // Ticker 的 elapsed 从 start() 起算，差分基准跟着归零。
+      _lastElapsed = Duration.zero;
+      _ticker.start();
+    } else {
+      _ticker.stop();
+    }
+    setState(() => _playing = v);
+    if (!v) _syncTrailCursor(force: true);
+  }
+
+  /// 每个 vsync 被叫一次：虚拟时钟按墙钟 × 倍率推进，写进 _cursor 让动的图层自己
+  /// 重建。不足 _minPublishInterval 的帧先跳过，墙钟差分留到下一帧一起算。
+  void _onTick(Duration elapsed) {
+    if (_exporting) return; // 导出时帧由 _captureFrame 逐帧摆，不许抢
+    var dt = elapsed - _lastElapsed;
+    if (dt < _minPublishInterval) return;
+    _lastElapsed = elapsed;
+    if (dt > _maxFrameGap) dt = _maxFrameGap;
+    var next = _cursor.value + dt * _speed;
+    final done = next >= _tl.total;
+    if (done) next = _tl.total;
+    _cursor.value = next;
+    if (done) _setPlaying(false);
+    if (_follow) {
+      final head = _leadHead(_tl.realAt(next));
+      if (head != null) _mapCtrl.move(head, _mapCtrl.camera.zoom);
     }
   }
 
@@ -1051,8 +1142,8 @@ class _PlayerScreenState extends ConsumerState<_PlayerScreen> {
     );
     if (plan == null || !mounted) return;
 
+    _setPlaying(false); // 停掉 Ticker，导出期间帧全由 _captureFrame 摆
     setState(() {
-      _playing = false;
       _exporting = true;
       _exportCancel = false;
       _exportProgress = 0;
@@ -1078,7 +1169,7 @@ class _PlayerScreenState extends ConsumerState<_PlayerScreen> {
     final dir = await getApplicationDocumentsDirectory();
     final stamp = DateFormat('yyyyMMdd_HHmmss').format(DateTime.now());
     final outPath = p.join(dir.path, 'exports', 'replay_$stamp.mp4');
-    final savedCursor = _cursor;
+    final savedCursor = _cursor.value;
 
     ExportResult? result;
     Object? error;
@@ -1098,10 +1189,8 @@ class _PlayerScreenState extends ConsumerState<_PlayerScreen> {
       error = e;
     }
     if (!mounted) return;
-    setState(() {
-      _exporting = false;
-      _cursor = savedCursor;
-    });
+    _cursor.value = savedCursor;
+    setState(() => _exporting = false);
     if (error != null) {
       _toast('导出失败：$error');
       return;
@@ -1119,7 +1208,9 @@ class _PlayerScreenState extends ConsumerState<_PlayerScreen> {
   /// Show frame [t], wait for it to be painted, read the pixels back.
   Future<RawFrame?> _captureFrame(Duration t, double pixelRatio) async {
     if (!mounted) return null;
-    setState(() => _cursor = t);
+    // 只动 _cursor：听它的图层会自己标脏并排一帧；endOfFrame 在空闲时也会
+    // 主动排一帧，所以 t 没变时同样能等到一次绘制。
+    _cursor.value = t;
     await WidgetsBinding.instance.endOfFrame;
     if (!mounted) return null;
     final boundary = _captureKey.currentContext?.findRenderObject()

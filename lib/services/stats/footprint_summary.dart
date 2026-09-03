@@ -16,18 +16,34 @@ class FootprintSummary {
   final DateTime? first;
   final DateTime? last;
 
+  /// yyyy-mm-dd → countries with at least one fix that day (sorted). Empty
+  /// when the input carried no [CountryBoxTable].
+  final Map<String, List<String>> dayCountries;
+
   const FootprintSummary({
     required this.dailyMeters,
     required this.hourly,
     required this.pointCount,
     required this.first,
     required this.last,
+    this.dayCountries = const {},
   });
 
   static const empty = FootprintSummary(
       dailyMeters: {}, hourly: [], pointCount: 0, first: null, last: null);
 
   double get totalMeters => dailyMeters.values.fold(0.0, (a, b) => a + b);
+
+  /// Country → number of days with a fix there (Dawarich: "≥1 point that day").
+  Map<String, int> get daysPerCountry {
+    final out = <String, int>{};
+    for (final cs in dayCountries.values) {
+      for (final c in cs) {
+        out[c] = (out[c] ?? 0) + 1;
+      }
+    }
+    return out;
+  }
 
   double metersInYear(int year) {
     final p = '$year-';
@@ -99,6 +115,7 @@ class FootprintSummary {
         'points': pointCount,
         'first': first?.millisecondsSinceEpoch,
         'last': last?.millisecondsSinceEpoch,
+        'dayCountries': dayCountries,
       };
 
   static FootprintSummary fromJson(Map<String, dynamic> j) => FootprintSummary(
@@ -112,7 +129,69 @@ class FootprintSummary {
         last: j['last'] == null
             ? null
             : DateTime.fromMillisecondsSinceEpoch((j['last'] as num).toInt()),
+        // Snapshots written before this field existed simply have none.
+        dayCountries: (j['dayCountries'] as Map?)?.map((k, v) => MapEntry(
+                k.toString(), (v as List).map((e) => e.toString()).toList())) ??
+            const {},
       );
+}
+
+/// Coarse lat/lng → country table in a form `compute()` can carry: parallel
+/// arrays, nothing but strings and doubles.
+///
+/// 与 `CountryLookup` 读的是同一份 assets/boundaries/countries.json，判定规则
+/// 也相同（取面积最小的包含框；都不含则「未知」→ 这里返回 null）。不直接把
+/// CountryLookup 递进 isolate，是因为它的框表是私有字段、又挂着 Flutter 资源
+/// 加载；统计这边只要「坐标 → 国家名」一件事，平行数组既能原样进 compute() 的
+/// 入参，也让这份逻辑保持纯 Dart、测试可以喂一张假表。
+class CountryBoxTable {
+  final List<String> names;
+
+  /// n × 4: minLat, minLng, maxLat, maxLng — the order `bbox` uses in the asset.
+  final Float64List bounds;
+  const CountryBoxTable(this.names, this.bounds);
+
+  static final empty = CountryBoxTable(const [], Float64List(0));
+
+  /// Parse the asset document: `{"countries": {"<name>": {"bbox": [4 nums]}}}`.
+  /// Entries with a short bbox are skipped, exactly as `CountryLookup` does.
+  factory CountryBoxTable.fromCountriesJson(Map<String, dynamic> j) {
+    final countries = (j['countries'] as Map?)?.cast<String, dynamic>() ??
+        const <String, dynamic>{};
+    final names = <String>[];
+    final bounds = <double>[];
+    for (final e in countries.entries) {
+      final bbox = ((e.value as Map)['bbox'] as List?)?.cast<num>();
+      if (bbox == null || bbox.length < 4) continue;
+      names.add(e.key);
+      bounds.addAll([
+        bbox[0].toDouble(),
+        bbox[1].toDouble(),
+        bbox[2].toDouble(),
+        bbox[3].toDouble(),
+      ]);
+    }
+    return CountryBoxTable(names, Float64List.fromList(bounds));
+  }
+
+  int get length => names.length;
+
+  /// Smallest-area box containing the point; null when none does.
+  String? countryAt(double lat, double lng) {
+    var best = -1;
+    var bestArea = double.infinity;
+    for (var i = 0; i < names.length; i++) {
+      final o = i << 2;
+      if (lat < bounds[o] || lat > bounds[o + 2]) continue;
+      if (lng < bounds[o + 1] || lng > bounds[o + 3]) continue;
+      final area = (bounds[o + 2] - bounds[o]) * (bounds[o + 3] - bounds[o + 1]);
+      if (area < bestArea) {
+        bestArea = area;
+        best = i;
+      }
+    }
+    return best < 0 ? null : names[best];
+  }
 }
 
 /// Packed input: parallel arrays sorted by (layer, time) — what
@@ -125,7 +204,11 @@ class FootprintInput {
   /// Local-time offset (ms) to bucket UTC instants into calendar days. Passed
   /// in because isolates don't know the main isolate's timezone reliably.
   final int tzOffsetMs;
-  const FootprintInput(this.lat, this.lng, this.timeMs, this.layer, this.tzOffsetMs);
+
+  /// Optional: enables the days-per-country pass.
+  final CountryBoxTable? countries;
+  const FootprintInput(this.lat, this.lng, this.timeMs, this.layer, this.tzOffsetMs,
+      {this.countries});
 
   Map<String, Object> toMap() => {
         'lat': lat,
@@ -133,6 +216,8 @@ class FootprintInput {
         'timeMs': timeMs,
         'layer': layer,
         'tz': tzOffsetMs,
+        if (countries != null) 'countryNames': countries!.names,
+        if (countries != null) 'countryBounds': countries!.bounds,
       };
   static FootprintInput fromMap(Map<String, Object> m) => FootprintInput(
         m['lat'] as Float64List,
@@ -140,6 +225,10 @@ class FootprintInput {
         m['timeMs'] as Int64List,
         m['layer'] as Int32List,
         m['tz'] as int,
+        countries: m['countryNames'] == null
+            ? null
+            : CountryBoxTable((m['countryNames'] as List).cast<String>(),
+                m['countryBounds'] as Float64List),
       );
 }
 
@@ -157,13 +246,36 @@ FootprintSummary computeFootprint(FootprintInput input) {
     return FootprintSummary.dayKey(local);
   }
 
+  // Days per country: ONE bbox lookup per (day, 2-hour slot, layer) — a day
+  // counts for a country if any sample lands in it (Dawarich: "≥1 point that
+  // day"); >500 km/h fixes are already gone. 每个时段只查一次，是因为 bbox 查询
+  // 要扫整张表，几十万个点逐个查太贵；点已按（图层, 时间）排好序，所以同一
+  // 时段的点一定连续，记住上一个时段即可去重。时段号 = 本地毫秒 ~/ 2h，与
+  // 「本地日期 + 小时 ~/ 2」一一对应（UTC 日界正好落在 86400000 的整数倍上）。
+  final countries = input.countries;
+  final lookupCountries = countries != null && countries.length > 0;
+  final dayCountries = <String, Set<String>>{};
+  var lastSlot = -1, lastSlotLayer = 0;
+
   for (var i = 0; i < n; i++) {
     final t = input.timeMs[i];
     if (minT == null || t < minT) minT = t;
     if (maxT == null || t > maxT) maxT = t;
-    final local = DateTime.fromMillisecondsSinceEpoch(t + input.tzOffsetMs, isUtc: true);
+    final shifted = t + input.tzOffsetMs;
+    final local = DateTime.fromMillisecondsSinceEpoch(shifted, isUtc: true);
     hourly[local.hour]++;
     daily.putIfAbsent(FootprintSummary.dayKey(local), () => 0.0);
+    if (lookupCountries) {
+      final slot = shifted ~/ 7200000;
+      if (slot != lastSlot || input.layer[i] != lastSlotLayer) {
+        lastSlot = slot;
+        lastSlotLayer = input.layer[i];
+        final c = countries.countryAt(input.lat[i], input.lng[i]);
+        if (c != null) {
+          (dayCountries[FootprintSummary.dayKey(local)] ??= {}).add(c);
+        }
+      }
+    }
     if (i == 0 || input.layer[i] != input.layer[i - 1]) continue;
     final dt = t - input.timeMs[i - 1];
     if (dt <= 0 || dt > kMaxGapMs) continue;
@@ -182,5 +294,9 @@ FootprintSummary computeFootprint(FootprintInput input) {
     pointCount: n,
     first: DateTime.fromMillisecondsSinceEpoch(minT!),
     last: DateTime.fromMillisecondsSinceEpoch(maxT!),
+    // Sorted so the persisted snapshot is deterministic.
+    dayCountries: {
+      for (final e in dayCountries.entries) e.key: (e.value.toList()..sort()),
+    },
   );
 }

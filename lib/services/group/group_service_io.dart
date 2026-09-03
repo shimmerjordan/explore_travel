@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'p2p_crypto.dart';
 import 'frp_engine.dart';
 import 'frp_group_service_io.dart';
@@ -16,14 +17,20 @@ GroupDiagnostics get _diag => groupDiagnostics;
 
 /// Public interface — every transport (LAN/mDNS, ZeroTier, WebRTC) implements
 /// these methods. The provider in [providers.dart] calls [GroupService.create]
-/// with the user's selected transport; concrete classes are private to this
-/// library.
+/// with the user's selected transport; app code only ever constructs concrete
+/// classes through that factory (tests may construct them directly).
 abstract class GroupService {
   Stream<GroupMessage> get messages;
   Stream<List<GroupPeer>> get peers;
 
   Future<void> start();
   Future<void> stop();
+
+  /// 应用退后台 / 回前台时由 `GroupLifecycle` 调用。后台只把"发现 / 保活"类
+  /// 周期任务放慢（省电省流量），已建立的连接和收发路径不受影响；回前台
+  /// 立刻恢复全速。默认空实现：中继等本身节奏已经很省的 transport 不必理会。
+  /// 注意各实现都是 `implements`，不会继承这个默认体，需要自己写一份。
+  void setBackground(bool background) {}
 
   Future<void> broadcastLocation({
     required double lat,
@@ -163,7 +170,7 @@ abstract class GroupService {
         iceServers: iceServers,
       );
     }
-    return _LanGroupService(
+    return LanGroupService(
       selfId: selfId,
       selfName: selfName,
       groupId: groupId,
@@ -200,13 +207,21 @@ abstract class GroupService {
 ///     lexicographically-smaller peerId initiates.
 ///   - Actual data (chat, location, voice) flows over TCP. Wire format
 ///     unchanged.
-class _LanGroupService implements GroupService {
+///
+/// Public (not `_Lan…`) only so tests can construct it and read the cadence
+/// getters; app code still goes through [GroupService.create].
+class LanGroupService implements GroupService {
   static const int kPortBase = 47830;
   static const int kProbeCount = 5;
   static const int kDiscoveryPort = 47829;
   static const String _kMcastGroup = '239.42.42.42';
   static const _heartbeat = Duration(seconds: 8);
   static const _discoveryInterval = Duration(seconds: 4);
+  /// 后台节奏。beacon 只负责发现新成员，放到 30 s 无妨；hello 却兼做"在线"
+  /// 心跳——聊天页 / 私聊页 / 地图头像三处都按 lastSeen 超过 30 s 判为离线，
+  /// 所以后台 hello 必须留在 30 s 以内：取 20 s，给网络抖动留 10 s 余量。
+  static const _heartbeatBackground = Duration(seconds: 20);
+  static const _discoveryIntervalBackground = Duration(seconds: 30);
 
   final String selfId;
   final String selfName;
@@ -227,6 +242,10 @@ class _LanGroupService implements GroupService {
   Timer? _heartbeatTimer;
   Timer? _discoverTimer;
   Timer? _scanTimer;
+  bool _background = false;
+  /// 我们是否"认为"自己持有 MulticastLock。原生侧本身幂等，这个标志只是
+  /// 避免前后台来回切时重复走平台通道。
+  bool _mcastLockHeld = false;
 
   /// Hosts we've already TCP-poked this scan cycle. Cleared periodically so
   /// reachable peers that came online later get a fresh chance.
@@ -244,7 +263,7 @@ class _LanGroupService implements GroupService {
   @override
   Stream<List<GroupPeer>> get peers => _peersCtrl.stream;
 
-  _LanGroupService({
+  LanGroupService({
     required this.selfId,
     required this.selfName,
     required this.groupId,
@@ -258,6 +277,61 @@ class _LanGroupService implements GroupService {
       s.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '').padRight(1, 'g');
 
   String get _safeGroup => _safeId(groupId);
+
+  /// 当前应生效的 hello / beacon 周期（随前后台切换）。
+  @visibleForTesting
+  Duration get helloPeriod =>
+      _background ? _heartbeatBackground : _heartbeat;
+  @visibleForTesting
+  Duration get beaconPeriod =>
+      _background ? _discoveryIntervalBackground : _discoveryInterval;
+
+  @override
+  void setBackground(bool background) {
+    if (_background == background) return;
+    _background = background;
+    // 还没 start()：只记下标志，start() 会按它建 timer、决定要不要拿锁。
+    if (_server == null) return;
+    _startCadenceTimers();
+    // 后台释放 MulticastLock：持锁时 Wi-Fi 芯片不能进入多播过滤省电态，是
+    // 组队功能在安卓上最大的耗电项之一。代价只是暂时收不到别人的 beacon——
+    // 已建立的 TCP 连接、我们自己发的 beacon/hello 都不受影响。
+    if (background) {
+      _releaseMulticastLock();
+    } else {
+      _acquireMulticastLock();
+      // 回前台立刻补一发：后台期间新上线的成员靠这一发 beacon 找到我们，
+      // 老成员的 lastSeen 也马上刷新，不用等下一个周期。
+      _broadcastBeacon();
+      _broadcastHello();
+    }
+  }
+
+  /// 按当前周期（重新）建 hello / beacon 两个周期 timer。start() 与前后台
+  /// 切换共用同一条路径，避免两处各写一遍周期。
+  void _startCadenceTimers() {
+    _heartbeatTimer?.cancel();
+    _discoverTimer?.cancel();
+    _heartbeatTimer =
+        Timer.periodic(helloPeriod, (_) => _broadcastHello());
+    _discoverTimer =
+        Timer.periodic(beaconPeriod, (_) => _broadcastBeacon());
+  }
+
+  /// Critical for Android Wi-Fi: without this the radio drops incoming
+  /// multicast packets to save power. No-op on other platforms. start() 与
+  /// 回前台共用；后台由 [_releaseMulticastLock] 交还。
+  Future<void> _acquireMulticastLock() async {
+    if (_mcastLockHeld) return;
+    _mcastLockHeld = true;
+    await MulticastLock.acquire();
+  }
+
+  Future<void> _releaseMulticastLock() async {
+    if (!_mcastLockHeld) return;
+    _mcastLockHeld = false;
+    await MulticastLock.release();
+  }
 
   @override
   Future<void> start() async {
@@ -282,9 +356,8 @@ class _LanGroupService implements GroupService {
         'Started: selfId=$selfId, groupId="$groupId", safeGroup=$_safeGroup, '
         'tcpPort=$_port, crypto=${crypto != null ? "on" : "off"}');
 
-    // Critical for Android Wi-Fi: without this the radio drops incoming
-    // multicast packets to save power. No-op on other platforms.
-    await MulticastLock.acquire();
+    // 后台里被重建（例如后台改了设置）就先不拿锁，回前台时再拿。
+    if (!_background) await _acquireMulticastLock();
 
     try {
       _udp = await RawDatagramSocket.bind(
@@ -319,10 +392,7 @@ class _LanGroupService implements GroupService {
       _udp = null;
     }
 
-    _heartbeatTimer =
-        Timer.periodic(_heartbeat, (_) => _broadcastHello());
-    _discoverTimer =
-        Timer.periodic(_discoveryInterval, (_) => _broadcastBeacon());
+    _startCadenceTimers();
     // Active subnet scan as a belt-and-suspenders for networks where
     // multicast is silently dropped. Runs once now, then on an adaptive
     // schedule (see [_scheduleScan]).
@@ -392,7 +462,7 @@ class _LanGroupService implements GroupService {
     _peersCtrl.add(const []);
     await _server?.close();
     _server = null;
-    await MulticastLock.release();
+    await _releaseMulticastLock();
     _diag.info(_diagTag, 'Stopped');
   }
 
@@ -904,7 +974,7 @@ class _LanGroupService implements GroupService {
 }
 
 /// (anchorIp, cidrBits) → enumerate every host IP in that subnet (skipping
-/// network and broadcast addresses). Used by [_LanGroupService._scanLan].
+/// network and broadcast addresses). Used by [LanGroupService._scanLan].
 class _ScanAnchor {
   final String anchorIp;
   final int bits;

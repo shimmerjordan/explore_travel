@@ -26,7 +26,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 
 - 新增 `test/core/geo_math_test.dart`（与合并前 5 处实现数值一致性、FogEngine 像素投影逐位不变）、`test/ui/format_test.dart`。全量 518 通过。
 
-### 性能 / 功耗（第二轮，数据层与启动）
+### 性能 / 功耗（第二轮）
+
+数据层与启动：
 
 - 启动维护拆到 `lib/app/startup_maintenance.dart`：uuid 全表回填只在 schema 版本变化后跑一次（prefs 标记），孤儿图层自愈保留每次，8 次 `COUNT(*)` 探针仅 debug 构建或调试模式输出；新增 `peer_locations` 30 天 GC。
 - 新增 8 条幂等索引：`fog_tiles(layer_id, zoom, tile_x, tile_y)`、`journal_entries(time|layer_id|uuid)`、`track_points(lat, lng)`、`peer_locations(time)`、`fog_erases(layer_id)`。单测用 `EXPLAIN QUERY PLAN` 钉住不再全表扫描 / 临时排序。
@@ -34,7 +36,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 - 回放的队友轨迹按时间窗读取，不再全表读；迷雾全量加载加计时日志（真机 46879 行 ≈ 0.9 s，本机 128 ms，索引对全量读无影响——成本在行对象化）。
 - `LogBuffer` 只在 debug 构建或调试模式下安装（release 每条日志少一次分配与监听扫描）。
 
-测试新增 18 个（索引 / GC / 批写等价 / 启动维护），全量 533 通过。
+运行时功耗：
+
+- 地图页实现 `RouteAware`：被设置 / 备份 / 歌单等整页路由盖住时挂起自有 GPS 流与看门狗，返回时恢复（真机 `dumpsys location`：更多页上 HIGH_ACCURACY@10s 请求消失，返回后重新出现）。底部弹层 / 对话框 / 3D 热图 / 旅伴卡片不触发。
+- 组队传输后台降频（`GroupService.setBackground`，由 `GroupLifecycle` 按应用生命周期驱动，对讲进行中不动）：LAN beacon 4→30 s、hello 8→20 s 并释放 `MulticastLock`；WebDAV 信箱轮询 5→60 s；frp 未连通成员重连改 5/10/20/40/60 s 指数退避、名册刷新后台 60 s；relay 不变。
+- UI isolate 卸载：备份 zip 编码 / 解压与各模块 `jsonEncode`（>256 KB 走 `compute`，字节级与旧实现一致）、GPX/KML/KMZ/GeoJSON 解析（>64 KB）、热图快照的 popcount 预处理、足迹页的国家归属第二遍遍历（并入 `computeFootprint`）；首启到访检测一律 `compute`，地点表在月循环外只读一次，50 ms 忙等改 Future 链。
+- 队友渲染：头像 base64 只解码一次并复用同一 `MemoryImage`；轨迹由每人 ≤200 个 `CircleMarker` 改为一条 `Polyline`；只 `select` `peerOverrides`。
+- 回放：30 Hz `while + setState` 整页重建改为 `Ticker` + `ValueListenableBuilder` 只重建轨迹 / 头点 / 进度条，轨迹层再限到 8 Hz（PolylineLayer 每次都重投影全部点）；被路由盖住时 `TickerMode` 自动静音。真机合并回放（2209 点，128×，跟随相机）20 s CPU 13.6 → 12.5 s，收益有限：主要开销是跟随相机导致的底图瓦片加载。
+- REC 脉冲由 60 fps `AnimationController` 改为 275 ms `Timer` 走 8 相位三角波表（每档时长与量化前逐帧一致）；氛围层 60 → 24 fps（120 s 循环肉眼无差）。
+- `journal_screen` / `music_screen` / `favorites_map_screen` 不再在 `build()` 里新建 Future（多选 / 播放状态变化不再重查、不再闪 spinner）；顺带修掉歌单收藏页 `Dismissible` 删除后的断言。
+- Geocoding 反查缓存改为内存 memo + 2 s 防抖写回，兼容备份恢复直接改写 prefs 的路径。
+- `private_image_loader` 的 `Image.memory` 补 `cacheWidth`。
+
+测试新增 39 个（索引 / GC / 批写等价 / 启动维护 / 路由挂起 / 后台节奏 / 导入解析对等 / 热图 blob 路径 / 足迹国家归属 / 到访 isolate 路径 / geocode 缓存），全量 572 通过。
 
 ## [Unreleased] — 2026-08-27
 

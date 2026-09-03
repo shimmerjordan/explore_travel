@@ -31,17 +31,33 @@ class JournalScreen extends ConsumerStatefulWidget {
 class _JournalScreenState extends ConsumerState<JournalScreen> {
   final _searchCtrl = TextEditingController();
   String _query = '';
-  int _refresh = 0;
+
+  /// 列表查询只在这里持有。以前在 build() 里每次 new 一个 Future，FutureBuilder
+  /// 一看 future 换了就退回转圈并重查一遍——进多选、勾一条都会闪一下、查一次。
+  /// 现在只在搜索词变化或显式刷新（journalRefreshProvider 变动）时才重建。
+  late Future<List<JournalEntry>> _listFuture;
 
   /// Multi-select state for bulk management. Holds entry ids.
   final Set<int> _selected = {};
   bool _selectMode = false;
 
+  @override
+  void initState() {
+    super.initState();
+    _listFuture = _queryList();
+  }
+
+  Future<List<JournalEntry>> _queryList() {
+    final db = ref.read(dbProvider);
+    return _query.isEmpty ? db.recentJournal() : db.searchJournal(_query);
+  }
+
+  void _requery() => setState(() => _listFuture = _queryList());
+
   void _bumpRefresh() {
-    setState(() => _refresh++);
-    // Mirror the change to the map so its journal pins stay in sync — this
-    // is the path that was missing for photo-imported entries (they showed
-    // up in this list but never as pins).
+    // 本页列表靠 build() 里对 journalRefreshProvider 的监听重查；同一记号也
+    // 让地图的手账图钉跟着刷新——照片导入的条目以前就是缺了这条路径（列表里
+    // 有、地图上没有）。
     ref.read(journalRefreshProvider.notifier).state++;
   }
 
@@ -176,6 +192,11 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
   @override
   Widget build(BuildContext context) {
     final db = ref.watch(dbProvider);
+    // 手账在任何地方增删（本页、详情页、备份恢复、照片导入）都会拨这个记号，
+    // 这里跟着重查一次；别的 setState（多选、勾选）不碰 _listFuture。
+    ref.listen<int>(journalRefreshProvider, (_, __) {
+      if (mounted) _requery();
+    });
     return Scaffold(
       appBar: AppBar(
         leading: _selectMode
@@ -244,14 +265,19 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
                   borderSide: BorderSide.none,
                 ),
               ),
-              onSubmitted: (v) => setState(() => _query = v),
+              onSubmitted: (v) {
+                if (v == _query) return;
+                _query = v;
+                _requery();
+              },
             ),
           ),
         ),
       ),
       body: FutureBuilder<List<JournalEntry>>(
-        key: ValueKey('journal-$_refresh-$_query'),
-        future: _query.isEmpty ? db.recentJournal() : db.searchJournal(_query),
+        // 不再按 key 重建：future 换了 FutureBuilder 自己会重订阅，旧列表留到
+        // 新结果回来再换，省掉一次转圈闪烁。
+        future: _listFuture,
         builder: (context, snap) {
           if (!snap.hasData) {
             return const Center(child: CircularProgressIndicator());

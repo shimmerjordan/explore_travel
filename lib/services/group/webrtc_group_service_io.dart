@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:webdav_client/webdav_client.dart' as webdav;
 import 'p2p_crypto.dart';
@@ -26,6 +27,10 @@ import 'group_types.dart';
 /// P2P, no more WebDAV hits.
 class WebRtcGroupService implements GroupService {
   static const _kAnnounceInterval = Duration(seconds: 30);
+  /// 后台信箱轮询间隔。每次轮询是一次 PROPFIND（外加读/删）——信令只在建连
+  /// 时才有内容，已建好的 DataChannel 不再经过 WebDAV，放慢只影响新成员的
+  /// 接入速度。announce 30 s 不动：它是别人发现我们的唯一依据。
+  static const _kBackgroundPoll = Duration(seconds: 60);
 
   final String selfId;
   final String selfName;
@@ -43,6 +48,7 @@ class WebRtcGroupService implements GroupService {
   Timer? _pollTimer;
   Timer? _announceTimer;
   bool _running = false;
+  bool _background = false;
 
   /// peerId → connection bundle.
   final _conns = <String, _PeerConn>{};
@@ -97,11 +103,33 @@ class WebRtcGroupService implements GroupService {
       await _dav!.mkdirAll(_myMailbox);
     } catch (_) {}
     await _announce();
-    _pollTimer =
-        Timer.periodic(Duration(seconds: pollSec), (_) => _pollMailbox());
+    _startPollTimer();
     _announceTimer = Timer.periodic(_kAnnounceInterval, (_) => _announce());
     await _pollMailbox();
     await _connectKnownPeers();
+  }
+
+  /// 当前应生效的信箱轮询周期：前台用用户配置的 [pollSec]，后台放慢到
+  /// [_kBackgroundPoll]（用户本来就配得更慢的话尊重用户）。
+  @visibleForTesting
+  Duration get pollPeriod {
+    final fg = Duration(seconds: pollSec);
+    return _background && fg < _kBackgroundPoll ? _kBackgroundPoll : fg;
+  }
+
+  @override
+  void setBackground(bool background) {
+    if (_background == background) return;
+    _background = background;
+    // start() 之前只记标志，start() 会按它建 timer。
+    if (_running) _startPollTimer();
+  }
+
+  /// start() 与前后台切换共用；先 cancel 再建，start() 里等待 WebDAV 期间
+  /// 若恰好切了前后台也不会漏一个 timer 在外面。
+  void _startPollTimer() {
+    _pollTimer?.cancel();
+    _pollTimer = Timer.periodic(pollPeriod, (_) => _pollMailbox());
   }
 
   @override

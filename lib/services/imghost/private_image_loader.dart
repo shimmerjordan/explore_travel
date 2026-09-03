@@ -86,8 +86,24 @@ class PrivateAwareImage extends StatefulWidget {
 }
 
 class _PrivateAwareImageState extends State<PrivateAwareImage> {
+  /// 拿不到布局宽度时（全屏查看器、无约束的富文本内嵌）的解码宽度上限，
+  /// 物理像素：手机屏宽级别的清晰度，又不会把一张几千万像素的原图整张解进
+  /// ImageCache —— 那正是相册缩略图把迷雾瓦片挤出缓存的老问题（对照
+  /// map_screen 里手账气泡的 cacheWidth: 120）。
+  static const int kFallbackCacheWidth = 1080;
+
   Uint8List? _bytes;
   Object? _err;
+
+  /// 按屏幕上真正要画的像素数解码：逻辑宽 × devicePixelRatio。宽度未知就用
+  /// [kFallbackCacheWidth]；ResizeImage 默认不放大，小图不受影响。
+  static int _cacheWidthFor(BuildContext context, double? logicalWidth) {
+    if (logicalWidth == null || !logicalWidth.isFinite || logicalWidth <= 0) {
+      return kFallbackCacheWidth;
+    }
+    final dpr = MediaQuery.maybeDevicePixelRatioOf(context) ?? 2.0;
+    return (logicalWidth * dpr).ceil();
+  }
 
   @override
   void initState() {
@@ -168,13 +184,21 @@ class _PrivateAwareImageState extends State<PrivateAwareImage> {
         ),
       );
     }
-    return Image.memory(
-      _bytes!,
-      fit: widget.fit,
-      width: widget.width,
-      height: widget.height,
-      errorBuilder: (ctx, _, __) =>
-          widget.errorBuilder?.call(ctx) ?? const SizedBox.shrink(),
+    // No explicit width (rich-text embed, full-screen viewer) → take the width
+    // the parent actually gives us; unbounded → the fallback cap.
+    return LayoutBuilder(
+      builder: (ctx, constraints) => Image.memory(
+        _bytes!,
+        fit: widget.fit,
+        width: widget.width,
+        height: widget.height,
+        cacheWidth: _cacheWidthFor(
+            ctx,
+            widget.width ??
+                (constraints.hasBoundedWidth ? constraints.maxWidth : null)),
+        errorBuilder: (ctx, _, __) =>
+            widget.errorBuilder?.call(ctx) ?? const SizedBox.shrink(),
+      ),
     );
   }
 }

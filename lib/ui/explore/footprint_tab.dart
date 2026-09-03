@@ -3,13 +3,13 @@ import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../app/providers.dart';
 import '../../data/db/database.dart';
-import '../../services/geo/country_lookup.dart';
 import '../../services/stats/footprint_stats.dart';
 import '../../services/stats/footprint_summary.dart';
 import '../common/pixel.dart';
@@ -57,10 +57,25 @@ class _FootprintTabState extends ConsumerState<FootprintTab> {
     } catch (_) {}
   }
 
+  /// 与 CountryLookup 读同一份资源（rootBundle 会缓存字符串，二次加载几乎
+  /// 免费），转成能进 compute() 的平行数组。读不到就退成空表：国家一栏空着，
+  /// 别让整页统计跟着挂。
+  static Future<CountryBoxTable> _countryBoxes() async {
+    try {
+      final raw =
+          await rootBundle.loadString('assets/boundaries/countries.json');
+      return CountryBoxTable.fromCountriesJson(
+          jsonDecode(raw) as Map<String, dynamic>);
+    } catch (_) {
+      return CountryBoxTable.empty;
+    }
+  }
+
   Future<void> _load() async {
     final db = ref.read(dbProvider);
     final layers = await db.allLayers();
     final pts = await db.cleanPoints(layers.map((l) => l.id).toList());
+    final countries = await _countryBoxes();
     final n = pts.length;
     final lat = Float64List(n), lng = Float64List(n);
     final t = Int64List(n);
@@ -71,35 +86,17 @@ class _FootprintTabState extends ConsumerState<FootprintTab> {
       t[i] = pts[i].time.millisecondsSinceEpoch;
       layer[i] = pts[i].layerId;
     }
+    // Distances, calendar AND the days-per-country pass all run in the one
+    // isolate hop — the country pass used to be a second full walk over every
+    // point on the UI isolate, right after the compute() had returned.
     final input = FootprintInput(
-        lat, lng, t, layer, DateTime.now().timeZoneOffset.inMilliseconds);
+        lat, lng, t, layer, DateTime.now().timeZoneOffset.inMilliseconds,
+        countries: countries);
     final summary = kIsWeb
         ? computeFootprint(input)
         : FootprintSummary.fromJson(
             (await compute(computeFootprintFromMap, input.toMap()))
                 .map((k, v) => MapEntry(k, v)));
-
-    // Days per country: one sample per (day, 2-hour slot) → offline bbox
-    // lookup. A day counts for a country if any sample lands in it
-    // (Dawarich: "≥1 point that day"), fixes over 500 km/h are already gone.
-    final lookup = await CountryLookup.instance;
-    final dayCountries = <String, Set<String>>{};
-    String? lastSlot;
-    for (final p in pts) {
-      final slot =
-          '${FootprintSummary.dayKey(p.time)}|${p.time.hour ~/ 2}|${p.layerId}';
-      if (slot == lastSlot) continue;
-      lastSlot = slot;
-      final c = lookup.lookup(p.lat, p.lng).country;
-      if (c == '未知') continue;
-      (dayCountries[FootprintSummary.dayKey(p.time)] ??= {}).add(c);
-    }
-    final daysPerCountry = <String, int>{};
-    for (final set in dayCountries.values) {
-      for (final c in set) {
-        daysPerCountry[c] = (daysPerCountry[c] ?? 0) + 1;
-      }
-    }
 
     final places = await db.allPlaces();
     final visits = await db.visitsBetween(
@@ -107,7 +104,7 @@ class _FootprintTabState extends ConsumerState<FootprintTab> {
     if (!mounted) return;
     setState(() {
       _summary = summary;
-      _data = _Data(summary, daysPerCountry, places, visits);
+      _data = _Data(summary, summary.daysPerCountry, places, visits);
     });
     try {
       final p = await SharedPreferences.getInstance();

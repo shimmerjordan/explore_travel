@@ -171,6 +171,9 @@ class _ExploreJournalAppState extends ConsumerState<ExploreJournalApp> {
   GoRouter _makeRouter() => GoRouter(
     // Re-evaluate the redirect whenever auth state flips (login / logout).
     refreshListenable: ref.read(authControllerProvider),
+    // 地图页靠它感知「有整页路由压在自己上面」，好把 GPS 流停掉（MapScreen
+    // 是常驻首页，push 出去时并不会 dispose）。
+    observers: [mapRouteObserver],
     redirect: (context, state) {
       if (!kIsWeb) return null; // native is never gated
       // The whole policy lives in webAuthRedirect (unit-tested there): deny

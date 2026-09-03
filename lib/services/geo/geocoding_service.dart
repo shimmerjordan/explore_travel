@@ -53,9 +53,25 @@ class GeocodingService {
   static const _cellPrefsKey = 'geocode_cell_cache_v1';
   static const _grid = 0.01; // ~1.1 km on a side at the equator
 
+  /// 格缓存写回的合并窗口。预热 / 到访检测里网络反查常成串到来，每格都整包
+  /// jsonEncode + 落盘一次太浪费，攒一会儿一起写。
+  static const cacheWriteDelay = Duration(seconds: 2);
+
   final LearnedRegionsStore learned;
   final Dio _dio = guardedDio();
   AppSettings _settings;
+
+  // 格缓存的内存权威副本：首次用到时才从 prefs 解码一次，之后只改内存、延迟
+  // 写回。原先每次 resolve() 都 getString + 整包 jsonDecode，_persist 再解一次
+  // 编一次，缓存几千格后每个点都要付这笔钱。
+  Map<String, GeocodeResult>? _cells;
+  // 上次解码 / 写出的 prefs 原文。备份恢复、「清除地理编码缓存」按钮都绕过本类
+  // 直接改 prefs，靠它察觉外部改写：getString 返回的是同一个 String 对象，
+  // 比较走 identical 快路径，不用真的逐字符比。
+  String? _cellsRaw;
+  // 还没落盘的新格。外部改写触发重解时要叠回去，别把它们丢了。
+  final Map<String, GeocodeResult> _pending = {};
+  Timer? _flushTimer;
 
   GeocodingService(AppSettings settings, this.learned) : _settings = settings;
 
@@ -71,25 +87,68 @@ class GeocodingService {
     return '$qLat,$qLng';
   }
 
-  Future<Map<String, GeocodeResult>> _loadCache() async {
+  /// 当前格表（内存副本）。prefs 原文若被别处改了，就以 prefs 为准重解，再叠上
+  /// 本实例尚未落盘的格。
+  Future<Map<String, GeocodeResult>> _cache() async {
     final p = await SharedPreferences.getInstance();
     final raw = p.getString(_cellPrefsKey);
-    if (raw == null) return {};
+    final cells = _cells;
+    if (cells != null && raw == _cellsRaw) return cells;
+    final fresh =
+        raw == null ? <String, GeocodeResult>{} : decodeCellCache(raw);
+    fresh.addAll(_pending);
+    _cells = fresh;
+    _cellsRaw = raw;
+    return fresh;
+  }
+
+  /// prefs 原文 → 格表。单独拆出来是给测试数解码次数用的。
+  @protected
+  Map<String, GeocodeResult> decodeCellCache(String raw) {
     final m = jsonDecode(raw) as Map<String, dynamic>;
     return m.map((k, v) =>
         MapEntry(k, GeocodeResult.fromJson(v as Map<String, dynamic>)));
   }
 
-  Future<void> _saveCache(Map<String, GeocodeResult> m) async {
-    final p = await SharedPreferences.getInstance();
-    await p.setString(_cellPrefsKey,
-        jsonEncode(m.map((k, v) => MapEntry(k, v.toJson()))));
+  /// 把内存里的格表立刻写回 prefs。平时由 [cacheWriteDelay] 的定时器触发；
+  /// 显式调用用于收尾 / 测试。
+  Future<void> flush() async {
+    _flushTimer?.cancel();
+    _flushTimer = null;
+    if (_pending.isEmpty) return;
+    final cells = await _cache();
+    final wrote = Map.of(_pending);
+    final raw = jsonEncode(cells.map((k, v) => MapEntry(k, v.toJson())));
+    try {
+      final p = await SharedPreferences.getInstance();
+      // 先记原文再写：setString 会同步更新 prefs 的内存表，之后 _cache() 比对
+      // 就认得出这是自己写的。
+      _cellsRaw = raw;
+      await p.setString(_cellPrefsKey, raw);
+    } catch (e) {
+      debugPrint('[Geocoding] cache write failed: $e');
+      return; // 留在 _pending 里，下次再试
+    }
+    // 只清掉本次确实写进去的；写的当口又进来的新格留给下一轮。
+    for (final e in wrote.entries) {
+      if (identical(_pending[e.key], e.value)) _pending.remove(e.key);
+    }
   }
 
-  Future<int> cachedCellCount() async => (await _loadCache()).length;
+  /// 服务随 app 存活（provider 不销毁），这里只是给显式收尾一个口子。
+  Future<void> dispose() => flush();
+
+  Future<int> cachedCellCount() async => (await _cache()).length;
 
   Future<void> clearCache() async {
+    _flushTimer?.cancel();
+    _flushTimer = null;
+    _pending.clear();
     final p = await SharedPreferences.getInstance();
+    // remove 同步清掉 prefs 内存表里的键，之后 getString 是 null，与 _cellsRaw
+    // 一致，内存副本继续作数。
+    _cells = {};
+    _cellsRaw = null;
     await p.remove(_cellPrefsKey);
   }
 
@@ -99,7 +158,7 @@ class GeocodingService {
   /// background passes that don't want to spend the user's data plan.
   Future<GeocodeResult> resolve(double lat, double lng,
       {bool allowNetwork = true}) async {
-    final cache = await _loadCache();
+    final cache = await _cache();
     final k = _cellKey(lat, lng);
     final cached = cache[k];
     if (cached != null && !cached.isEmpty) {
@@ -112,27 +171,14 @@ class GeocodingService {
     }
 
     if (allowNetwork) {
-      // 2. Amap if configured.
-      if ((_settings.amapApiKey ?? '').isNotEmpty) {
+      final r = await lookupOnline(lat, lng);
+      if (r != null) {
         try {
-          final r = await _amap(lat, lng);
-          if (!r.isEmpty) {
-            await _persist(lat, lng, r);
-            return r;
-          }
-        } catch (e) {
-          debugPrint('[Geocoding] Amap failed: $e');
-        }
-      }
-      // 3. System geocoder.
-      try {
-        final r = await _system(lat, lng);
-        if (!r.isEmpty) {
           await _persist(lat, lng, r);
-          return r;
+        } catch (e) {
+          debugPrint('[Geocoding] cache/learned write failed: $e');
         }
-      } catch (e) {
-        debugPrint('[Geocoding] system geocoder failed: $e');
+        return r;
       }
     }
 
@@ -155,10 +201,36 @@ class GeocodingService {
     }
   }
 
+  /// 在线反查：高德（配了 key 时）→ 系统地理编码器，返回第一个非空结果，都没有
+  /// 就 null。拆成可覆写的方法是给测试一个不走网络的口子。
+  @protected
+  Future<GeocodeResult?> lookupOnline(double lat, double lng) async {
+    // 2. Amap if configured.
+    if ((_settings.amapApiKey ?? '').isNotEmpty) {
+      try {
+        final r = await _amap(lat, lng);
+        if (!r.isEmpty) return r;
+      } catch (e) {
+        debugPrint('[Geocoding] Amap failed: $e');
+      }
+    }
+    // 3. System geocoder.
+    try {
+      final r = await _system(lat, lng);
+      if (!r.isEmpty) return r;
+    } catch (e) {
+      debugPrint('[Geocoding] system geocoder failed: $e');
+    }
+    return null;
+  }
+
   Future<void> _persist(double lat, double lng, GeocodeResult r) async {
-    final cache = await _loadCache();
-    cache[_cellKey(lat, lng)] = r;
-    await _saveCache(cache);
+    final cells = await _cache();
+    final k = _cellKey(lat, lng);
+    cells[k] = r;
+    _pending[k] = r;
+    // 只改内存，落盘攒到一起（见 cacheWriteDelay）。
+    _flushTimer ??= Timer(cacheWriteDelay, () => unawaited(flush()));
     await learned.upsert(
       country: r.country,
       province: r.province,

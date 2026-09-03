@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'package:crypto/crypto.dart' as crypto_hash;
 import 'package:drift/drift.dart' show Value;
 import 'package:flutter/foundation.dart' show debugPrint, kIsWeb;
+import 'package:flutter/widgets.dart'
+    show AppLifecycleState, WidgetsBinding, WidgetsBindingObserver;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:uuid/uuid.dart';
@@ -16,6 +18,7 @@ import '../services/ai/tts_service.dart';
 import '../services/fog/fog_engine.dart';
 import '../services/group/group_service.dart';
 import '../services/group/group_sync_controller.dart';
+import '../services/group/ptt_controller.dart';
 import '../services/location/location_service.dart';
 import '../services/music/music_service.dart';
 import '../services/group/p2p_crypto.dart';
@@ -291,10 +294,19 @@ final privateChatLogProvider =
 /// connect/disconnect indicator and the setup-screen banner).
 final groupRunningProvider = StateProvider<bool>((ref) => false);
 
-class GroupLifecycle {
+/// 同时是 [WidgetsBindingObserver]：应用退后台就叫 transport 放慢
+/// 发现/保活节奏（见 [GroupService.setBackground]），回前台恢复。对讲进行中
+/// 不动——对方正在听，链路上不要有任何变数。
+class GroupLifecycle with WidgetsBindingObserver {
   final Ref ref;
   GroupService? _svc;
   bool _started = false;
+  bool _observing = false;
+  /// 应用当前是否在后台（paused / hidden / detached）。服务重建时据此让
+  /// 新实例直接以正确的节奏起步，不必等下一次生命周期事件。
+  bool _appBackgrounded = false;
+  /// 退后台时正赶上对讲：先不降频，用它每隔几秒回头看一眼，对讲结束再补。
+  Timer? _deferredBackground;
 
   /// Fallback returned by [service] when nothing is running. Re-used so the
   /// reference stays stable across calls.
@@ -316,6 +328,57 @@ class GroupLifecycle {
       _react(prev, next);
     });
     Future.microtask(() => _react(null, ref.read(settingsProvider)));
+    _startObserving();
+  }
+
+  void _startObserving() {
+    if (_observing) return;
+    _observing = true;
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  void _stopObserving() {
+    if (!_observing) return;
+    _observing = false;
+    WidgetsBinding.instance.removeObserver(this);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    switch (state) {
+      case AppLifecycleState.resumed:
+        _appBackgrounded = false;
+        _deferredBackground?.cancel();
+        _deferredBackground = null;
+        _svc?.setBackground(false);
+      case AppLifecycleState.paused:
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.detached:
+        _appBackgrounded = true;
+        _applyBackground();
+      case AppLifecycleState.inactive:
+        // 来电 / 通知栏下拉这类短暂失焦，不值得来回切节奏。
+        break;
+    }
+  }
+
+  /// 正在按住对讲（发送端）。接收端播放走的是已建立的连接，不受节奏影响，
+  /// 所以只看发送端。
+  bool get _pttActive => ref.read(pttControllerProvider).active;
+
+  /// 真正下发"进后台"。对讲中先跳过，改为每 5 s 复查一次——PTT 是按住说话，
+  /// 通常几秒内结束，这点轮询代价可以忽略；回前台或 dispose 时取消。
+  void _applyBackground() {
+    final svc = _svc;
+    if (svc == null || !_appBackgrounded) return;
+    if (_pttActive) {
+      _deferredBackground ??= Timer.periodic(
+          const Duration(seconds: 5), (_) => _applyBackground());
+      return;
+    }
+    _deferredBackground?.cancel();
+    _deferredBackground = null;
+    svc.setBackground(true);
   }
 
   Future<void> _react(AppSettings? prev, AppSettings next) async {
@@ -399,6 +462,14 @@ class GroupLifecycle {
     _started = true;
     final svc = _build();
     _svc = svc;
+    // 在 start() 之前就把前后台状态交给新实例：前台明确 setBackground(false)；
+    // 若此刻应用其实在后台（后台里改设置触发了重建），timer 直接按后台周期
+    // 建、MulticastLock 也不拿；对讲中则由复查 timer 稍后补上。
+    if (_appBackgrounded) {
+      _applyBackground();
+    } else {
+      svc.setBackground(false);
+    }
     try {
       await svc.start();
     } catch (e) {
@@ -491,6 +562,9 @@ class GroupLifecycle {
   }
 
   void dispose() {
+    _deferredBackground?.cancel();
+    _deferredBackground = null;
+    _stopObserving();
     stop();
   }
 }

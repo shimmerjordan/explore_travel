@@ -38,6 +38,14 @@ import '../journal/journal_screen.dart' as journal_ui;
 import '../import/track_import_flow.dart';
 import '../widgets/top_toast.dart';
 
+/// 地图页订阅的路由观察者，由 main.dart 挂到 GoRouter.observers 上。定义在
+/// 这里而不是入口文件，是为了让 map_screen 不必反向 import main.dart。
+///
+/// 泛型用 PageRoute 而不是 ModalRoute：只有整页路由（设置 / 备份 / 歌单 /
+/// 手账详情……）才算「盖住了地图」。底部弹层和对话框虽然也是 ModalRoute，
+/// 但地图还露在下面，为它们反复停 / 起 GPS 流只会多几次 provider 请求。
+final mapRouteObserver = RouteObserver<PageRoute<void>>();
+
 /// NOTE on 3D tilt: flutter_map is a 2D raster-tile widget — it has
 /// no concept of pitch / tilt / 3D buildings, and the entire camera
 /// system is a top-down LatLng + zoom + rotation. Adding "pinch
@@ -58,7 +66,7 @@ class MapScreen extends ConsumerStatefulWidget {
 }
 
 class _MapScreenState extends ConsumerState<MapScreen>
-    with WidgetsBindingObserver {
+    with WidgetsBindingObserver, RouteAware {
   final _mapCtrl = MapController();
   LatLng _center = const LatLng(30.6586, 104.0648);
   _EditMode _editMode = _EditMode.none;
@@ -109,6 +117,18 @@ class _MapScreenState extends ConsumerState<MapScreen>
   /// resident home route and is never disposed, so without this the
   /// high-accuracy stream + watchdog ran all night behind the lock screen.
   bool _lifecycleSuspended = false;
+
+  /// 另一条整页路由压在地图上面（context.push 进设置 / 备份 / 歌单……）。
+  /// MapScreen 是常驻首页、不会 dispose，所以仅靠 [_lifecycleSuspended] 时，
+  /// 用户在设置页停留多久，高精度 GPS 流 + 看门狗就在下面开多久。语义与
+  /// [_lifecycleSuspended] 相同、来源不同：两者任一为真都不开定位流。
+  /// 只由 [didPushNext] / [didPopNext] 翻转——3D 热图、旅伴卡片这类页内
+  /// 覆盖层不是路由，不会碰它。
+  bool _routeCovered = false;
+
+  /// 已向 [mapRouteObserver] 订阅的路由；didChangeDependencies 会因主题 /
+  /// MediaQuery 变化反复进入，靠它避免重复订阅。
+  PageRoute<void>? _subscribedRoute;
 
   /// Last reported fix accuracy in metres. Drives the signal-strength
   /// chip top-center on the map. `null` = we've never received a fix
@@ -411,22 +431,68 @@ class _MapScreenState extends ConsumerState<MapScreen>
       case AppLifecycleState.resumed:
         if (!_lifecycleSuspended) return;
         _lifecycleSuspended = false;
-        _startLocationStream();
+        _startLocationStream(); // 若仍被路由盖着，它自己会直接返回
       case AppLifecycleState.paused:
       case AppLifecycleState.hidden:
       case AppLifecycleState.detached:
         if (_lifecycleSuspended) return;
         _lifecycleSuspended = true;
-        _posSub?.cancel();
-        _posSub = null;
-        _liveSub?.cancel();
-        _liveSub = null;
-        _locRestart?.cancel();
-        _locWatchdog?.cancel();
-        _locWatchdog = null;
+        _stopLocationSources();
       case AppLifecycleState.inactive:
         break;
     }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // 只有整页路由才订阅（见 mapRouteObserver）。ModalRoute.of 会让本页依赖
+    // 路由状态，每次被盖 / 露出都会再进一次这里——同一路由不重订。
+    final route = ModalRoute.of(context);
+    if (route is PageRoute<void> && !identical(route, _subscribedRoute)) {
+      if (_subscribedRoute != null) mapRouteObserver.unsubscribe(this);
+      _subscribedRoute = route;
+      mapRouteObserver.subscribe(this, route);
+    }
+  }
+
+  /// 整页路由压上来（context.push 进设置 / 歌单 / 手账详情……）：只停定位
+  /// 相关的东西，队伍 / 迷雾 / 手账等订阅照旧。录制中也一样——录制管线自己
+  /// 的 GPS 流不受影响，这里丢的只是地图上的镜像，回来时重新接上。
+  @override
+  void didPushNext() {
+    if (_routeCovered) return;
+    _routeCovered = true;
+    _stopLocationSources();
+    _logRouteCover(on: false);
+  }
+
+  @override
+  void didPopNext() {
+    if (!_routeCovered) return;
+    _routeCovered = false;
+    _logRouteCover(on: true);
+    if (!_lifecycleSuspended) _startLocationStream();
+  }
+
+  /// 固定格式，方便在 logcat 里 grep 验证起停配对。
+  void _logRouteCover({required bool on}) {
+    if (!kDebugMode) return;
+    debugPrint(
+        '[MAP] location stream ${on ? 'resumed' : 'suspended'} (route covered)');
+  }
+
+  /// 撤掉本页所有定位来源：自有 GPS 流、录制镜像、断流退避重启、看门狗。
+  /// 后台 / 被路由盖住两条路都走这里；重新开启统一由 [_startLocationStream]。
+  void _stopLocationSources() {
+    _posSub?.cancel();
+    _posSub = null;
+    _liveSub?.cancel();
+    _liveSub = null;
+    _locRestart?.cancel();
+    _locRestart = null;
+    _locWatchdog?.cancel();
+    _locWatchdog = null;
   }
 
   /// The map's own (not-recording) stream: this only feeds the blue dot the
@@ -452,7 +518,8 @@ class _MapScreenState extends ConsumerState<MapScreen>
     _posSub = null;
     _liveSub?.cancel();
     _liveSub = null;
-    if (_lifecycleSuspended) return; // resumed() will call us again
+    // 后台 → resumed()、被路由盖住 → didPopNext() 会再叫我们一次。
+    if (_lifecycleSuspended || _routeCovered) return;
     if (ref.read(recordingActiveProvider)) {
       // Recording: the pipeline already owns a GPS stream (the foreground
       // service on Android, LocationService elsewhere). Mirror the points
@@ -515,7 +582,13 @@ class _MapScreenState extends ConsumerState<MapScreen>
     // 重订流 + 主动补一发 currentOnce，让 pin 立刻回来。（只在前台、
     // 非录制时存在；静止 3 分钟内不动作，别把“人没动”当成“流死了”。）
     _locWatchdog ??= Timer.periodic(const Duration(seconds: 60), (_) async {
-      if (!mounted || _simActive || kIsWeb || _lifecycleSuspended) return;
+      if (!mounted ||
+          _simActive ||
+          kIsWeb ||
+          _lifecycleSuspended ||
+          _routeCovered) {
+        return;
+      }
       final stale = _accuracyAt == null ||
           DateTime.now().difference(_accuracyAt!) >
               const Duration(minutes: 3);
@@ -547,6 +620,7 @@ class _MapScreenState extends ConsumerState<MapScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    if (_subscribedRoute != null) mapRouteObserver.unsubscribe(this);
     _recSub?.close();
     _liveSub?.cancel();
     _posSub?.cancel();
@@ -2632,30 +2706,39 @@ class _CenterRecFab extends StatefulWidget {
   State<_CenterRecFab> createState() => _CenterRecFabState();
 }
 
-class _CenterRecFabState extends State<_CenterRecFab>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _pulse = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 1100),
-  );
+class _CenterRecFabState extends State<_CenterRecFab> {
+  /// 脉冲是 4 档的「精灵图式」闪动，不是平滑呼吸。以前用 AnimationController
+  /// repeat(reverse) 1100 ms 再把 value 量化到 4 档：每秒 60 次 tick + 重建 +
+  /// 布局，画面上却只有 ~3.6 次变化。改成 275 ms 一步的 Timer 直接走这张
+  /// 三角波表——0 .25 .5 .75 .75 .5 .25 0——每一档的停留时长（两端 550 ms、
+  /// 中间 275 ms）与原先量化后的结果逐帧一致，但一秒只出 ~3.6 帧。
+  static const _kStep = Duration(milliseconds: 275);
+  static const _kLevels = <double>[0, .25, .5, .75, .75, .5, .25, 0];
+  Timer? _pulse;
+  int _phase = 0;
 
   @override
   void dispose() {
-    _pulse.dispose();
+    _pulse?.cancel();
     super.dispose();
   }
 
-  /// The pulse ticker only runs while recording. It used to `repeat()`
+  /// The pulse only runs while recording (and never under the system's
+  /// "disable animations" accessibility switch). It used to run
   /// unconditionally from construction — the home map (this widget's host)
   /// therefore never had an idle frame, and every one of those 60 frames/s
   /// re-composited the full-screen fog veil underneath.
   void _syncPulse(BuildContext context) {
-    final want = widget.recording && !MediaQuery.of(context).disableAnimations;
-    if (want && !_pulse.isAnimating) {
-      _pulse.repeat(reverse: true);
-    } else if (!want && _pulse.isAnimating) {
-      _pulse.stop();
-      _pulse.value = 0;
+    final want = widget.recording && !MediaQuery.disableAnimationsOf(context);
+    if (want && _pulse == null) {
+      _pulse = Timer.periodic(_kStep, (_) {
+        if (!mounted) return;
+        setState(() => _phase = (_phase + 1) % _kLevels.length);
+      });
+    } else if (!want && _pulse != null) {
+      _pulse!.cancel();
+      _pulse = null;
+      _phase = 0; // 已在 build 里，不必再 setState
     }
   }
 
@@ -2664,55 +2747,48 @@ class _CenterRecFabState extends State<_CenterRecFab>
     _syncPulse(context);
     final color =
         widget.recording ? Colors.red.shade700 : const Color(0xFF26A69A);
-    return SizedBox(
-      width: 64,
-      height: 64,
-      child: AnimatedBuilder(
-        animation: _pulse,
-        builder: (_, child) {
-          // Pulse steps through 4 discrete sizes — a sprite-sheet blink, not
-          // a smooth breath. (0 when idle.)
-          final t = widget.recording
-              ? (_pulse.value * 4).floorToDouble() / 4
-              : 0.0;
-          return Stack(
-            alignment: Alignment.center,
-            children: [
-              if (widget.recording)
-                Container(
-                  width: 64 + t * 16,
-                  height: 64 + t * 16,
-                  decoration: BoxDecoration(
-                    color: color.withValues(alpha: 0.18 * (1 - t)),
-                    borderRadius: BorderRadius.circular(12),
+    final t = widget.recording ? _kLevels[_phase] : 0.0;
+    // RepaintBoundary：光晕每步只重绘这 64×64，不把同层的顶部芯片一起拖进来。
+    return RepaintBoundary(
+      child: SizedBox(
+        width: 64,
+        height: 64,
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            if (widget.recording)
+              Container(
+                width: 64 + t * 16,
+                height: 64 + t * 16,
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: 0.18 * (1 - t)),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+            Material(
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10)),
+              color: color,
+              elevation: 6,
+              shadowColor: color.withValues(alpha: 0.5),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(10),
+                onTap: widget.onTap,
+                child: SizedBox(
+                  width: 60,
+                  height: 60,
+                  child: Icon(
+                    // Media semantics stay standard: dot = record, square = stop.
+                    widget.recording
+                        ? Icons.stop_rounded
+                        : Icons.fiber_manual_record_rounded,
+                    color: Colors.white,
+                    size: widget.recording ? 30 : 32,
                   ),
                 ),
-              child!,
-            ],
-          );
-        },
-        child: Material(
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-          color: color,
-          elevation: 6,
-          shadowColor: color.withValues(alpha: 0.5),
-          child: InkWell(
-            borderRadius: BorderRadius.circular(10),
-            onTap: widget.onTap,
-            child: SizedBox(
-              width: 60,
-              height: 60,
-              child: Icon(
-                // Media semantics stay standard: dot = record, square = stop.
-                widget.recording
-                    ? Icons.stop_rounded
-                    : Icons.fiber_manual_record_rounded,
-                color: Colors.white,
-                size: widget.recording ? 30 : 32,
               ),
             ),
-          ),
+          ],
         ),
       ),
     );
@@ -2790,6 +2866,29 @@ class _StatTile extends StatelessWidget {
   }
 }
 
+/// 头像 base64 → 已解码 [MemoryImage] 的进程级缓存。
+///
+/// MemoryImage 的相等性按字节数组**实例**比较：每次 build 里 base64.decode
+/// 出来的都是新数组 → ImageCache 必定 miss → 队友 marker 每重建一次就把
+/// JPEG 完整重解一遍（组队时每来一条位置消息就重建一轮）。这里按「串长:哈希」
+/// 取键复用同一个实例，让 ImageCache 命中。条目超过 64 就整个清掉——队友数
+/// 远到不了这个量级，纯防泄漏。坏 base64 返回 null，调用方回退到彩色首字母。
+final Map<String, MemoryImage> _avatarImageCache = {};
+MemoryImage? _cachedAvatarImage(String b64) {
+  if (b64.isEmpty) return null;
+  final key = '${b64.length}:${b64.hashCode}';
+  final hit = _avatarImageCache[key];
+  if (hit != null) return hit;
+  try {
+    final img = MemoryImage(base64.decode(b64));
+    if (_avatarImageCache.length >= 64) _avatarImageCache.clear();
+    _avatarImageCache[key] = img;
+    return img;
+  } catch (_) {
+    return null;
+  }
+}
+
 class _PeerTrailsLayer extends ConsumerWidget {
   final LatLng Function(double, double) toDisplay;
   const _PeerTrailsLayer({required this.toDisplay});
@@ -2798,40 +2897,40 @@ class _PeerTrailsLayer extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final peers = ref.watch(groupPeersProvider);
     final trails = ref.watch(groupTrailsProvider);
-    final s = ref.watch(settingsProvider);
+    // 只订阅队友覆盖项：整份 settings 里主题 / 地图源 / AI 配置随便动一项都会
+    // notify，没必要为此把全部队友轨迹重画一遍。PeerOverrideX 的解析规则只
+    // 依赖 peerOverrides，用一个只带该字段的壳复用它，免得在这儿再抄一份
+    // visible / color / name 的解析。
+    final overrides =
+        ref.watch(settingsProvider.select((s) => s.peerOverrides));
+    final s = AppSettings(peerOverrides: overrides);
     if (peers.isEmpty) return const SizedBox.shrink();
-    final dots = <CircleMarker>[];
+    // 「多久没联系」的判定基准一层算一次，不在每个 marker 里各取一次 now。
+    final now = DateTime.now();
+    // Look up the peer's avatar from the leaderboard — entries are signed
+    // snapshots that travel on the same mesh as locations, so by the time a
+    // peer is on the map their avatar (if they set one) is already in our
+    // local store. Self peers won't be here but they're not rendered as
+    // remote markers anyway.
+    final lbEntries = ref.read(leaderboardServiceProvider).current;
+    final lines = <Polyline>[];
     final markers = <Marker>[];
     for (final p in peers) {
       if (!s.peerVisible(p.id)) continue;
       final color = Color(s.peerColor(p.id) ?? p.colorValue);
       final name = s.peerName(p.id) ?? p.name;
-      // Each historical point becomes its own soft circle. No connecting
-      // lines — the user's own track uses the same dot-with-blur look, and
-      // straight polylines made GPS noise read as zig-zag teleports.
-      // Older points fade towards transparent so the trail still has a
-      // visual sense of direction.
+      // 一个队友一条 3 px 折线（与回放页的队友轨迹同款）。以前是每个历史点
+      // 一个带边框的 CircleMarker：≤200 点/人 = 每帧几百个圆 + 边框各画一遍，
+      // 拖图时肉眼可见掉帧；一条折线只是一条 path。
       final hist = trails[p.id] ?? const [];
-      final n = hist.length;
-      for (int i = 0; i < n; i++) {
-        final age = 1 - (i / n); // 0 = newest, 1 = oldest
-        final c = hist[i];
-        dots.add(CircleMarker(
-          point: toDisplay(c[0], c[1]),
-          radius: 6,
-          color: color.withValues(alpha: 0.18 * (1 - age)),
-          borderColor: color.withValues(alpha: 0.45 * (1 - age)),
-          borderStrokeWidth: 1,
-          useRadiusInMeter: false,
+      if (hist.length >= 2) {
+        lines.add(Polyline(
+          points: [for (final c in hist) toDisplay(c[0], c[1])],
+          color: color.withValues(alpha: 0.85),
+          strokeWidth: 3,
         ));
       }
       if (p.lat != null && p.lng != null) {
-        // Look up the peer's avatar from the leaderboard — entries are
-        // signed snapshots that travel on the same mesh as locations, so
-        // by the time a peer is on the map their avatar (if they set
-        // one) is already in our local store. Self peers won't be here
-        // but they're not rendered as remote markers anyway.
-        final lbEntries = ref.read(leaderboardServiceProvider).current;
         final entry = lbEntries.where((e) => e.peerId == p.id).firstOrNull;
         markers.add(Marker(
           point: toDisplay(p.lat!, p.lng!),
@@ -2841,6 +2940,7 @@ class _PeerTrailsLayer extends ConsumerWidget {
             peer: p,
             color: color,
             name: name,
+            now: now,
             avatarB64: entry?.avatarBase64 ?? '',
           ),
         ));
@@ -2848,7 +2948,7 @@ class _PeerTrailsLayer extends ConsumerWidget {
     }
     return Stack(
       children: [
-        if (dots.isNotEmpty) CircleLayer(circles: dots),
+        if (lines.isNotEmpty) PolylineLayer(polylines: lines),
         if (markers.isNotEmpty) MarkerLayer(markers: markers),
       ],
     );
@@ -2859,31 +2959,28 @@ class _PeerMarker extends StatelessWidget {
   final GroupPeer peer;
   final Color color;
   final String name;
+  /// 由所在图层统一传入（见 _PeerTrailsLayer），而不是每个 marker 各自取。
+  final DateTime now;
   final String avatarB64;
   const _PeerMarker(
       {required this.peer,
       required this.color,
       required this.name,
+      required this.now,
       this.avatarB64 = ''});
   @override
   Widget build(BuildContext context) {
     final initial = name.isEmpty ? '?' : name.characters.first;
-    final age = DateTime.now().difference(peer.lastSeen);
+    final age = now.difference(peer.lastSeen);
     final stale = age > const Duration(seconds: 30);
     final base = color;
     final shown = stale ? base.withValues(alpha: 0.45) : base;
-    // Decode the avatar lazily — bad base64 silently falls back to the
-    // coloured-initial bubble so a malformed peer entry can't crash the
-    // map render path.
-    DecorationImage? avatarImg;
-    if (avatarB64.isNotEmpty) {
-      try {
-        avatarImg = DecorationImage(
-          image: MemoryImage(base64.decode(avatarB64)),
-          fit: BoxFit.cover,
-        );
-      } catch (_) {}
-    }
+    // 解码走进程级缓存（见 _cachedAvatarImage）；坏 base64 静默回退到彩色
+    // 首字母气泡，一条畸形的队友记录不能把地图渲染路径打崩。
+    final avatar = _cachedAvatarImage(avatarB64);
+    final avatarImg = avatar == null
+        ? null
+        : DecorationImage(image: avatar, fit: BoxFit.cover);
     return Tooltip(
       message: stale ? '$name · ${age.inSeconds}s 未联系' : name,
       child: Stack(
@@ -3212,13 +3309,11 @@ class _SelfAvatar extends StatelessWidget {
       {required this.radius, required this.b64, required this.seed});
   @override
   Widget build(BuildContext context) {
-    if (b64.isNotEmpty) {
-      try {
-        return CircleAvatar(
-          radius: radius,
-          backgroundImage: MemoryImage(base64.decode(b64)),
-        );
-      } catch (_) {}
+    // 与队友头像共用解码缓存：_ProfileCard 订阅整份 settings，随便一项变动
+    // 都会重建到这里，不缓存就是每次重解一遍 JPEG。
+    final avatar = _cachedAvatarImage(b64);
+    if (avatar != null) {
+      return CircleAvatar(radius: radius, backgroundImage: avatar);
     }
     final hue = (seed.hashCode % 360).abs().toDouble();
     return CircleAvatar(

@@ -221,6 +221,9 @@ Future<HeatSnapshot> loadHeatSnapshot({
   final fog = includeFog && layerIds.isNotEmpty
       ? await db.fogTilesForLayers(layerIds, FogEngine.tileZoom)
       : const <FogTile>[];
+  // 这里只把 drift 行拆成原语列（每点 4 次字段读，比把几十万个数据类对象
+  // 拷进 isolate 便宜得多）；每块 512 字节的 popcount 和后续索引构建都在
+  // isolate 里做 —— 几万块迷雾的 popcount 曾是这条路上最大的一次主线程停顿。
   final n = pts.length;
   final lat = Float64List(n), lng = Float64List(n);
   final timeMs = Int64List(n);
@@ -233,30 +236,25 @@ Future<HeatSnapshot> loadHeatSnapshot({
     layer[i] = p.layerId;
   }
   final fogBx = Int32List(fog.length), fogBy = Int32List(fog.length);
-  final fogPop = Int32List(fog.length);
+  final fogBitmaps = <Uint8List>[];
   for (var i = 0; i < fog.length; i++) {
-    final t = fog[i];
-    fogBx[i] = t.tileX;
-    fogBy[i] = t.tileY;
-    var c = 0;
-    for (final b in t.bitmap) {
-      if (b != 0) c += _popcount8(b);
-    }
-    fogPop[i] = c;
+    fogBx[i] = fog[i].tileX;
+    fogBy[i] = fog[i].tileY;
+    fogBitmaps.add(fog[i].bitmap);
   }
-  final input = HeatBuildInput(
-    lat: lat,
-    lng: lng,
-    timeMs: timeMs,
-    layer: layer,
-    gcj02: CoordConverter.needsGcj02(mapProvider),
-    fogBx: fogBx,
-    fogBy: fogBy,
-    fogPop: fogPop,
-  );
+  final payload = <String, Object>{
+    'lat': lat,
+    'lng': lng,
+    'timeMs': timeMs,
+    'layer': layer,
+    'gcj02': CoordConverter.needsGcj02(mapProvider),
+    'fogBx': fogBx,
+    'fogBy': fogBy,
+    'fogBitmaps': fogBitmaps,
+  };
   final index = kIsWeb
-      ? buildHeatIndex(input)
-      : await compute(buildHeatIndexFromMap, input.toMap());
+      ? buildHeatIndexFromBlobs(payload)
+      : await compute(buildHeatIndexFromBlobs, payload);
   return HeatSnapshot(
     index: index,
     lut: HeatPalette.byIndex(style.palette).lut(),
@@ -264,6 +262,34 @@ Future<HeatSnapshot> loadHeatSnapshot({
     width: style.width,
     generation: generation,
   );
+}
+
+/// `compute()` entry for [loadHeatSnapshot]: the packed point columns of a
+/// [HeatBuildInput] plus the RAW fog bitmaps (`fogBitmaps`: `List<Uint8List>`,
+/// parallel to `fogBx` / `fogBy`). Counts each block's set bits here, then
+/// hands the finished [HeatBuildInput] map to [buildHeatIndexFromMap].
+/// 单独放在这个文件而不是 heat_source.dart：那边是「纯数据 → 索引」的构建器，
+/// 位图数一数这种预处理属于装载这一侧。
+HeatIndex buildHeatIndexFromBlobs(Map<String, Object> m) {
+  final bitmaps = m['fogBitmaps'] as List<Uint8List>;
+  final fogPop = Int32List(bitmaps.length);
+  for (var i = 0; i < bitmaps.length; i++) {
+    var c = 0;
+    for (final b in bitmaps[i]) {
+      if (b != 0) c += _popcount8(b);
+    }
+    fogPop[i] = c;
+  }
+  return buildHeatIndexFromMap(<String, Object>{
+    'lat': m['lat']!,
+    'lng': m['lng']!,
+    'timeMs': m['timeMs']!,
+    'layer': m['layer']!,
+    'gcj02': m['gcj02']!,
+    'fogBx': m['fogBx']!,
+    'fogBy': m['fogBy']!,
+    'fogPop': fogPop,
+  });
 }
 
 int _popcount8(int b) {

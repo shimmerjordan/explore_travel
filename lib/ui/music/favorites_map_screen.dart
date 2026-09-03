@@ -7,12 +7,28 @@ import '../../data/db/database.dart';
 import '../../services/map/tile_providers.dart';
 import '../../services/music/music_service.dart';
 
-class FavoritesMapScreen extends ConsumerWidget {
+class FavoritesMapScreen extends ConsumerStatefulWidget {
   const FavoritesMapScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final db = ref.watch(dbProvider);
+  ConsumerState<FavoritesMapScreen> createState() =>
+      _FavoritesMapScreenState();
+}
+
+class _FavoritesMapScreenState extends ConsumerState<FavoritesMapScreen> {
+  /// 查询只发一次，握在 state 里。以前在 build() 里每次 new Future，设置变动
+  /// （底图切换等）一重建就转圈、重查。本页只读，不需要刷新。
+  late final Future<List<SongFavorite>> _favsFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    final db = ref.read(dbProvider);
+    _favsFuture = db.select(db.songFavorites).get();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     return Scaffold(
       extendBodyBehindAppBar: true,
       appBar: AppBar(
@@ -21,7 +37,7 @@ class FavoritesMapScreen extends ConsumerWidget {
         title: const Text('收藏歌曲地图'),
       ),
       body: FutureBuilder<List<SongFavorite>>(
-        future: db.select(db.songFavorites).get(),
+        future: _favsFuture,
         builder: (context, snap) {
           if (!snap.hasData) {
             return const Center(child: CircularProgressIndicator());

@@ -12,6 +12,8 @@ abstract class GroupService {
   Stream<List<GroupPeer>> get peers;
   Future<void> start();
   Future<void> stop();
+  /// 前后台切换通知（见 io 版说明）。web 上没有后台节奏可调，保持空实现。
+  void setBackground(bool background) {}
 
   Future<void> broadcastLocation({
     required double lat,
@@ -76,6 +78,8 @@ class _NoopGroupService implements GroupService {
   Future<void> start() async {}
   @override
   Future<void> stop() async {}
+  @override
+  void setBackground(bool background) {}
   @override
   Future<void> broadcastLocation({
     required double lat,

@@ -198,16 +198,25 @@ class BackupService {
 
   // ─── Export ─────────────────────────────────────────────────────────────
 
+  /// 预估产物小于这个体积就不开 isolate：isolate 启动 + 拷贝入参有固定开销，
+  /// 几十 KB 的小备份在主 isolate 直接编码更快（与 SyncEngine 打包分片的
+  /// `_kIsolatePackThreshold` 同一思路）。
+  static const int _kIsolateEncodeThreshold = 256 << 10;
+
   /// Build the zip in memory and return its raw bytes.
+  ///
+  /// JSON 序列化和 deflate 都是纯 CPU，放进同一个 isolate 一次做完 —— 本地导出
+  /// 只付一次 isolate 往返，UI 在几十万轨迹点的导出期间不再卡死。
   Future<Uint8List> exportToArchive(Set<String> selected,
       {BackupProgress? onProgress, String? credentialsPassword}) async {
-    final files = await exportToFiles(selected,
+    final (specs, total) = await _collectExport(selected,
         onProgress: onProgress, credentialsPassword: credentialsPassword);
-    final archive = Archive();
-    for (final e in files.entries) {
-      archive.addFile(ArchiveFile(e.key, e.value.length, e.value));
-    }
-    return Uint8List.fromList(ZipEncoder().encode(archive)!);
+    onProgress?.call(total, total, '序列化并压缩…');
+    final bytes = (!kIsWeb && _estimateSpecBytes(specs) > _kIsolateEncodeThreshold)
+        ? await compute(_encodeAndZip, specs)
+        : _encodeAndZip(specs);
+    onProgress?.call(total, total, '导出完成');
+    return bytes;
   }
 
   /// Build the archive's entries as a plain path → bytes map, WITHOUT zipping.
@@ -215,6 +224,9 @@ class BackupService {
   /// zips itself, so producing (and then re-inflating) one big zip here was
   /// pure wasted CPU — the single biggest cause of the sync dialog sitting at
   /// "0% 导出本地数据". [onProgress] ticks once per module so the UI can move.
+  ///
+  /// 各模块只在这里查库、把行转成普通 Map；真正的 jsonEncode / utf8 / FOW 瓦片
+  /// 打包在 [_encodeEntries] 里做，产物够大就丢进 isolate。
   Future<Map<String, List<int>>> exportToFiles(
     Set<String> selected, {
     BackupProgress? onProgress,
@@ -242,10 +254,42 @@ class BackupService {
     // Callers whose password came from a human leave this false.
     bool credentialsAreForSync = false,
   }) async {
+    final (specs, total) = await _collectExport(
+      selected,
+      onProgress: onProgress,
+      deterministic: deterministic,
+      includeManifest: includeManifest,
+      forceRequired: forceRequired,
+      manifestModules: manifestModules,
+      credentialsPassword: credentialsPassword,
+      credentialsAreForSync: credentialsAreForSync,
+    );
+    onProgress?.call(total, total, '序列化 JSON…');
+    final out = (!kIsWeb && _estimateSpecBytes(specs) > _kIsolateEncodeThreshold)
+        ? await compute(_encodeEntries, specs)
+        : _encodeEntries(specs);
+    onProgress?.call(total, total, '导出完成');
+    return out;
+  }
+
+  /// Walk the selected modules and describe every archive entry as a
+  /// not-yet-encoded spec (see [_encodeEntries] for the shape). Returns the
+  /// specs in archive order plus the module count for progress reporting.
+  /// Parameters are documented on [exportToFiles].
+  Future<(List<List<Object?>>, int)> _collectExport(
+    Set<String> selected, {
+    BackupProgress? onProgress,
+    bool deterministic = false,
+    bool includeManifest = true,
+    bool forceRequired = true,
+    List<String>? manifestModules,
+    String? credentialsPassword,
+    bool credentialsAreForSync = false,
+  }) async {
     // Force the required modules — caller can't opt out.
     final modules =
         forceRequired ? {...selected, ...requiredModules} : {...selected};
-    final out = <String, List<int>>{};
+    final specs = <List<Object?>>[];
     final total = modules.where(allModules.contains).length;
     var done = 0;
     Future<void> step(String key) async {
@@ -254,16 +298,20 @@ class BackupService {
       await Future<void>.delayed(Duration.zero);
     }
 
+    // 这几个 add* 只登记「路径 + 种类 + 原料」，不编码 —— 编码在 _encodeEntries。
+    // 登记顺序就是 zip 条目顺序，和以前逐条写 Map 的顺序一致，产物逐字节相同。
     void addJson(String path, Object obj) {
-      out[path] = utf8.encode(const JsonEncoder.withIndent('  ').convert(obj));
+      specs.add([path, _kEntryJson, obj]);
     }
 
     void addText(String path, String body) {
-      out[path] = utf8.encode(body);
+      specs.add([path, _kEntryText, body]);
     }
 
-    void addBytes(String path, List<int> bytes) {
-      out[path] = bytes;
+    // rows 里只能有 JSON 原语（String/num/bool/null/List/Map）——它们要跨
+    // isolate 发送，DateTime 之类得先在这里转成 ISO 字符串。
+    void addJsonl(String path, List<Map<String, dynamic>> rows) {
+      specs.add([path, _kEntryJsonl, rows]);
     }
 
     // Manifest first so reads can short-circuit on version mismatch.
@@ -281,21 +329,22 @@ class BackupService {
       final rows = await db.select(db.journalEntries).get();
       debugPrint('[BackupService] export journal — ${rows.length} entries '
           '(${rows.where((r) => r.uuid.isEmpty).length} with empty uuid)');
-      addText(
-          'journal/entries.jsonl',
-          rows.map((r) => jsonEncode({
-                'uuid': r.uuid,
-                'time': r.time.toIso8601String(),
-                'lat': r.lat,
-                'lng': r.lng,
-                'title': r.title,
-                'richContent': r.richContent,
-                'mediaPaths': r.mediaPaths,
-                'layerId': r.layerId,
-                'level': r.level,
-                'ownerPeerId': r.ownerPeerId,
-                'updatedAt': r.updatedAt?.toIso8601String(),
-              })).join('\n'));
+      addJsonl('journal/entries.jsonl', [
+        for (final r in rows)
+          {
+            'uuid': r.uuid,
+            'time': r.time.toIso8601String(),
+            'lat': r.lat,
+            'lng': r.lng,
+            'title': r.title,
+            'richContent': r.richContent,
+            'mediaPaths': r.mediaPaths,
+            'layerId': r.layerId,
+            'level': r.level,
+            'ownerPeerId': r.ownerPeerId,
+            'updatedAt': r.updatedAt?.toIso8601String(),
+          }
+      ]);
     }
 
     if (modules.contains('layers')) {
@@ -329,19 +378,20 @@ class BackupService {
     if (modules.contains('song_favorites')) {
       await step('song_favorites');
       final rows = await db.select(db.songFavorites).get();
-      addText(
-          'song_favorites/favorites.jsonl',
-          rows.map((r) => jsonEncode({
-                'uuid': r.uuid,
-                'songId': r.songId,
-                'title': r.title,
-                'artist': r.artist,
-                'coverUrl': r.coverUrl,
-                'source': r.source,
-                'addedAt': r.addedAt.toIso8601String(),
-                'lat': r.lat,
-                'lng': r.lng,
-              })).join('\n'));
+      addJsonl('song_favorites/favorites.jsonl', [
+        for (final r in rows)
+          {
+            'uuid': r.uuid,
+            'songId': r.songId,
+            'title': r.title,
+            'artist': r.artist,
+            'coverUrl': r.coverUrl,
+            'source': r.source,
+            'addedAt': r.addedAt.toIso8601String(),
+            'lat': r.lat,
+            'lng': r.lng,
+          }
+      ]);
     }
 
     if (modules.contains('track_points')) {
@@ -369,8 +419,7 @@ class BackupService {
         });
       }
       for (final entry in byMonth.entries) {
-        addText('track_points/${entry.key}.jsonl',
-            entry.value.map(jsonEncode).join('\n'));
+        addJsonl('track_points/${entry.key}.jsonl', entry.value);
       }
     }
 
@@ -396,60 +445,62 @@ class BackupService {
       final travelPlaces = placeRows
           .where((p) => p.source == 1 || refPlaces.contains(p.id))
           .toList();
-      addText(
-          'visits/places.jsonl',
-          travelPlaces.map((p) => jsonEncode({
-                'uuid': p.uuid,
-                'name': p.name,
-                'lat': p.lat,
-                'lng': p.lng,
-                'radius': p.radius,
-                'source': p.source,
-                'country': p.country,
-                'province': p.province,
-                'city': p.city,
-                'createdAt': p.createdAt.toIso8601String(),
-                'updatedAt': p.updatedAt?.toIso8601String(),
-              })).join('\n'));
-      addText(
-          'visits/visits.jsonl',
-          userVisits.map((v) => jsonEncode({
-                'uuid': v.uuid,
-                // Cross-device references travel as UUIDs — local ids differ.
-                'placeUuid':
-                    v.placeId == null ? null : placeUuidById[v.placeId],
-                'layerUuid': layerUuidById[v.layerId],
-                'startedAt': v.startedAt.toIso8601String(),
-                'endedAt': v.endedAt.toIso8601String(),
-                'lat': v.lat,
-                'lng': v.lng,
-                'radius': v.radius,
-                'pointCount': v.pointCount,
-                'bridgedSec': v.bridgedSec,
-                'status': v.status,
-                'confidence': v.confidence,
-                'confidenceJson': v.confidenceJson,
-                'detectionVersion': v.detectionVersion,
-                'deletedAt': v.deletedAt?.toIso8601String(),
-                'createdAt': v.createdAt.toIso8601String(),
-                'updatedAt': v.updatedAt?.toIso8601String(),
-              })).join('\n'));
+      addJsonl('visits/places.jsonl', [
+        for (final p in travelPlaces)
+          {
+            'uuid': p.uuid,
+            'name': p.name,
+            'lat': p.lat,
+            'lng': p.lng,
+            'radius': p.radius,
+            'source': p.source,
+            'country': p.country,
+            'province': p.province,
+            'city': p.city,
+            'createdAt': p.createdAt.toIso8601String(),
+            'updatedAt': p.updatedAt?.toIso8601String(),
+          }
+      ]);
+      addJsonl('visits/visits.jsonl', [
+        for (final v in userVisits)
+          {
+            'uuid': v.uuid,
+            // Cross-device references travel as UUIDs — local ids differ.
+            'placeUuid': v.placeId == null ? null : placeUuidById[v.placeId],
+            'layerUuid': layerUuidById[v.layerId],
+            'startedAt': v.startedAt.toIso8601String(),
+            'endedAt': v.endedAt.toIso8601String(),
+            'lat': v.lat,
+            'lng': v.lng,
+            'radius': v.radius,
+            'pointCount': v.pointCount,
+            'bridgedSec': v.bridgedSec,
+            'status': v.status,
+            'confidence': v.confidence,
+            'confidenceJson': v.confidenceJson,
+            'detectionVersion': v.detectionVersion,
+            'deletedAt': v.deletedAt?.toIso8601String(),
+            'createdAt': v.createdAt.toIso8601String(),
+            'updatedAt': v.updatedAt?.toIso8601String(),
+          }
+      ]);
     }
 
     if (modules.contains('trips')) {
       await step('trips');
       final rows = await db.allMergedTrips();
-      addText(
-          'trips/trips.jsonl',
-          rows.map((t) => jsonEncode({
-                'uuid': t.uuid,
-                'name': t.name,
-                // Already layer-UUID based (see MergedTrips docs) — safe to
-                // ship verbatim.
-                'segmentsJson': t.segmentsJson,
-                'createdAt': t.createdAt.toIso8601String(),
-                'updatedAt': t.updatedAt?.toIso8601String(),
-              })).join('\n'));
+      addJsonl('trips/trips.jsonl', [
+        for (final t in rows)
+          {
+            'uuid': t.uuid,
+            'name': t.name,
+            // Already layer-UUID based (see MergedTrips docs) — safe to
+            // ship verbatim.
+            'segmentsJson': t.segmentsJson,
+            'createdAt': t.createdAt.toIso8601String(),
+            'updatedAt': t.updatedAt?.toIso8601String(),
+          }
+      ]);
     }
 
     if (modules.contains('chat_messages')) {
@@ -470,8 +521,7 @@ class BackupService {
       for (final entry in byPeer.entries) {
         // Strip slashes so peer ids don't accidentally create subpaths.
         final safe = entry.key.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_');
-        addText('chat_messages/$safe.jsonl',
-            entry.value.map(jsonEncode).join('\n'));
+        addJsonl('chat_messages/$safe.jsonl', entry.value);
       }
     }
 
@@ -555,16 +605,17 @@ class BackupService {
       };
       final rows = await db.select(db.fogTiles).get();
       // Group blocks per (layer, FoW tile). tileX/tileY are block-global
-      // coords (fowTile*128 + block).
+      // coords (fowTile*128 + block). Block key = by * 128 + bx —— 用 int 而
+      // 不是 (bx, by) 记录，是为了这张表能原样进 compute() 的入参；瓦片本身
+      // （含 zlib 压缩）在 _encodeEntries 里才 buildFowTile。
       final grouped =
-          <int, Map<(int, int), Map<(int, int), Uint8List>>>{};
+          <int, Map<(int, int), Map<int, Uint8List>>>{};
       for (final r in rows) {
         if (r.zoom != 100) continue; // only the FOW-block sentinel rows
         final tiles = grouped.putIfAbsent(r.layerId, () => {});
         final blocks = tiles.putIfAbsent(
             (r.tileX ~/ 128, r.tileY ~/ 128), () => {});
-        blocks[(r.tileX % 128, r.tileY % 128)] =
-            Uint8List.fromList(r.bitmap);
+        blocks[(r.tileY % 128) * 128 + (r.tileX % 128)] = r.bitmap;
       }
       for (final layerEntry in grouped.entries) {
         final layerKey =
@@ -572,8 +623,11 @@ class BackupService {
         for (final tileEntry in layerEntry.value.entries) {
           final (tx, ty) = tileEntry.key;
           final name = tileIdToFilename(ty * 512 + tx);
-          addBytes('fow/$layerKey/$name',
-              buildFowTile(tx, ty, tileEntry.value));
+          specs.add([
+            'fow/$layerKey/$name',
+            _kEntryFowTile,
+            <Object>[tx, ty, tileEntry.value],
+          ]);
         }
       }
       // Side-car the FoW format can't carry: per-block updatedAt (drives
@@ -598,18 +652,17 @@ class BackupService {
       await db.gcFogErases();
       final erases = await db.allFogErases();
       if (erases.isNotEmpty) {
-        addText(
-            'fog/erases.jsonl',
-            erases
-                .map((e) => jsonEncode({
-                      'l': layerUuidById[e.layerId] ?? 'layer-${e.layerId}',
-                      'x': e.tileX,
-                      'y': e.tileY,
-                      'z': e.zoom,
-                      'mask': base64Encode(e.mask),
-                      't': e.erasedAt.toIso8601String(),
-                    }))
-                .join('\n'));
+        addJsonl('fog/erases.jsonl', [
+          for (final e in erases)
+            {
+              'l': layerUuidById[e.layerId] ?? 'layer-${e.layerId}',
+              'x': e.tileX,
+              'y': e.tileY,
+              'z': e.zoom,
+              'mask': base64Encode(e.mask),
+              't': e.erasedAt.toIso8601String(),
+            }
+        ]);
       }
     }
 
@@ -647,15 +700,14 @@ class BackupService {
       await db.gcTombstones();
       final rows = await db.allTombstones();
       if (rows.isNotEmpty) {
-        addText(
-            'tombstones/tombstones.jsonl',
-            rows
-                .map((t) => jsonEncode({
-                      'tbl': t.tbl,
-                      'uuid': t.uuid,
-                      'deletedAt': t.deletedAt.toIso8601String(),
-                    }))
-                .join('\n'));
+        addJsonl('tombstones/tombstones.jsonl', [
+          for (final t in rows)
+            {
+              'tbl': t.tbl,
+              'uuid': t.uuid,
+              'deletedAt': t.deletedAt.toIso8601String(),
+            }
+        ]);
       }
     }
 
@@ -663,15 +715,10 @@ class BackupService {
       await step('leaderboard');
       // One line per entry — same on-wire shape as the P2P gossip path,
       // so importing a backup is just "merge a batch from your past self".
-      final list = leaderboard!.toExportList();
-      addText(
-        'leaderboard/entries.jsonl',
-        list.map(jsonEncode).join('\n'),
-      );
+      addJsonl('leaderboard/entries.jsonl', leaderboard!.toExportList());
     }
 
-    onProgress?.call(total, total, '导出完成');
-    return out;
+    return (specs, total);
   }
 
   /// Write the archive bytes to a timestamped `.zip` under documents/ and
@@ -717,11 +764,11 @@ class BackupService {
     // so they only prompt when there is something to unlock.
     String? credentialsPassword,
   }) async {
-    final archive = ZipDecoder().decodeBytes(bytes);
-    final files = <String, List<int>>{
-      for (final f in archive.files)
-        if (f.isFile) f.name: f.content as List<int>,
-    };
+    // inflate 是纯 CPU：大包进 isolate（结果经 Isolate.exit 零拷贝回来），
+    // 小包原地解，省掉 isolate 启动开销。
+    final files = (!kIsWeb && bytes.length > _kIsolateEncodeThreshold)
+        ? await compute(_unzipEntries, bytes)
+        : _unzipEntries(bytes);
     return importFromFiles(
       files,
       modules: modules,
@@ -2194,6 +2241,113 @@ class BackupService {
         'errors: ${summary.errors}');
     return summary;
   }
+}
+
+// ─── Isolate-side encoding ────────────────────────────────────────────────
+//
+// 导出阶段（_collectExport）只查库、把行转成普通 Map，然后把每个归档条目登记成
+// 一条 spec：`[path, kind, payload]`（用 List 而不是类实例，是让 compute() 的
+// 入参只含原语 / List / Map / TypedData 这几种保证可跨 isolate 发送的形态）。
+// 下面这些顶层函数才真正 jsonEncode / utf8 / zlib / deflate —— 它们是导出里
+// 唯一的 CPU 大头，跑在 isolate 里，主 isolate 就不会卡住动画。
+
+/// payload = String → utf8。
+const int _kEntryText = 1;
+
+/// payload = 任意 JSON 对象 → 两空格缩进的 JSON → utf8（manifest / layers 等）。
+const int _kEntryJson = 2;
+
+/// payload = List<Map>，每行一个 jsonEncode，'\n' 连接 → utf8（*.jsonl）。
+const int _kEntryJsonl = 3;
+
+/// payload = [tileX, tileY, Map<int blockKey, Uint8List bitmap>]，
+/// blockKey = by * 128 + bx → buildFowTile（内含 zlib 压缩）。
+const int _kEntryFowTile = 4;
+
+/// Encode every spec into bytes, in spec order. `List<int>` value type on
+/// purpose (not `Uint8List`): callers historically add plain lists to the
+/// returned map.
+Map<String, List<int>> _encodeEntries(List<List<Object?>> specs) {
+  final out = <String, List<int>>{};
+  for (final s in specs) {
+    final path = s[0] as String;
+    final payload = s[2];
+    switch (s[1] as int) {
+      case _kEntryText:
+        out[path] = utf8.encode(payload as String);
+      case _kEntryJson:
+        out[path] = utf8
+            .encode(const JsonEncoder.withIndent('  ').convert(payload));
+      case _kEntryJsonl:
+        out[path] = utf8.encode((payload as List).map(jsonEncode).join('\n'));
+      case _kEntryFowTile:
+        final p = payload as List;
+        final blocks = p[2] as Map<int, Uint8List>;
+        out[path] = buildFowTile(p[0] as int, p[1] as int, {
+          for (final e in blocks.entries) (e.key % 128, e.key ~/ 128): e.value,
+        });
+      default:
+        throw StateError('unknown backup entry kind ${s[1]} for $path');
+    }
+  }
+  return out;
+}
+
+/// Deflate an already-encoded entry map into one zip, entries in map order.
+Uint8List _zipFiles(Map<String, List<int>> files) {
+  final archive = Archive();
+  for (final e in files.entries) {
+    archive.addFile(ArchiveFile(e.key, e.value.length, e.value));
+  }
+  return Uint8List.fromList(ZipEncoder().encode(archive)!);
+}
+
+/// Encode + zip in one go — the local-export path's single isolate hop.
+Uint8List _encodeAndZip(List<List<Object?>> specs) =>
+    _zipFiles(_encodeEntries(specs));
+
+/// Rough encoded size of [specs], only to decide whether an isolate is worth
+/// spinning up. Precision is irrelevant: a jsonl row is taken as ~160 bytes.
+int _estimateSpecBytes(List<List<Object?>> specs) {
+  var n = 0;
+  for (final s in specs) {
+    final payload = s[2];
+    switch (s[1] as int) {
+      case _kEntryText:
+        n += (payload as String).length;
+      case _kEntryJsonl:
+        n += (payload as List).length * 160;
+      case _kEntryJson:
+        n += _approxJsonBytes(payload);
+      case _kEntryFowTile:
+        n += ((payload as List)[2] as Map).length * 512;
+    }
+  }
+  return n;
+}
+
+int _approxJsonBytes(Object? v) {
+  if (v is List) return 2 + v.length * 160;
+  if (v is Map) {
+    var n = 2;
+    for (final e in v.values) {
+      n += _approxJsonBytes(e) + 16;
+    }
+    return n;
+  }
+  if (v is String) return v.length + 2;
+  return 8;
+}
+
+/// zip bytes → path → inflated content. The archive package inflates each
+/// entry lazily on `content`, so touching it HERE keeps the inflate inside the
+/// isolate instead of leaking back onto the caller.
+Map<String, List<int>> _unzipEntries(Uint8List bytes) {
+  final archive = ZipDecoder().decodeBytes(bytes);
+  return <String, List<int>>{
+    for (final f in archive.files)
+      if (f.isFile) f.name: f.content as List<int>,
+  };
 }
 
 /// `app_settings_v1` field names that hold weaponizable secrets (PATs,

@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:archive/archive.dart';
 import 'package:drift/drift.dart' show Value;
+import 'package:flutter/foundation.dart' show compute, kIsWeb;
 import 'package:path/path.dart' as p;
 import 'package:xml/xml.dart';
 import '../../core/geo_math.dart' show haversineMeters;
@@ -59,33 +60,57 @@ class ImportedTrack {
 /// [TrackExport]; the Fog-of-World *fog-tile* format (not a track file) is
 /// handled separately in `services/fog/fow_compat.dart`.
 class TrackImport {
+  /// 文件小于这个体积就在当前 isolate 解析：几十 KB 的 XML 一两毫秒就完，
+  /// isolate 的启动 + 把整段字节拷过去的固定成本反而是大头。
+  static const int kIsolateParseThreshold = 64 << 10;
+
   /// Parse a file, dispatching on its extension and falling back to sniffing
   /// the leading bytes when the extension is missing or wrong.
   static Future<ImportedTrack> parseFile(File file) async {
     final ext = p.extension(file.path).toLowerCase();
     final base = p.basenameWithoutExtension(file.path);
+    return parseBytes(base, ext, await file.readAsBytes());
+  }
+
+  /// Parse in-memory contents. [ext] is the lower-cased, dotted extension
+  /// used for dispatch (`''` forces sniffing). XML / JSON parsing of a big
+  /// track is the one CPU-heavy step of an import, so it runs in `compute()`
+  /// — the DB insert + fog reveal in [ingest] stay on the caller's isolate.
+  static Future<ImportedTrack> parseBytes(
+      String name, String ext, Uint8List bytes) async {
+    final segs = (!kIsWeb && bytes.length > kIsolateParseThreshold)
+        ? await compute(parseTrackSegments, <Object>[ext, bytes])
+        : parseTrackSegments(<Object>[ext, bytes]);
+    return ImportedTrack(name, segs);
+  }
+
+  /// `compute()` entry: `[ext, bytes]` in, segments out. Public only so the
+  /// isolate can reach it and tests can call it directly; use [parseBytes].
+  /// 返回值只含 double / DateTime 这种原语字段的小对象，可直接跨 isolate 送回。
+  static List<List<ImportedPoint>> parseTrackSegments(List<Object> args) {
+    final ext = args[0] as String;
+    final bytes = args[1] as Uint8List;
     switch (ext) {
       case '.gpx':
-        return ImportedTrack(base, _parseGpx(await file.readAsString()));
+        return _parseGpx(utf8.decode(bytes));
       case '.kml':
-        return ImportedTrack(base, _parseKml(await file.readAsString()));
+        return _parseKml(utf8.decode(bytes));
       case '.kmz':
-        return ImportedTrack(base, _parseKmz(await file.readAsBytes()));
+        return _parseKmz(bytes);
       case '.geojson':
       case '.json':
-        return ImportedTrack(base, _parseGeoJson(await file.readAsString()));
+        return _parseGeoJson(utf8.decode(bytes));
     }
     // Unknown extension — sniff. KMZ is a zip (starts with "PK").
-    final bytes = await file.readAsBytes();
     if (bytes.length > 1 && bytes[0] == 0x50 && bytes[1] == 0x4B) {
-      return ImportedTrack(base, _parseKmz(bytes));
+      return _parseKmz(bytes);
     }
     final text = utf8.decode(bytes, allowMalformed: true).trimLeft();
     if (text.startsWith('{') || text.startsWith('[')) {
-      return ImportedTrack(base, _parseGeoJson(text));
+      return _parseGeoJson(text);
     }
-    if (text.contains('<gpx')) return ImportedTrack(base, _parseGpx(text));
-    if (text.contains('<kml')) return ImportedTrack(base, _parseKml(text));
+    if (text.contains('<gpx')) return _parseGpx(text);
+    if (text.contains('<kml')) return _parseKml(text);
     throw const FormatException('无法识别的轨迹文件格式（支持 GPX / KML / KMZ / GeoJSON）');
   }
 
@@ -122,10 +147,8 @@ class TrackImport {
   }
 
   // ─── KML / KMZ ───
-  static List<List<ImportedPoint>> _parseKmz(List<int> bytes) {
-    final archive = ZipDecoder().decodeBytes(bytes is Uint8List
-        ? bytes
-        : Uint8List.fromList(List<int>.from(bytes)));
+  static List<List<ImportedPoint>> _parseKmz(Uint8List bytes) {
+    final archive = ZipDecoder().decodeBytes(bytes);
     ArchiveFile? kml;
     for (final f in archive.files) {
       if (!f.isFile) continue;

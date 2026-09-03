@@ -119,6 +119,12 @@ class RelayGroupService implements GroupService {
     _diag.info(_tag, 'Stopped');
   }
 
+  /// 中继本身就是省电节奏：hello 25 s、重连退避到 30 s、一条长连接靠服务端
+  /// 30 s ping 保活，后台没有可再放慢的东西（hello 再慢就会撞上 UI 30 s 的
+  /// 离线判定），所以这里刻意什么都不做。
+  @override
+  void setBackground(bool background) {}
+
   Future<void> _connect({bool rethrowFirst = false}) async {
     if (!_running || _ws != null) return;
     try {
