@@ -30,8 +30,9 @@ import 'ui/group_setup/group_diagnostics_screen.dart';
 import 'ui/leaderboard/leaderboard_screen.dart';
 import 'ui/about/about_screen.dart';
 import 'ui/permissions/permissions_screen.dart';
+import 'app/startup_maintenance.dart' show runStartupDbMaintenance;
 import 'app/providers.dart'
-    show groupLifecycleProvider, dbProvider, runStartupDbMaintenance,
+    show groupLifecycleProvider, dbProvider,
         runInitialVisitDetection, visitEngineProvider, visitsRefreshProvider,
         settingsProvider;
 import 'services/vault/auth_controller.dart';
@@ -51,9 +52,10 @@ void main() {
   // fog mask + fog tint pyramids plus pin thumbnails evicted each other by
   // count long before the byte budget, and every eviction is a re-bake.
   PaintingBinding.instance.imageCache.maximumSize = 4000;
-  // Capture every debugPrint into an in-memory ring so the debug log
-  // viewer can show them.
-  LogBuffer.install();
+  // Capture every debugPrint into an in-memory ring so the debug log viewer
+  // can show them. Debug builds always; release builds only while the hidden
+  // debug mode is on (toggled below, once settings have loaded).
+  if (kDebugMode) LogBuffer.install();
 
   // Catch every unhandled error with full stack trace — without this, Flutter
   // collapses repeated exceptions into "Another exception was thrown" with
@@ -128,12 +130,22 @@ class _ExploreJournalAppState extends ConsumerState<ExploreJournalApp> {
     // Resolve the initial auth state (web gate) AFTER the first frame —
     // restore() flips the AuthController (a refreshListenable), and notifying
     // a listenable during the initial build would dirty the tree mid-build.
+    // Release builds: the in-memory log ring follows the hidden debug switch.
+    ref.listenManual<bool>(
+      settingsProvider.select((s) => s.debugMode),
+      (_, on) {
+        if (kDebugMode) return;
+        on ? LogBuffer.install() : LogBuffer.uninstall();
+      },
+      fireImmediately: true,
+    );
     WidgetsBinding.instance.addPostFrameCallback((_) {
       ref.read(authControllerProvider).restore();
       // Self-heal a layer-less DB + log the row-count probe (see
       // runStartupDbMaintenance). Recreating an orphaned layer flips the
       // watchLayers() stream, so the map/trail/journal re-render on their own.
-      runStartupDbMaintenance(ref.read(dbProvider));
+      runStartupDbMaintenance(ref.read(dbProvider),
+          probe: kDebugMode || ref.read(settingsProvider).debugMode);
       // First-launch stay detection over the whole history — after the map
       // has had a few seconds to settle, and never on the read-only web view.
       // A cancellable Timer (not Future.delayed) so tearing the app down —

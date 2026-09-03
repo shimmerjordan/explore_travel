@@ -580,9 +580,20 @@ class _PlayerScreenState extends ConsumerState<_PlayerScreen> {
 
   Future<void> _loadPeerTrails() async {
     final db = ref.read(dbProvider);
-    final all = await db.select(db.peerLocations).get();
-    final rows = all.where((r) => _inWindow(r.time)).toList()
-      ..sort((a, b) => a.time.compareTo(b.time));
+    if (_tl.segments.isEmpty) return;
+    // 只读时间窗内的行（表里是每个队友每秒一条、无限累积），窄口径的空档再在
+    // 内存里按段过滤。
+    const pad = Duration(minutes: 30);
+    final from = _tl.segments
+        .map((s) => s.start)
+        .reduce((a, b) => a.isBefore(b) ? a : b)
+        .subtract(pad);
+    final to = _tl.segments
+        .map((s) => s.end)
+        .reduce((a, b) => a.isAfter(b) ? a : b)
+        .add(pad);
+    final all = await db.peerLocationsBetween(from, to);
+    final rows = all.where((r) => _inWindow(r.time)).toList();
     final grouped = <String, List<PeerLocation>>{};
     for (final r in rows) {
       (grouped[r.peerId] ??= []).add(r);

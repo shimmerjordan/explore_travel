@@ -92,42 +92,6 @@ final dbProvider = Provider<AppDb>((ref) {
   return db;
 });
 
-/// Startup maintenance run once from the app's post-frame callback (not from
-/// [dbProvider], so the provider stays side-effect-free): self-heal a
-/// layer-less-but-content-full DB — every render layer is layer-driven, so
-/// content whose layers got wiped shows a blank map until this recreates
-/// them — then log a one-line row-count probe. The probe splits "synced but
-/// nothing shows" in one look: zeros → the data never landed (sync); non-zero
-/// → data is here and RENDERING is what's off.
-Future<void> runStartupDbMaintenance(AppDb db) async {
-  try {
-    final fixedIds = await db.backfillMissingUuids();
-    if (fixedIds > 0) {
-      debugPrint('[DB] backfilled $fixedIds missing uuid(s)');
-    }
-    final healed = await db.ensureLayersForContent();
-    if (healed > 0) {
-      debugPrint('[DB] recreated $healed orphaned layer(s) on startup');
-    }
-    Future<int> count(String t, [String where = '']) async =>
-        (await db.customSelect('SELECT COUNT(*) c FROM $t $where').getSingle())
-            .read<int>('c');
-    debugPrint('[DB] rows — journal=${await count('journal_entries')} '
-        'layers=${await count('track_layers')} '
-        'points=${await count('track_points')} '
-        'fog=${await count('fog_tiles')} '
-        'chat=${await count('chat_messages')} '
-        'favorites=${await count('song_favorites')}');
-    // uuid coverage on the two identity-critical, low-volume tables — a
-    // non-zero "no-uuid" count means sync identity is broken for those rows.
-    debugPrint('[DB] no-uuid — '
-        "journal=${await count('journal_entries', "WHERE uuid IS NULL OR uuid=''")} "
-        "layers=${await count('track_layers', "WHERE uuid IS NULL OR uuid=''")}");
-  } catch (e) {
-    debugPrint('[DB] startup self-heal/probe failed: $e');
-  }
-}
-
 final fogEngineProvider =
     Provider<FogEngine>((ref) => FogEngine(ref.watch(dbProvider)));
 

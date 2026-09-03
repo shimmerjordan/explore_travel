@@ -258,6 +258,24 @@ class AppDb extends _$AppDb {
     'CREATE INDEX IF NOT EXISTS idx_track_points_time ON track_points(time)',
     'CREATE INDEX IF NOT EXISTS idx_visits_started ON visits(started_at)',
     'CREATE INDEX IF NOT EXISTS idx_visits_place ON visits(place_id)',
+    // fog_tiles 的主键顺序是 (tile_x, tile_y, zoom, layer_id)，而每个读者都按
+    // layer_id + zoom 过滤 —— 主键索引对这种查询毫无用处，9 万行全表扫描。
+    // 这条索引同时服务全量读（layer+zoom）与录制时的块 bbox 范围读。
+    'CREATE INDEX IF NOT EXISTS idx_fog_tiles_layer_zoom '
+        'ON fog_tiles(layer_id, zoom, tile_x, tile_y)',
+    // recentJournal：每次开地图都 ORDER BY time DESC LIMIT 100。
+    'CREATE INDEX IF NOT EXISTS idx_journal_time ON journal_entries(time)',
+    // ensureLayersForContent / mergeLayers 按图层聚合。
+    'CREATE INDEX IF NOT EXISTS idx_journal_layer ON journal_entries(layer_id)',
+    // 同步按 uuid 做行级 LWW。
+    'CREATE INDEX IF NOT EXISTS idx_journal_uuid ON journal_entries(uuid)',
+    // 橡皮擦 erasePointsAround 的 bbox 扫描（原先全表扫两遍）。
+    'CREATE INDEX IF NOT EXISTS idx_track_points_lat_lng '
+        'ON track_points(lat, lng)',
+    // 回放按时间窗读队友轨迹；GC 按时间删。
+    'CREATE INDEX IF NOT EXISTS idx_peer_locations_time '
+        'ON peer_locations(time)',
+    'CREATE INDEX IF NOT EXISTS idx_fog_erases_layer ON fog_erases(layer_id)',
   ];
 
   @override
@@ -936,6 +954,30 @@ class AppDb extends _$AppDb {
             ..where((t) =>
                 t.deletedAt.isSmallerThanValue(DateTime.now().subtract(keep))))
           .go();
+
+  // ─── Peer location history（队友轨迹持久化）──────────────────────────────
+
+  /// Peer pings inside [from, to], oldest first. Playback used to read the
+  /// whole table (one row per ping per peer, forever) and filter in Dart.
+  Future<List<PeerLocation>> peerLocationsBetween(DateTime from, DateTime to) =>
+      (select(peerLocations)
+            ..where((p) => p.time.isBetweenValues(from, to))
+            ..orderBy([(p) => OrderingTerm.asc(p.time)]))
+          .get();
+
+  /// Drop peer pings older than [keep]. Probe first (same reason as
+  /// [gcFogErases]) so a no-op launch doesn't fire a table-update event.
+  Future<int> gcPeerLocations({Duration keep = const Duration(days: 30)}) async {
+    final cutoff = DateTime.now().subtract(keep);
+    final probe = await (select(peerLocations)
+          ..where((p) => p.time.isSmallerThanValue(cutoff))
+          ..limit(1))
+        .get();
+    if (probe.isEmpty) return 0;
+    return (delete(peerLocations)
+          ..where((p) => p.time.isSmallerThanValue(cutoff)))
+        .go();
+  }
 
   // ─── Fog erase markers（迷雾增量减）──────────────────────────────────────
 

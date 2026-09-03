@@ -236,18 +236,10 @@ class FogEngine {
     // (e.g. import bug producing a giant gap) can't queue 100k writes.
     final steps = segPx.ceil().clamp(1, 8192);
 
-    final touched = <String, _BlockEdit>{};
+    final touched = _BlockEdits();
     void addPixel(int gx, int gy) {
       if (gx < 0 || gy < 0 || gx >= full || gy >= full) return;
-      final decomX = decompose(gx);
-      final decomY = decompose(gy);
-      final key =
-          '${decomX.tile}_${decomY.tile}_${decomX.block}_${decomY.block}';
-      final edit = touched.putIfAbsent(
-          key,
-          () => _BlockEdit(
-              decomX.tile, decomY.tile, decomX.block, decomY.block));
-      edit.sets.add((decomX.pixel, decomY.pixel));
+      touched.addPixel(gx, gy);
     }
 
     final rSq = rPx * rPx;
@@ -267,29 +259,7 @@ class FogEngine {
         }
       }
     }
-    final changed = <FogTile>[];
-    for (final edit in touched.values) {
-      final dbX = _dbX(edit.tileX, edit.blockX);
-      final dbY = _dbY(edit.tileY, edit.blockY);
-      final existing = await db.getFogTile(dbX, dbY, tileZoom, layerId);
-      final bytes = existing == null
-          ? Uint8List(bitmapBytes)
-          : Uint8List.fromList(existing.bitmap);
-      for (final (px, py) in edit.sets) {
-        setBit(bytes, px, py);
-      }
-      final row = FogTile(
-        tileX: dbX,
-        tileY: dbY,
-        zoom: tileZoom,
-        layerId: layerId,
-        bitmap: bytes,
-        updatedAt: DateTime.now(),
-      );
-      await db.upsertFogTile(row.toCompanion(false));
-      changed.add(row);
-    }
-    _emitChanged(changed);
+    await _flushReveal(touched, layerId);
   }
 
   Future<void> revealPoint({
@@ -312,49 +282,72 @@ class FogEngine {
 
     final rSq = rPx * rPx;
 
-    final touched = <String, _BlockEdit>{};
-
+    final touched = _BlockEdits();
     for (int gy = yMin; gy <= yMax; gy++) {
       final dy = gy - cy;
       for (int gx = xMin; gx <= xMax; gx++) {
         final dx = gx - cx;
         if (dx * dx + dy * dy > rSq) continue;
-
-        final decomX = decompose(gx);
-        final decomY = decompose(gy);
-        final key = '${decomX.tile}_${decomY.tile}_${decomX.block}_${decomY.block}';
-        final edit = touched.putIfAbsent(key, () => _BlockEdit(
-          decomX.tile, decomY.tile, decomX.block, decomY.block,
-        ));
-        edit.sets.add((decomX.pixel, decomY.pixel));
+        touched.addPixel(gx, gy);
       }
     }
+    await _flushReveal(touched, layerId);
+  }
 
+  /// 把一次 reveal 触及的所有块一次性落盘：一条范围查询取出现有位图、内存里
+  /// OR 进新像素、**一个事务**批量 upsert。以前是逐块 `getFogTile` +
+  /// `upsertFogTile`，每块一次隐式事务 / fsync —— 高性能录制模式 1 s 一个点、
+  /// 每点触及 2–5 块，就是每秒 2–5 次 fsync，整段旅程持续不断。
+  ///
+  /// 位图没有变化的块（沿着走过的路再走一遍）直接跳过：不写库、不刷
+  /// `updatedAt`（否则同步 LWW 会把毫无变化的行当成"更新"到处传）、不发
+  /// delta（否则迷雾图层为此重烘一遍瓦片）。
+  Future<void> _flushReveal(_BlockEdits touched, int layerId) async {
+    if (touched.isEmpty) return;
+    final existing = await _existingBlocks(touched, layerId);
+    final now = DateTime.now();
     final changed = <FogTile>[];
     for (final edit in touched.values) {
-      final dbX = _dbX(edit.tileX, edit.blockX);
-      final dbY = _dbY(edit.tileY, edit.blockY);
-      final existing = await db.getFogTile(dbX, dbY, tileZoom, layerId);
-      final bytes = existing == null
+      final prev = existing[edit.key];
+      final bytes = prev == null
           ? Uint8List(bitmapBytes)
-          : Uint8List.fromList(existing.bitmap);
-
+          : Uint8List.fromList(prev.bitmap);
+      var dirty = prev == null;
       for (final (px, py) in edit.sets) {
+        if (!dirty && !isSet(bytes, px, py)) dirty = true;
         setBit(bytes, px, py);
       }
-
-      final row = FogTile(
-        tileX: dbX,
-        tileY: dbY,
+      if (!dirty) continue;
+      changed.add(FogTile(
+        tileX: edit.dbX,
+        tileY: edit.dbY,
         zoom: tileZoom,
         layerId: layerId,
         bitmap: bytes,
-        updatedAt: DateTime.now(),
-      );
-      await db.upsertFogTile(row.toCompanion(false));
-      changed.add(row);
+        updatedAt: now,
+      ));
     }
+    if (changed.isEmpty) return;
+    await db.batchUpsertFogTiles(
+        changed.map((r) => r.toCompanion(false)).toList(growable: false));
     _emitChanged(changed);
+  }
+
+  /// Current rows for every block in [touched], keyed like [_BlockEdit.key].
+  /// One bbox query on the (layer, zoom, x, y) index instead of N point reads;
+  /// blocks touched by a single reveal are spatially adjacent so the bbox is
+  /// tight and the extra rows it might include are few.
+  Future<Map<int, FogTile>> _existingBlocks(
+      _BlockEdits touched, int layerId) async {
+    final rows = await db.fogTilesInRange(
+      [layerId],
+      tileZoom,
+      touched.minX,
+      touched.maxX,
+      touched.minY,
+      touched.maxY,
+    );
+    return {for (final r in rows) _BlockEdit.keyOf(r.tileX, r.tileY): r};
   }
 
   /// Erase fog around a point.
@@ -377,57 +370,56 @@ class FogEngine {
     final yMax = (cy + rPx).clamp(0, full - 1);
 
     final rSq = rPx * rPx;
-    final touched = <String, _BlockEdit>{};
-
+    final touched = _BlockEdits();
     for (int gy = yMin; gy <= yMax; gy++) {
       final dy = gy - cy;
       for (int gx = xMin; gx <= xMax; gx++) {
         final dx = gx - cx;
         if (dx * dx + dy * dy > rSq) continue;
-
-        final decomX = decompose(gx);
-        final decomY = decompose(gy);
-        final key = '${decomX.tile}_${decomY.tile}_${decomX.block}_${decomY.block}';
-        final edit = touched.putIfAbsent(key, () => _BlockEdit(
-          decomX.tile, decomY.tile, decomX.block, decomY.block,
-        ));
-        edit.sets.add((decomX.pixel, decomY.pixel));
+        touched.addPixel(gx, gy);
       }
     }
+    if (touched.isEmpty) return;
 
+    final existing = await _existingBlocks(touched, layerId);
+    final now = DateTime.now();
     final changed = <FogTile>[];
-    for (final edit in touched.values) {
-      final dbX = _dbX(edit.tileX, edit.blockX);
-      final dbY = _dbY(edit.tileY, edit.blockY);
+    // 掩码记录与位图更新放同一个事务：要么一起落盘，要么都不。
+    await db.transaction(() async {
+      for (final edit in touched.values) {
+        // Record the full swept mask (not just locally-lit pixels): the erase
+        // must clear these pixels on other devices too, whose copies may hold
+        // bits this device never had.
+        final eraseMask = Uint8List(bitmapBytes);
+        for (final (px, py) in edit.sets) {
+          setBit(eraseMask, px, py);
+        }
+        await db.recordFogErase(
+            edit.dbX, edit.dbY, tileZoom, layerId, eraseMask);
 
-      // Record the full swept mask (not just locally-lit pixels): the erase
-      // must clear these pixels on other devices too, whose copies may hold
-      // bits this device never had.
-      final eraseMask = Uint8List(512);
-      for (final (px, py) in edit.sets) {
-        setBit(eraseMask, px, py);
+        final prev = existing[edit.key];
+        if (prev == null) continue;
+        final bytes = Uint8List.fromList(prev.bitmap);
+        var dirty = false;
+        for (final (px, py) in edit.sets) {
+          if (!dirty && isSet(bytes, px, py)) dirty = true;
+          clearBit(bytes, px, py);
+        }
+        if (!dirty) continue;
+        changed.add(FogTile(
+          tileX: edit.dbX,
+          tileY: edit.dbY,
+          zoom: tileZoom,
+          layerId: layerId,
+          bitmap: bytes,
+          updatedAt: now,
+        ));
       }
-      await db.recordFogErase(dbX, dbY, tileZoom, layerId, eraseMask);
-
-      final existing = await db.getFogTile(dbX, dbY, tileZoom, layerId);
-      if (existing == null) continue;
-      final bytes = Uint8List.fromList(existing.bitmap);
-
-      for (final (px, py) in edit.sets) {
-        clearBit(bytes, px, py);
+      if (changed.isNotEmpty) {
+        await db.batchUpsertFogTiles(
+            changed.map((r) => r.toCompanion(false)).toList(growable: false));
       }
-
-      final row = FogTile(
-        tileX: dbX,
-        tileY: dbY,
-        zoom: tileZoom,
-        layerId: layerId,
-        bitmap: bytes,
-        updatedAt: DateTime.now(),
-      );
-      await db.upsertFogTile(row.toCompanion(false));
-      changed.add(row);
-    }
+    });
     _emitChanged(changed);
   }
 
@@ -752,10 +744,41 @@ class FogEngine {
   }
 }
 
+/// One block's worth of pixel edits from a single reveal/erase sweep.
 class _BlockEdit {
-  final int tileX, tileY, blockX, blockY;
+  /// Block-grid coordinates as stored in `fog_tiles.tile_x/tile_y`.
+  final int dbX, dbY;
   final List<(int, int)> sets = [];
-  _BlockEdit(this.tileX, this.tileY, this.blockX, this.blockY);
+  _BlockEdit(this.dbX, this.dbY);
+
+  int get key => keyOf(dbX, dbY);
+
+  /// dbX/dbY are < 2^16 (512 tiles × 128 blocks), so both fit one int.
+  static int keyOf(int dbX, int dbY) => (dbX << 16) | dbY;
+}
+
+/// Pixel edits of one sweep grouped by block, plus the block-grid bbox so the
+/// existing rows can be fetched with a single range query.
+class _BlockEdits {
+  final Map<int, _BlockEdit> _edits = {};
+  int minX = 1 << 30, maxX = -1, minY = 1 << 30, maxY = -1;
+
+  bool get isEmpty => _edits.isEmpty;
+  Iterable<_BlockEdit> get values => _edits.values;
+
+  void addPixel(int gx, int gy) {
+    final dx = FogEngine.decompose(gx);
+    final dy = FogEngine.decompose(gy);
+    final dbX = FogEngine._dbX(dx.tile, dx.block);
+    final dbY = FogEngine._dbY(dy.tile, dy.block);
+    final edit = _edits.putIfAbsent(
+        _BlockEdit.keyOf(dbX, dbY), () => _BlockEdit(dbX, dbY));
+    edit.sets.add((dx.pixel, dy.pixel));
+    if (dbX < minX) minX = dbX;
+    if (dbX > maxX) maxX = dbX;
+    if (dbY < minY) minY = dbY;
+    if (dbY > maxY) maxY = dbY;
+  }
 }
 
 /// Result bundle from [FogEngine.computeAggregates].

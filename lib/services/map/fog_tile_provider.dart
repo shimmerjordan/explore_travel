@@ -890,14 +890,17 @@ class _FogTileLayerState extends State<FogTileLayer> {
 
   Future<void> _reload() async {
     final ids = widget.layerIds;
+    final sw = Stopwatch()..start();
     final rows = ids.isEmpty
         ? const <FogTile>[]
         : await widget.db.fogTilesForLayers(ids, FogEngine.tileZoom);
     if (!mounted) return;
     // DIAG: which layers the map actually reads fog from. Compare against the
     // [FOW] import log's activeLayer — a mismatch is why re-imported fog after a
-    // clear "没了" (written to a layer the map doesn't render).
-    debugPrint('[FOG] reload visibleLayers=$ids → loaded=${rows.length} tiles');
+    // clear "没了" (written to a layer the map doesn't render). The timing is
+    // the whole query + row materialisation for a full-table read.
+    debugPrint('[FOG] reload visibleLayers=$ids → loaded=${rows.length} tiles '
+        'in ${sw.elapsedMilliseconds}ms');
     _rows
       ..clear()
       ..addEntries(rows.map((t) => MapEntry(_key(t), t)));

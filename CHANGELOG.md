@@ -26,6 +26,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 
 - 新增 `test/core/geo_math_test.dart`（与合并前 5 处实现数值一致性、FogEngine 像素投影逐位不变）、`test/ui/format_test.dart`。全量 518 通过。
 
+### 性能 / 功耗（第二轮，数据层与启动）
+
+- 启动维护拆到 `lib/app/startup_maintenance.dart`：uuid 全表回填只在 schema 版本变化后跑一次（prefs 标记），孤儿图层自愈保留每次，8 次 `COUNT(*)` 探针仅 debug 构建或调试模式输出；新增 `peer_locations` 30 天 GC。
+- 新增 8 条幂等索引：`fog_tiles(layer_id, zoom, tile_x, tile_y)`、`journal_entries(time|layer_id|uuid)`、`track_points(lat, lng)`、`peer_locations(time)`、`fog_erases(layer_id)`。单测用 `EXPLAIN QUERY PLAN` 钉住不再全表扫描 / 临时排序。
+- 迷雾 reveal / erase 改为一次 bbox 范围读 + 一个事务批量 upsert，**位图未变的块直接跳过**（不写库、不刷 `updatedAt`、不发 delta）。真机重走已探索路段：写系统调用 −38%、写入字节 −40%；新路段无差别（写入量被底图瓦片缓存主导）。
+- 回放的队友轨迹按时间窗读取，不再全表读；迷雾全量加载加计时日志（真机 46879 行 ≈ 0.9 s，本机 128 ms，索引对全量读无影响——成本在行对象化）。
+- `LogBuffer` 只在 debug 构建或调试模式下安装（release 每条日志少一次分配与监听扫描）。
+
+测试新增 18 个（索引 / GC / 批写等价 / 启动维护），全量 533 通过。
+
 ## [Unreleased] — 2026-08-27
 
 借鉴「人生点点 2.0」的 3D 热图与自托管项目 Dawarich 的数据层算法（调研与

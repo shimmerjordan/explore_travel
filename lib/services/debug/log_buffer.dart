@@ -24,6 +24,18 @@ class LogBuffer {
     };
   }
 
+  static bool get installed => _original != null;
+
+  /// Put the plain `debugPrint` back. Release builds only capture while the
+  /// hidden debug mode is on — every log line otherwise costs an allocation
+  /// and a listener sweep for a viewer nobody has opened.
+  static void uninstall() {
+    final orig = _original;
+    if (orig == null) return;
+    debugPrint = orig;
+    _original = null;
+  }
+
   static void _push(String line) {
     _entries.add(LogEntry(
       seq: _seq++,
