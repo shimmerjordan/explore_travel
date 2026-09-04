@@ -18,6 +18,16 @@ import 'package:flutter/material.dart';
 
 /// Display styles in the pixel face. Use ONLY for hero/display moments:
 /// big numbers, page heroes, celebration copy. Never for body/labels.
+///
+/// [display] 与 [headline] 两档在 `buildAppTheme` 的 `textTheme` 里也有一份
+/// （`displaySmall` / `headlineSmall`）——**故意的两条取用路径**：主题那份是
+/// 写进 DESIGN.md 的机器可读 token，这里这份不需要 `context`、能出现在 const
+/// 语境里。`test/ui/type_scale_test.dart` 断言两者逐字段相等，改一边不改另一
+/// 边就会红。
+///
+/// [label] 只在这里有：M3 的 `labelMedium` 在当前 Flutter 版本里 fontSize 为
+/// null（环境默认 14），把它钉成 12 会牵动全应用所有 label。理由与重新评估的
+/// 条件写在那份测试的最后一条里。
 abstract final class PixelText {
   static const String family = 'PixelZh';
 

@@ -174,9 +174,11 @@ components:
 
 **一套字体，全局像素。** 缝合像素字体（fusion-pixel-font 12px 简中，OFL）注册为 `PixelZh`，通过 `ThemeData.fontFamily` 应用到正文、标签、按钮、标题——这是明确的产品选择，不是只给标题用。缺字自动回落系统字面。**国旗 emoji 必须显式指定 `fontFamily: 'Roboto'`**，否则渲染成字母方块；国行 ROM 常无 regional-indicator 字形，`FlagBadge` 会检测并回退成两字母 ISO 徽章。
 
-像素字体是 **12px 网格**的：大字号只有落在 12 的整数倍上才不发糊。所以 display / headline 两族显式钉在 36 / 24；title / body / label 保持 M3 默认（16 / 14 / 12），它们本来就在可读区间，而动它们等于把全应用的列表、按钮、AppBar 一起改版。经纬度、诊断与调试输出用 `monospace`。
+像素字体是 **12px 网格**的：大字号只有落在 12 的整数倍上才不发糊。所以 display / headline 两族显式钉在 36 / 24；title / body / label 走 Material 组件各自的默认（16 / 14 / 12 量级——注意在当前 Flutter 版本里 `ThemeData.textTheme` 的这些角色 `fontSize` 是 null，尺寸由组件在构建时给），动它们等于把全应用的列表、按钮、AppBar 一起改版。经纬度、诊断与调试输出用 `monospace`。
 
-字号一律用 sp（Flutter 的逻辑像素跟随系统字号设置），不写死 px。`test/ui/contrast_test.dart` 有一条断言钉住 12 网格，防止有人顺手改成 34。
+字号跟随系统字号设置——这一点**不需要**特别做什么：Flutter 的 `Text` 会把 `MediaQuery.textScaler` 应用到最终样式的 `fontSize` 上，写在主题角色里还是写在 inline `TextStyle` 里都一样会缩放（实测 14 → 28 @ 2.0×）。所以页面里现存的 inline `fontSize` 不是无障碍问题，只是可维护性问题：新代码优先用角色，已有的 inline 值不值得为了统一而冒改版风险。
+
+显示档有两条取用路径，都合法：主题的 `displaySmall` / `headlineSmall`（写进上面 frontmatter 的 token）与 `PixelText.display` / `headline`（不需要 `context`，可用于 const 语境）。`test/ui/type_scale_test.dart` 断言两者逐字段相等、尺寸是 12 的倍数、字距为 0——改一边不改另一边就会红。`PixelText.label` 刻意只有常量一份，理由见那份测试。
 
 ## Elevation
 

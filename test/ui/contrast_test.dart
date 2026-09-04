@@ -181,19 +181,6 @@ void main() {
         }
       });
 
-      test('$tag：display / headline 落在像素字体的 12px 网格上', () {
-        // 像素字体在非 12 倍数的字号上会糊；这条把「以后有人顺手改成 34」挡住。
-        for (final st in [
-          theme.textTheme.displaySmall,
-          theme.textTheme.headlineSmall,
-        ]) {
-          expect(st, isNotNull);
-          expect(st!.fontSize! % 12, 0,
-              reason: '${st.fontSize} 不是 12 的整数倍');
-          expect(st.fontFamily, 'PixelZh');
-        }
-      });
-
       test('$tag：正文与次要文字在每种面上都可读', () {
         for (final s in surfaces.entries) {
           expectContrast(cs.onSurface, s.value, body, '$tag ${s.key} 正文');

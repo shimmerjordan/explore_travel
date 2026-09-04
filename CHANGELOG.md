@@ -43,7 +43,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 - `TopToast` 的 `orange.shade700` 配白字仅 2.70:1；地图模式横幅的品牌青绿承载白字 2.68:1 → 新增压深的 `brandDeep` / `toastDanger` / `toastWarning`，色相不变。
 - 排行榜金银奖牌在亮色主题下只有 1.70 / 1.78:1；AI 规划的警告横幅在亮色主题下是深底配浅字（主题瞎）；私聊「按住说话」的白色麦克风压在浅青绿上只有 1.71:1。
 
-全量 628 测试通过，`flutter analyze --fatal-infos` 零问题。
+### 字号系统（原计划的第四步，按实测结论缩小了范围）
+
+原打算把 `PixelText` 的 20 处与 inline `fontSize` 的约 180 处一并迁到 `textTheme`，理由是「inline 字号会让系统字号设置失效」。**实测证伪**：Flutter 的 `Text` 把 `MediaQuery.textScaler` 应用到最终样式的 `fontSize`，写在主题角色里还是 inline 都一样缩放（14 → 28 @ 2.0×）。迁移的唯一收益退化为一致性，而代价是把 10/11/13/18/22 映射到 12/14/16 会改动全应用视觉——不值得。
+
+改为立一道防漂移的锁：`test/ui/type_scale_test.dart` 断言主题的 `displaySmall`/`headlineSmall` 与 `PixelText.display`/`headline` **逐字段相等**、尺寸是 12 的倍数、字距为 0。两条取用路径（主题角色 / 常量）都合法且刻意保留——常量那份不需要 `context`、能进 const 语境；改一边不改另一边就会红。`PixelText.label` 留在常量里：M3 的 `labelMedium` 在当前 Flutter 版本 `fontSize` 为 null，映射过去那 6 处会从 12 变成环境默认的 14。
+
+全量 633 测试通过，`flutter analyze --fatal-infos` 零问题。
 
 ## [Unreleased] — 2026-09-03
 
