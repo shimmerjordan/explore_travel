@@ -75,11 +75,11 @@ class _JournalCard extends StatelessWidget {
                         Container(
                           padding: const EdgeInsets.symmetric(
                               horizontal: 8, vertical: 2),
-                          color: const Color(0xFF26A69A).withValues(alpha: 0.2),
+                          color: MapChrome.brand.withValues(alpha: 0.2),
                           child: Text(distLabel,
                               style: const TextStyle(
                                   fontSize: 11,
-                                  color: Color(0xFF26A69A),
+                                  color: MapChrome.brand,
                                   fontWeight: FontWeight.w600)),
                         ),
                       ],
@@ -170,49 +170,55 @@ class _JournalPin extends StatelessWidget {
       final l = p.toLowerCase();
       return !(l.endsWith(".mp4") || l.endsWith(".mov") || l.endsWith(".mkv"));
     }).firstOrNull;
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Container(
-          width: 40,
-          height: 40,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            border: Border.all(color: Colors.white, width: 2),
-            boxShadow: [
-              BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.35), blurRadius: 4),
-            ],
-          ),
-          clipBehavior: Clip.antiAlias,
-          child: firstImage == null
-              ? Container(
-                  color: const Color(0xFFFF8A65),
-                  alignment: Alignment.center,
-                  child: const Icon(Icons.menu_book_rounded,
-                      color: Colors.white, size: 20),
-                )
-              : Image.file(
-                  File(firstImage),
-                  fit: BoxFit.cover,
-                  // A 40 px bubble; without this the full-resolution photo
-                  // was decoded into the ImageCache (and evicted fog tiles).
-                  cacheWidth: 120,
-                  cacheHeight: 120,
-                  errorBuilder: (_, __, ___) => Container(
-                    color: const Color(0xFFFF8A65),
+    // 一颗图钉整体读成一个节点：缩略图、兜底图标、下面那只三角尾巴
+    // （_PinTailPainter）都只是画面，标题才是内容。
+    return Semantics(
+      label: '手账：${entry.title}',
+      excludeSemantics: true,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              border: Border.all(color: MapChrome.markerRing, width: 2),
+              boxShadow: [
+                BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.35), blurRadius: 4),
+              ],
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: firstImage == null
+                ? Container(
+                    color: MapChrome.journalPin,
                     alignment: Alignment.center,
                     child: const Icon(Icons.menu_book_rounded,
-                        color: Colors.white, size: 20),
+                        color: MapChrome.onChrome, size: 20),
+                  )
+                : Image.file(
+                    File(firstImage),
+                    fit: BoxFit.cover,
+                    // A 40 px bubble; without this the full-resolution photo
+                    // was decoded into the ImageCache (and evicted fog tiles).
+                    cacheWidth: 120,
+                    cacheHeight: 120,
+                    errorBuilder: (_, __, ___) => Container(
+                      color: MapChrome.journalPin,
+                      alignment: Alignment.center,
+                      child: const Icon(Icons.menu_book_rounded,
+                          color: MapChrome.onChrome, size: 20),
+                    ),
                   ),
-                ),
-        ),
-        // Tail
-        CustomPaint(
-          size: const Size(12, 8),
-          painter: _PinTailPainter(),
-        ),
-      ],
+          ),
+          // Tail
+          CustomPaint(
+            size: const Size(12, 8),
+            painter: _PinTailPainter(),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -220,7 +226,7 @@ class _JournalPin extends StatelessWidget {
 class _PinTailPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
-    final paint = Paint()..color = Colors.white;
+    final paint = Paint()..color = MapChrome.markerRing;
     final path = ui.Path()
       ..moveTo(0, 0)
       ..lineTo(size.width, 0)

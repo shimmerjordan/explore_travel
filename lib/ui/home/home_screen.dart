@@ -6,6 +6,7 @@ import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 import '../../app/providers.dart';
 import '../common/atmosphere.dart';
+import '../common/failure.dart';
 import '../common/pixel.dart';
 
 class HomeScreen extends ConsumerWidget {
@@ -57,11 +58,29 @@ class HomeScreen extends ConsumerWidget {
             actions: [
               Padding(
                 padding: const EdgeInsets.only(right: 12),
-                child: GestureDetector(
-                  onTap: () => _showProfileSheet(context, ref),
-                  child: _ProfileAvatar(
-                    b64: settings.avatarBase64,
-                    seed: settings.selfPeerId ?? settings.displayName,
+                child: Semantics(
+                  button: true,
+                  // 一张头像（没设照片时是首字母），原来读屏只念得出那个孤立
+                  // 的字母，也听不出它是个按钮。
+                  label: '${settings.displayName}，个人资料',
+                  child: GestureDetector(
+                    onTap: () => _showProfileSheet(context, ref),
+                    behavior: HitTestBehavior.opaque,
+                    // 头像本身只有 36dp；外面套一个 48dp 的透明框把触控目标补
+                    // 到 Material 下限，视觉不变。ExcludeSemantics 只包画面：
+                    // 包住 GestureDetector 会把 tap 动作一起排除掉。
+                    child: SizedBox(
+                      width: 48,
+                      height: 48,
+                      child: Center(
+                        child: ExcludeSemantics(
+                          child: _ProfileAvatar(
+                            b64: settings.avatarBase64,
+                            seed: settings.selfPeerId ?? settings.displayName,
+                          ),
+                        ),
+                      ),
+                    ),
                   ),
                 ),
               ),
@@ -412,18 +431,36 @@ class _VersionTapState extends ConsumerState<_VersionTap> {
   @override
   Widget build(BuildContext context) {
     final debug = ref.watch(settingsProvider).debugMode;
+    final version = 'Explore Journal · v0.1.0${debug ? ' · debug' : ''}';
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
+      // 上下 8/32 换成 0/16：下面的 48dp 触控框把高度补回来了（总高 54→64）。
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
       child: Center(
-        child: GestureDetector(
-          onTap: _onTap,
-          behavior: HitTestBehavior.opaque,
-          child: Text(
-            'Explore Journal · v0.1.0${debug ? ' · debug' : ''}',
-            style: TextStyle(
-                fontSize: 11,
-                color: Theme.of(context).hintColor,
-                letterSpacing: 0.5),
+        child: Semantics(
+          button: true,
+          // 这行字看着是说明文字，其实是个按钮（连点十次开调试模式）。读屏
+          // 原来只念到版本号，完全不知道它可点。
+          label: '$version，连续点按十次可开启调试模式',
+          child: GestureDetector(
+            onTap: _onTap,
+            behavior: HitTestBehavior.opaque,
+            // 一行 11px 的字只有 ~14dp 高，够不上触控下限；48dp 的透明框把它
+            // 撑够，文字仍居中。ExcludeSemantics 只包那行字——包住
+            // GestureDetector 会把 tap 动作一起排除掉。
+            child: SizedBox(
+              height: 48,
+              child: Center(
+                child: ExcludeSemantics(
+                  child: Text(
+                    version,
+                    style: TextStyle(
+                        fontSize: 11,
+                        color: Theme.of(context).hintColor,
+                        letterSpacing: 0.5),
+                  ),
+                ),
+              ),
+            ),
           ),
         ),
       ),
@@ -496,17 +533,32 @@ Future<void> _showProfileSheet(BuildContext context, WidgetRef ref) async {
                     b64: s.avatarBase64,
                     seed: s.selfPeerId ?? s.displayName,
                   ),
-                  Material(
-                    color: Theme.of(sheetCtx).colorScheme.primary,
-                    shape: const CircleBorder(),
-                    elevation: 2,
-                    child: InkWell(
-                      customBorder: const CircleBorder(),
-                      onTap: () => _pickAvatar(sheetCtx, ref),
-                      child: const Padding(
-                        padding: EdgeInsets.all(8),
-                        child: Icon(Icons.photo_camera_outlined,
-                            color: Colors.white, size: 18),
+                  // 纯图标的相机徽章：语义标签是读屏唯一的信息来源。外层 48dp
+                  // 透明框补足触控目标，里层 Material 保持原来 34dp 的视觉。
+                  Semantics(
+                    button: true,
+                    label: '更换头像',
+                    child: SizedBox(
+                      width: 48,
+                      height: 48,
+                      child: Material(
+                        color: Colors.transparent,
+                        child: InkWell(
+                          customBorder: const CircleBorder(),
+                          onTap: () => _pickAvatar(sheetCtx, ref),
+                          child: Center(
+                            child: Material(
+                              color: Theme.of(sheetCtx).colorScheme.primary,
+                              shape: const CircleBorder(),
+                              elevation: 2,
+                              child: const Padding(
+                                padding: EdgeInsets.all(8),
+                                child: Icon(Icons.photo_camera_outlined,
+                                    color: Colors.white, size: 18),
+                              ),
+                            ),
+                          ),
+                        ),
                       ),
                     ),
                   ),
@@ -611,10 +663,13 @@ Future<void> _pickAvatar(BuildContext context, WidgetRef ref) async {
     await ref
         .read(settingsProvider.notifier)
         .update((p) => p.copyWith(avatarBase64: b64));
-  } catch (e) {
+  } catch (e, st) {
     if (context.mounted) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('选择图片失败：$e')));
+      showFailure(context,
+          action: '选择图片',
+          error: e,
+          stack: st,
+          onRetry: () => _pickAvatar(context, ref));
     }
   }
 }

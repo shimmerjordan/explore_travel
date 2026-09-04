@@ -7,6 +7,8 @@ import '../../services/leaderboard/leaderboard_contributors.dart';
 import '../../services/leaderboard/leaderboard_model.dart';
 import '../../services/leaderboard/leaderboard_service.dart';
 import '../about/about_screen.dart' show openServerGuide;
+import '../common/empty_state.dart';
+import '../common/failure.dart';
 import '../common/pixel.dart';
 
 /// Decentralised leaderboard screen — two tabs:
@@ -22,6 +24,7 @@ class LeaderboardScreen extends ConsumerStatefulWidget {
 class _LeaderboardScreenState extends ConsumerState<LeaderboardScreen> {
   String _selectedMonth = _ymOf(DateTime.now());
   bool _autoRefreshed = false;
+  bool _syncing = false;
 
   @override
   void initState() {
@@ -154,15 +157,25 @@ class _LeaderboardScreenState extends ConsumerState<LeaderboardScreen> {
             ),
           ],
         ),
-        body: TabBarView(children: [
-          _GlobalTab(entries: entries, selfId: settings.selfPeerId),
-          _MonthlyTab(
-            entries: entries,
-            selfId: settings.selfPeerId,
-            selectedMonth: _selectedMonth,
-            onMonthChange: (m) => setState(() => _selectedMonth = m),
-          ),
-        ]),
+        // 拉榜单要走网络，慢的时候整屏空白十几秒；不说清在等什么，空状态的
+        // 「还没有数据」就会把「正在拉」误报成「没有」。
+        body: entries.isEmpty && (_syncing || entriesAsync.isLoading)
+            ? LoadingState(
+                label: _syncing ? '正在同步社区服务器…' : '正在读取榜单…')
+            : TabBarView(children: [
+                _GlobalTab(
+                  entries: entries,
+                  selfId: settings.selfPeerId,
+                  onPublish: () => _refreshSelf(),
+                ),
+                _MonthlyTab(
+                  entries: entries,
+                  selfId: settings.selfPeerId,
+                  selectedMonth: _selectedMonth,
+                  onMonthChange: (m) => setState(() => _selectedMonth = m),
+                  onPublish: () => _refreshSelf(),
+                ),
+              ]),
       ),
     );
   }
@@ -323,10 +336,16 @@ class _LeaderboardScreenState extends ConsumerState<LeaderboardScreen> {
       return;
     }
     final svc = ref.read(leaderboardServiceProvider);
-    final self = svc.current.firstWhere(
-      (e) => e.peerId == s.selfPeerId,
-      orElse: () => throw StateError('请先刷新自己的成绩'),
-    );
+    // 原先这里是 `orElse: () => throw StateError('请先刷新自己的成绩')`，而它在
+    // try 之外——抛出后没人捕获，那句提示从来没到过屏幕上，用户只看到操作
+    // 无声无息地什么都没发生。改成先查再提示。
+    final self = svc.current
+        .where((e) => e.peerId == s.selfPeerId)
+        .firstOrNull;
+    if (self == null) {
+      _toast('请先刷新自己的成绩，再贡献到社区榜单');
+      return;
+    }
     try {
       final pr = GithubLeaderboardPR(
         owner: s.leaderboardRepoOwner!,
@@ -344,8 +363,12 @@ class _LeaderboardScreenState extends ConsumerState<LeaderboardScreen> {
           content: SelectableText(url),
         ),
       );
-    } catch (e) {
-      _toast('失败：$e');
+    } catch (e, st) {
+      // 不给「重试」：开 PR 不是幂等操作，第一次可能已经推上分支了，
+      // 再来一遍容易多出一个 PR。
+      if (mounted) {
+        showFailure(context, action: '贡献到社区榜单', error: e, stack: st);
+      }
     }
   }
 
@@ -356,6 +379,7 @@ class _LeaderboardScreenState extends ConsumerState<LeaderboardScreen> {
       return;
     }
     final svc = ref.read(leaderboardServiceProvider);
+    setState(() => _syncing = true);
     try {
       final client = HttpLeaderboardClient(
         baseUrl: s.leaderboardServerUrl!,
@@ -368,8 +392,17 @@ class _LeaderboardScreenState extends ConsumerState<LeaderboardScreen> {
           .firstOrNull;
       if (self != null) await client.push(self);
       _toast('合并 $n 条远端数据');
-    } catch (e) {
-      _toast('服务器同步失败：$e');
+    } catch (e, st) {
+      // 合并是行级 LWW、push 是 upsert，重跑一次没有副作用。
+      if (mounted) {
+        showFailure(context,
+            action: '同步社区服务器',
+            error: e,
+            stack: st,
+            onRetry: _syncWithServer);
+      }
+    } finally {
+      if (mounted) setState(() => _syncing = false);
     }
   }
 
@@ -390,13 +423,15 @@ String _ymOf(DateTime t) =>
 class _GlobalTab extends StatelessWidget {
   final List<LeaderboardEntry> entries;
   final String? selfId;
-  const _GlobalTab({required this.entries, required this.selfId});
+  final VoidCallback onPublish;
+  const _GlobalTab(
+      {required this.entries, required this.selfId, required this.onPublish});
 
   @override
   Widget build(BuildContext context) {
     final sorted = [...entries]
       ..sort((a, b) => b.globalKm2.compareTo(a.globalKm2));
-    if (sorted.isEmpty) return const _EmptyHint();
+    if (sorted.isEmpty) return _EmptyHint(onPublish: onPublish);
     final selfIdx = sorted.indexWhere((e) => e.peerId == selfId);
     return CustomScrollView(
       slivers: [
@@ -503,11 +538,13 @@ class _MonthlyTab extends StatelessWidget {
   final String? selfId;
   final String selectedMonth;
   final ValueChanged<String> onMonthChange;
+  final VoidCallback onPublish;
   const _MonthlyTab({
     required this.entries,
     required this.selfId,
     required this.selectedMonth,
     required this.onMonthChange,
+    required this.onPublish,
   });
 
   @override
@@ -549,7 +586,7 @@ class _MonthlyTab extends StatelessWidget {
         ),
         Expanded(
           child: ranked.isEmpty
-              ? const _EmptyHint()
+              ? _EmptyHint(onPublish: onPublish)
               : CustomScrollView(slivers: [
                   if (selfIdx >= 0)
                     SliverPersistentHeader(
@@ -581,6 +618,23 @@ class _MonthlyTab extends StatelessWidget {
       ],
     );
   }
+}
+
+/// 前三名的奖牌色。**不是状态色**（金牌不等于"成功"），所以不进
+/// `StatusPalette`；但它被当成**文字色**用，仍要过正文的 4.5:1。
+///
+/// Material 直出的 `amber.shade600` / `grey.shade400` 只在暗色主题里成立：
+/// 压在亮色脚手架 `#F3FAF8` 上分别只有 1.70:1 / 1.78:1，等于看不见；
+/// `brown.shade300` 连暗色主题里"这是我"那一行（primaryContainer 0.45 的
+/// 底）也只有 3.96:1。所以按明暗各给一套——**色相不变**，只是亮色压深、
+/// 暗色提亮。`test/ui/contrast_test.dart` 对普通行与"这是我"行各断言一次。
+Color medalColor(int rank, ColorScheme cs) {
+  final dark = cs.brightness == Brightness.dark;
+  return switch (rank) {
+    1 => dark ? const Color(0xFFFFB300) : const Color(0xFF8A5A00), // 金
+    2 => dark ? const Color(0xFFBDBDBD) : const Color(0xFF5C6670), // 银
+    _ => dark ? const Color(0xFFD7A48A) : const Color(0xFF8A4B2A), // 铜
+  };
 }
 
 class _Row extends StatelessWidget {
@@ -616,11 +670,7 @@ class _Row extends StatelessWidget {
                   style: rank <= 3
                       ? PixelText.label.copyWith(
                           fontSize: 14,
-                          color: rank == 1
-                              ? Colors.amber.shade600
-                              : rank == 2
-                                  ? Colors.grey.shade400
-                                  : Colors.brown.shade300,
+                          color: medalColor(rank, c),
                         )
                       : const TextStyle(),
                 ),
@@ -704,20 +754,16 @@ class _Chip extends StatelessWidget {
 }
 
 class _EmptyHint extends StatelessWidget {
-  const _EmptyHint();
+  final VoidCallback onPublish;
+  const _EmptyHint({required this.onPublish});
   @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Text(
-          '还没有数据。\n\n点右上角的 🔄 发布自己的成绩，或者跟队友组个队 — 他们的成绩会自动合并过来。',
-          textAlign: TextAlign.center,
-          style: TextStyle(
-              color: Theme.of(context).colorScheme.onSurfaceVariant),
-        ),
-      ),
-    );
-  }
+  Widget build(BuildContext context) => EmptyState(
+        title: '榜单上还没有人',
+        hint: '点下面的按钮把自己的成绩算出来发上去，或者和队友组个队，'
+            '他们的成绩会自动合并过来。',
+        sprite: PixelSprites.compass,
+        actionLabel: '发布我的成绩',
+        onAction: onPublish,
+      );
 }
 

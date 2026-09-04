@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../app/providers.dart';
 import '../../models/models.dart';
+import '../common/status_palette.dart';
 import '../widgets/responsive_content.dart';
 
 /// 设置页。信息架构（按使用频率）：
@@ -116,8 +117,10 @@ class SettingsScreen extends ConsumerWidget {
                 title: const Text('地图提供商'),
                 subtitle: s.mapProvider == MapProvider.ovital &&
                         (s.ovitalTileUrl ?? '').trim().isEmpty
-                    ? const Text('奥维未配置瓦片地址，暂用 OSM 显示',
-                        style: TextStyle(color: Colors.orange))
+                    // 「选了奥维但没配地址，实际在用别的图源」是需注意，不是错误。
+                    ? Text('奥维未配置瓦片地址，暂用 OSM 显示',
+                        style:
+                            TextStyle(color: Theme.of(context).status.warning))
                     : null,
                 trailing: DropdownButton<MapProvider>(
                   value: s.mapProvider,

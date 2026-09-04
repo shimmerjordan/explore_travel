@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 import '../../app/providers.dart';
 import '../../services/imghost/private_image_loader.dart';
+import '../common/failure.dart';
 
 /// Full-screen rich-text editor backed by Quill. Returns the Delta JSON when
 /// the user taps save. Supports inline images via [_ImageEmbedBuilder] — the
@@ -72,8 +73,9 @@ class _QuillEditorScreenState extends ConsumerState<QuillEditorScreen> {
     } catch (e, st) {
       debugPrint('[QuillEditor] insertImage failed: $e\n$st');
       if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('插入图片失败：$e')));
+        // 堆栈上面那行已经打过了，这里不重复传 stack。
+        showFailure(context,
+            action: '插入图片', error: e, onRetry: _insertImage);
       }
     }
   }
@@ -181,8 +183,8 @@ class _QuillBodyFieldState extends ConsumerState<QuillBodyField> {
     } catch (e, st) {
       debugPrint('[QuillBodyField] insertImage failed: $e\n$st');
       if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('插入图片失败：$e')));
+        showFailure(context,
+            action: '插入图片', error: e, onRetry: () => _insertImage(source));
       }
     }
   }
@@ -367,12 +369,17 @@ class _ImageEmbedBuilder extends q.EmbedBuilder {
 class _BrokenImage extends StatelessWidget {
   const _BrokenImage();
   @override
-  Widget build(BuildContext context) => Container(
-        height: 80,
-        color: Colors.black12,
-        alignment: Alignment.center,
-        child: const Icon(Icons.broken_image, color: Colors.grey),
-      );
+  Widget build(BuildContext context) {
+    // 这块占位是嵌在**正文里**的（不是全屏图片浏览器的黑底），所以跟主题走：
+    // 原先 black12 + Colors.grey 在暗色主题下几乎是灰底灰图标（约 1.6:1）。
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      height: 80,
+      color: cs.surfaceContainerHighest,
+      alignment: Alignment.center,
+      child: Icon(Icons.broken_image, color: cs.onSurfaceVariant),
+    );
+  }
 }
 
 /// Read-only Quill renderer for the journal viewer.

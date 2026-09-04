@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../services/group/group_diagnostics.dart';
+import '../common/status_palette.dart';
 
 /// Live tail of group networking events. Renders newest-first, color-coded
 /// by severity, with a copy-all button so the user can paste the whole log
@@ -124,9 +125,12 @@ class _EventTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // 这枚颜色被画成一条 4px 的竖色条——WCAG 1.4.11 里它是"靠颜色传递信息的
+    // 图形"，需要 3:1；语义色板在两套主题的列表面上都过 4.5:1。
+    final status = Theme.of(context).status;
     final color = switch (e.level) {
-      DiagLevel.error => Colors.redAccent,
-      DiagLevel.warn => Colors.orangeAccent,
+      DiagLevel.error => status.danger,
+      DiagLevel.warn => status.warning,
       DiagLevel.info => Colors.lightBlueAccent,
       DiagLevel.trace => Theme.of(context).hintColor,
     };

@@ -6,6 +6,7 @@ import '../../app/providers.dart';
 import '../../services/vault/admin_config_client.dart';
 import '../../services/vault/auth_controller.dart';
 import '../../services/vault/config_sync_controller.dart';
+import '../common/failure.dart';
 
 /// Pre-flight check on what the user typed, or null when it's worth sending.
 ///
@@ -56,7 +57,7 @@ String humanizeLoginError(Object e) {
     return e.message;
   }
   if (e is ArgumentError) return e.message?.toString() ?? '输入有误';
-  return '失败：$e';
+  return failureMessage('登录', e);
 }
 
 /// Console login gate. The credential is the console's single admin account;

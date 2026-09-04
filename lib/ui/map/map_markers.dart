@@ -12,51 +12,56 @@ class _LocationDot extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = simulated ? Colors.deepPurple : const Color(0xFF26A69A);
-    return Stack(
-      alignment: Alignment.center,
-      children: [
-        // Translucent precision halo.
-        Container(
-          width: 36,
-          height: 36,
-          decoration: BoxDecoration(
-            color: color.withValues(alpha: 0.12),
-            shape: BoxShape.circle,
-          ),
-        ),
-        // Heading arrow — small triangle pointing in motion direction.
-        // Sits outside the dot so it's visible against any background.
-        if (heading != null)
-          Transform.rotate(
-            angle: heading! * math.pi / 180,
-            // Translate the arrow above center BEFORE rotation so it
-            // orbits the dot in the heading direction.
-            child: Transform.translate(
-              offset: const Offset(0, -16),
-              child: CustomPaint(
-                size: const Size(14, 10),
-                painter: _ArrowPainter(color: color),
-              ),
+    final color = simulated ? MapChrome.simulated : MapChrome.brand;
+    // 定位点、精度光环与朝向箭头都是纯画面：位置信息由底部的 GPS 读数胶囊
+    // （_SignalChip，有完整语义标签）负责说，这里显式排除，免得日后有人往里
+    // 加一段带标签的东西，读屏在地图上又多出一个念不清的节点。
+    return ExcludeSemantics(
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          // Translucent precision halo.
+          Container(
+            width: 36,
+            height: 36,
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: 0.12),
+              shape: BoxShape.circle,
             ),
           ),
-        // Solid inner dot.
-        Container(
-          width: 16,
-          height: 16,
-          decoration: BoxDecoration(
-            color: color,
-            shape: BoxShape.circle,
-            border: Border.all(color: Colors.white, width: 2.5),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.3),
-                blurRadius: 4,
+          // Heading arrow — small triangle pointing in motion direction.
+          // Sits outside the dot so it's visible against any background.
+          if (heading != null)
+            Transform.rotate(
+              angle: heading! * math.pi / 180,
+              // Translate the arrow above center BEFORE rotation so it
+              // orbits the dot in the heading direction.
+              child: Transform.translate(
+                offset: const Offset(0, -16),
+                child: CustomPaint(
+                  size: const Size(14, 10),
+                  painter: _ArrowPainter(color: color),
+                ),
               ),
-            ],
+            ),
+          // Solid inner dot.
+          Container(
+            width: 16,
+            height: 16,
+            decoration: BoxDecoration(
+              color: color,
+              shape: BoxShape.circle,
+              border: Border.all(color: MapChrome.markerRing, width: 2.5),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.3),
+                  blurRadius: 4,
+                ),
+              ],
+            ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 }
@@ -75,7 +80,7 @@ class _ArrowPainter extends CustomPainter {
       ..close();
     canvas.drawPath(path, paint);
     final outline = Paint()
-      ..color = Colors.white
+      ..color = MapChrome.markerRing
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1.5;
     canvas.drawPath(path, outline);

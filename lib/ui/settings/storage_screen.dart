@@ -4,7 +4,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../app/providers.dart';
 import '../../services/debug/log_buffer.dart';
 import '../../services/storage/storage_inspector.dart';
+import '../common/empty_state.dart';
+import '../common/failure.dart';
 import '../common/format.dart' show fmtBytes;
+import '../common/pixel.dart';
 
 /// 存储空间 —— 数据库 / 照片 / 各类缓存的占用统计，以及安全的清理入口。
 /// 手账照片虽然落在缓存目录（image_picker 产物），但属于用户数据：
@@ -30,10 +33,10 @@ class _StorageScreenState extends ConsumerState<StorageScreen> {
     try {
       final r = await StorageInspector(ref.read(dbProvider)).scan();
       if (mounted) setState(() => _report = r);
-    } catch (e) {
+    } catch (e, s) {
       if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('统计失败：$e')));
+        showFailure(context,
+            action: '统计', error: e, stack: s, onRetry: _scan);
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -71,10 +74,18 @@ class _StorageScreenState extends ConsumerState<StorageScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text('完成，释放 ${fmtBytes(freed)}')));
       }
-    } catch (e) {
+    } catch (e, s) {
       if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('清理失败：$e')));
+        // 清理都是幂等的（删同一批文件），重试走同一条路——包括再确认一次。
+        showFailure(context,
+            action: '清理',
+            error: e,
+            stack: s,
+            onRetry: () => _run(
+                title: title,
+                body: body,
+                actionLabel: actionLabel,
+                action: action));
       }
     }
     await _scan();
@@ -127,135 +138,149 @@ class _StorageScreenState extends ConsumerState<StorageScreen> {
             child: _busy ? const LinearProgressIndicator(minHeight: 2) : null,
           ),
           Expanded(
-            child: ListView(
-              padding: const EdgeInsets.only(bottom: 32),
-              children: [
-                _Overview(totalBytes: r?.totalBytes, slices: slices),
-                const _SectionHeader('数据'),
-                _CategoryTile(
-                  dot: cs.primary,
-                  title: '数据库',
-                  subtitle: r == null
-                      ? '轨迹 · 迷雾 · 手账 · 聊天'
-                      : '${fmtWan(r.dbCounts.trackPoints)} 轨迹点 · '
-                          '${fmtWan(r.dbCounts.fogTiles)} 迷雾瓦片 · '
-                          '${fmtWan(r.dbCounts.journals)} 手账 · 点按整理回收空间',
-                  size: r?.db.bytes,
-                  onTap: r == null
-                      ? null
-                      : () => _run(
-                            title: '整理数据库？',
-                            body: '回收已删除数据占用的空间（VACUUM），'
-                                '不会改动任何轨迹、迷雾或手账。'
-                                '数据量大时需要几秒，期间请留在本页。',
-                            actionLabel: '整理',
-                            action: () =>
-                                StorageInspector(ref.read(dbProvider))
-                                    .vacuumDb(),
-                          ),
-                ),
-                _CategoryTile(
-                  dot: cs.tertiary,
-                  title: '手账与聊天照片',
-                  subtitle: r != null && r.photosMissing > 0
-                      ? '删除对应手账/消息时自动释放 · ${r.photosMissing} 张源文件已丢失'
-                      : '删除对应手账/消息时自动释放，清理不会碰它们',
-                  size: r?.photos.bytes,
-                ),
-                _CategoryTile(
-                  dot: cs.primary.withValues(alpha: .55),
-                  title: 'AI 旅伴聊天记录',
-                  subtitle: r == null
-                      ? '会话历史'
-                      : '${r.aiSessions} 段会话 · ${r.aiMessages} 条消息 · '
-                          '旅伴卡片「历史」Tab 可按段管理',
-                  size: r?.ai.bytes,
-                  onTap: r == null ? null : _clearAiHistory,
-                ),
-                _CategoryTile(
-                  dot: cs.outlineVariant,
-                  title: '其他数据',
-                  subtitle: '同步镜像 / 待上传轨迹缓冲 / 排行榜记录等，不可清理',
-                  size: r?.other.bytes,
-                ),
-                const _SectionHeader('缓存 · 可清理'),
-                _CategoryTile(
-                  dot: cs.secondary,
-                  title: '地图瓦片缓存',
-                  subtitle: r == null
-                      ? '离线地图'
-                      : '${fmtWan(r.tiles.count)} 张瓦片 · 清理后这些区域需联网重新加载',
-                  size: r?.tiles.bytes,
-                  onTap: r == null
-                      ? null
-                      : () => _run(
-                            title: '清空地图瓦片缓存？',
-                            body: '已缓存的离线地图会被删除，再次查看这些区域时'
-                                '需要联网重新加载。迷雾、轨迹、手账不受影响。',
-                            actionLabel: '清空',
-                            action: () =>
-                                StorageInspector(ref.read(dbProvider))
-                                    .cleanTiles(),
-                          ),
-                ),
-                _CategoryTile(
-                  dot: cs.tertiary.withValues(alpha: .55),
-                  title: '行政区边界缓存',
-                  subtitle: '点亮国家/省市统计用 · 清理后按需自动重新下载',
-                  size: r?.regions.bytes,
-                  onTap: r == null
-                      ? null
-                      : () => _run(
-                            title: '清空行政区边界缓存？',
-                            body: '下次查看点亮统计时会自动重新下载，'
-                                '不影响任何已点亮的数据。',
-                            actionLabel: '清空',
-                            action: () =>
-                                StorageInspector(ref.read(dbProvider))
-                                    .cleanRegions(),
-                          ),
-                ),
-                _CategoryTile(
-                  dot: cs.secondary.withValues(alpha: .5),
-                  title: '临时文件',
-                  subtitle: r == null
-                      ? '网络图片缓存 / 语音 / 导出过程产物'
-                      : '${r.temp.count} 个 · 网络图片缓存/语音/导出产物'
-                          '${r.tempSkippedRecent > 0 ? ' · ${r.tempSkippedRecent} 个新文件将保留' : ''}',
-                  size: r?.temp.bytes,
-                  onTap: r == null
-                      ? null
-                      : () => _run(
-                            title: '清理临时文件？',
-                            body: '删除歌单封面等网络图片缓存（会自动重新下载），'
-                                '以及语音合成、通话录音、打包导出产生的临时文件。'
-                                '1 小时内的新文件会保留，手账照片不会被清理。',
-                            actionLabel: '清理',
-                            action: () =>
-                                StorageInspector(ref.read(dbProvider))
-                                    .cleanTemp(),
-                          ),
-                ),
-                const _SectionHeader('运行日志'),
-                ListTile(
-                  leading: const _Dot(color: Colors.transparent),
-                  title: const Text('运行日志（内存）'),
-                  subtitle: Text(
-                      '最近 ${logs.length} 条 · 仅存内存，重启自动清空 · 调试页可查看'),
-                  trailing: Text('~${fmtBytes(logBytes)}',
-                      style: TextStyle(
-                          fontSize: 13, color: cs.onSurfaceVariant)),
-                  onTap: logs.isEmpty
-                      ? null
-                      : () {
-                          LogBuffer.clear();
-                          setState(() {});
-                          ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(content: Text('已清空运行日志')));
-                        },
-                ),
-              ],
-            ),
+            // 首次统计时整页只有一列「—」，与其让人猜是不是坏了，不如说清在等
+            // 什么；统计失败时也别把转圈留在屏幕上，给一个能重来的出口。
+            // 这里刻意判 _report 而不是 r：判 r 会把下面整棵树里的 r 提升成
+            // 非空，`r?.db.bytes` 之类就全成了「多余的 ?.」告警。
+            child: _report == null
+                ? (_busy
+                    ? const LoadingState(label: '统计中…')
+                    : EmptyState(
+                        title: '还没统计出占用',
+                        hint: '统计没跑完。点「重新统计」再来一次。',
+                        sprite: PixelSprites.cloud,
+                        actionLabel: '重新统计',
+                        onAction: _scan,
+                      ))
+                : ListView(
+                    padding: const EdgeInsets.only(bottom: 32),
+                    children: [
+                      _Overview(totalBytes: r?.totalBytes, slices: slices),
+                      const _SectionHeader('数据'),
+                      _CategoryTile(
+                        dot: cs.primary,
+                        title: '数据库',
+                        subtitle: r == null
+                            ? '轨迹 · 迷雾 · 手账 · 聊天'
+                            : '${fmtWan(r.dbCounts.trackPoints)} 轨迹点 · '
+                                '${fmtWan(r.dbCounts.fogTiles)} 迷雾瓦片 · '
+                                '${fmtWan(r.dbCounts.journals)} 手账 · 点按整理回收空间',
+                        size: r?.db.bytes,
+                        onTap: r == null
+                            ? null
+                            : () => _run(
+                                  title: '整理数据库？',
+                                  body: '回收已删除数据占用的空间（VACUUM），'
+                                      '不会改动任何轨迹、迷雾或手账。'
+                                      '数据量大时需要几秒，期间请留在本页。',
+                                  actionLabel: '整理',
+                                  action: () =>
+                                      StorageInspector(ref.read(dbProvider))
+                                          .vacuumDb(),
+                                ),
+                      ),
+                      _CategoryTile(
+                        dot: cs.tertiary,
+                        title: '手账与聊天照片',
+                        subtitle: r != null && r.photosMissing > 0
+                            ? '删除对应手账/消息时自动释放 · ${r.photosMissing} 张源文件已丢失'
+                            : '删除对应手账/消息时自动释放，清理不会碰它们',
+                        size: r?.photos.bytes,
+                      ),
+                      _CategoryTile(
+                        dot: cs.primary.withValues(alpha: .55),
+                        title: 'AI 旅伴聊天记录',
+                        subtitle: r == null
+                            ? '会话历史'
+                            : '${r.aiSessions} 段会话 · ${r.aiMessages} 条消息 · '
+                                '旅伴卡片「历史」Tab 可按段管理',
+                        size: r?.ai.bytes,
+                        onTap: r == null ? null : _clearAiHistory,
+                      ),
+                      _CategoryTile(
+                        dot: cs.outlineVariant,
+                        title: '其他数据',
+                        subtitle: '同步镜像 / 待上传轨迹缓冲 / 排行榜记录等，不可清理',
+                        size: r?.other.bytes,
+                      ),
+                      const _SectionHeader('缓存 · 可清理'),
+                      _CategoryTile(
+                        dot: cs.secondary,
+                        title: '地图瓦片缓存',
+                        subtitle: r == null
+                            ? '离线地图'
+                            : '${fmtWan(r.tiles.count)} 张瓦片 · 清理后这些区域需联网重新加载',
+                        size: r?.tiles.bytes,
+                        onTap: r == null
+                            ? null
+                            : () => _run(
+                                  title: '清空地图瓦片缓存？',
+                                  body: '已缓存的离线地图会被删除，再次查看这些区域时'
+                                      '需要联网重新加载。迷雾、轨迹、手账不受影响。',
+                                  actionLabel: '清空',
+                                  action: () =>
+                                      StorageInspector(ref.read(dbProvider))
+                                          .cleanTiles(),
+                                ),
+                      ),
+                      _CategoryTile(
+                        dot: cs.tertiary.withValues(alpha: .55),
+                        title: '行政区边界缓存',
+                        subtitle: '点亮国家/省市统计用 · 清理后按需自动重新下载',
+                        size: r?.regions.bytes,
+                        onTap: r == null
+                            ? null
+                            : () => _run(
+                                  title: '清空行政区边界缓存？',
+                                  body: '下次查看点亮统计时会自动重新下载，'
+                                      '不影响任何已点亮的数据。',
+                                  actionLabel: '清空',
+                                  action: () =>
+                                      StorageInspector(ref.read(dbProvider))
+                                          .cleanRegions(),
+                                ),
+                      ),
+                      _CategoryTile(
+                        dot: cs.secondary.withValues(alpha: .5),
+                        title: '临时文件',
+                        subtitle: r == null
+                            ? '网络图片缓存 / 语音 / 导出过程产物'
+                            : '${r.temp.count} 个 · 网络图片缓存/语音/导出产物'
+                                '${r.tempSkippedRecent > 0 ? ' · ${r.tempSkippedRecent} 个新文件将保留' : ''}',
+                        size: r?.temp.bytes,
+                        onTap: r == null
+                            ? null
+                            : () => _run(
+                                  title: '清理临时文件？',
+                                  body: '删除歌单封面等网络图片缓存（会自动重新下载），'
+                                      '以及语音合成、通话录音、打包导出产生的临时文件。'
+                                      '1 小时内的新文件会保留，手账照片不会被清理。',
+                                  actionLabel: '清理',
+                                  action: () =>
+                                      StorageInspector(ref.read(dbProvider))
+                                          .cleanTemp(),
+                                ),
+                      ),
+                      const _SectionHeader('运行日志'),
+                      ListTile(
+                        leading: const _Dot(color: Colors.transparent),
+                        title: const Text('运行日志（内存）'),
+                        subtitle: Text(
+                            '最近 ${logs.length} 条 · 仅存内存，重启自动清空 · 调试页可查看'),
+                        trailing: Text('~${fmtBytes(logBytes)}',
+                            style: TextStyle(
+                                fontSize: 13, color: cs.onSurfaceVariant)),
+                        onTap: logs.isEmpty
+                            ? null
+                            : () {
+                                LogBuffer.clear();
+                                setState(() {});
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(content: Text('已清空运行日志')));
+                              },
+                      ),
+                    ],
+                  ),
           ),
         ],
       ),

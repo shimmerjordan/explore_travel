@@ -9,6 +9,7 @@ import '../../app/providers.dart';
 import '../../data/db/database.dart';
 import '../../services/export/track_import.dart';
 import '../../services/media/exif_service.dart';
+import '../common/failure.dart';
 
 /// Shared entry points for importing track points + revealing fog, reused by
 /// both the layers screen and the home/map screen so the flow (pick → choose
@@ -29,8 +30,11 @@ class TrackImportFlow {
     ImportedTrack track;
     try {
       track = await TrackImport.parseFile(File(path));
-    } catch (e) {
-      if (context.mounted) _snack(context, '解析失败：$e');
+    } catch (e, st) {
+      // 不给「重试」：同一个文件再解析一次结果一样，得换个文件。
+      if (context.mounted) {
+        showFailure(context, action: '解析', error: e, stack: st);
+      }
       return;
     }
     if (track.isEmpty) {
@@ -147,7 +151,7 @@ class TrackImportFlow {
 
     var result =
         const IngestResult(inserted: 0, duplicates: 0, dropped: 0);
-    String? error;
+    Object? error;
     try {
       result = await TrackImport.ingest(
         track: track,
@@ -159,7 +163,7 @@ class TrackImportFlow {
         onProgress: (p) => progress.value = p,
       );
     } catch (e) {
-      error = '$e';
+      error = e;
     }
     progress.dispose();
     ref.read(fogRefreshProvider.notifier).state++;
@@ -172,7 +176,8 @@ class TrackImportFlow {
     if (!context.mounted) return;
     Navigator.of(context).pop(); // dismiss progress dialog
     if (error != null) {
-      _snack(context, '导入失败：$error');
+      // 也不给「重试」：这条路可能已经新建过图层，再走一遍会多建一个。
+      showFailure(context, action: '导入', error: error);
       return;
     }
     final notes = <String>[

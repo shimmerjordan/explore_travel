@@ -3,6 +3,7 @@ import 'package:android_intent_plus/android_intent.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:permission_handler/permission_handler.dart';
+import '../common/status_palette.dart';
 
 /// First-run / "为什么后台不记录" troubleshooter.
 ///
@@ -341,8 +342,10 @@ class _PermissionRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    // stateColor 同时当 11.5sp 的**正文色**用（下面那行状态文字），所以必须过
+    // 4.5:1 —— Colors.green 压在 surfaceContainerHigh 上亮色只有 2.3:1。
     final stateColor = isGood == true
-        ? Colors.green
+        ? Theme.of(context).status.success
         : isGood == false
             ? cs.error
             : cs.onSurfaceVariant;

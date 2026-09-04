@@ -187,6 +187,7 @@ class _CallViewState extends ConsumerState<_CallView> {
   @override
   Widget build(BuildContext context) {
     final p = widget.peer;
+    final cs = Theme.of(context).colorScheme;
     final running = ref.watch(groupRunningProvider);
     final stale = DateTime.now().difference(p.lastSeen) >
         const Duration(seconds: 30);
@@ -225,21 +226,21 @@ class _CallViewState extends ConsumerState<_CallView> {
                 height: 140,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
-                  color: _talking
-                      ? Colors.redAccent
-                      : Theme.of(context).colorScheme.primary,
+                  // 按住说话按钮坐在应用表面上。用 error/primary 这两个**成对**
+                  // 的角色，麦克风图标随之取 onError/onPrimary：原先写死白色，
+                  // 在暗色主题下压在浅青绿 primary 上只有 1.71:1，几乎看不见。
+                  color: _talking ? cs.error : cs.primary,
                   boxShadow: [
                     BoxShadow(
-                      color: (_talking
-                              ? Colors.redAccent
-                              : Theme.of(context).colorScheme.primary)
+                      color: (_talking ? cs.error : cs.primary)
                           .withValues(alpha: 0.45),
                       blurRadius: _talking ? 36 : 12,
                       spreadRadius: _talking ? 6 : 0,
                     ),
                   ],
                 ),
-                child: const Icon(Icons.mic, color: Colors.white, size: 56),
+                child: Icon(Icons.mic,
+                    color: _talking ? cs.onError : cs.onPrimary, size: 56),
               ),
             ),
             const SizedBox(height: 16),

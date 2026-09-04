@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import '../../app/providers.dart';
+import '../common/failure.dart';
 
 /// Embedded WebView that opens a music platform's login page and lets the
 /// user grab their session cookie without leaving the app.
@@ -92,10 +93,10 @@ class _CookieWebViewScreenState
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text('已保存 ${keep.length} 个 cookie 字段')));
       Navigator.of(context).pop(true);
-    } catch (e) {
+    } catch (e, st) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('读取失败：$e')));
+      showFailure(context,
+          action: '读取 Cookie', error: e, stack: st, onRetry: _saveCookies);
     } finally {
       if (mounted) setState(() => _saving = false);
     }

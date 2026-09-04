@@ -8,6 +8,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../../app/providers.dart';
+import '../common/failure.dart';
 
 /// Hardcoded — bumped in lockstep with [pubspec.yaml]'s `version:`. We
 /// could read it via `package_info_plus` at runtime, but the extra
@@ -416,10 +417,11 @@ class _RepoCard extends StatelessWidget {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        const Text('GitHub',
+                        // 只是"次要"，不是状态：用主题的次要文字色。
+                        Text('GitHub',
                             style: TextStyle(
                                 fontSize: 11,
-                                color: Colors.grey,
+                                color: c.onSurfaceVariant,
                                 letterSpacing: 0.8)),
                         Row(
                           children: [
@@ -428,8 +430,9 @@ class _RepoCard extends StatelessWidget {
                                     fontSize: 14,
                                     color: c.onSurface
                                         .withValues(alpha: 0.65))),
-                            const Text(' / ',
-                                style: TextStyle(color: Colors.grey)),
+                            Text(' / ',
+                                style:
+                                    TextStyle(color: c.onSurfaceVariant)),
                             Text(_kRepoName,
                                 style: const TextStyle(
                                     fontSize: 14,
@@ -513,10 +516,13 @@ class _DocViewerScreen extends StatelessWidget {
       final f = File(p.join(dir.path, p.basename(path)));
       await f.writeAsString(body);
       await Share.shareXFiles([XFile(f.path)], text: title);
-    } catch (e) {
+    } catch (e, st) {
       if (context.mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('分享失败：$e')));
+        showFailure(context,
+            action: '分享',
+            error: e,
+            stack: st,
+            onRetry: () => _share(context));
       }
     }
   }

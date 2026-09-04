@@ -11,6 +11,7 @@ import 'package:intl/intl.dart';
 
 import '../../app/providers.dart';
 import '../../services/ai/companion_controller.dart';
+import '../common/failure.dart';
 import '../common/pixel.dart';
 
 // ─── 像素小人 ──────────────────────────────────────────────────────────────
@@ -244,8 +245,12 @@ class CompanionCardState extends ConsumerState<CompanionCard>
       final x = await ImagePicker()
           .pickImage(source: source, maxWidth: 1440, imageQuality: 82);
       if (x != null && mounted) setState(() => _pendingImage = x);
-    } catch (e) {
-      _toast('选图失败：$e');
+    } catch (e, st) {
+      // 重试重新走「拍一张 / 从相册选」这张选择单，和用户自己再点一次一样。
+      if (mounted) {
+        showFailure(context,
+            action: '选图', error: e, stack: st, onRetry: _pickImage);
+      }
     }
   }
 

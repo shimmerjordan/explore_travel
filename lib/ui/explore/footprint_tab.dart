@@ -12,6 +12,7 @@ import '../../app/providers.dart';
 import '../../data/db/database.dart';
 import '../../services/stats/footprint_stats.dart';
 import '../../services/stats/footprint_summary.dart';
+import '../common/empty_state.dart';
 import '../common/pixel.dart';
 
 /// 「足迹」— the numbers layer over the explore progress page: distance,
@@ -121,6 +122,16 @@ class _FootprintTabState extends ConsumerState<FootprintTab> {
     }
     final s = _summary;
     if (s == null) return const Center(child: CircularProgressIndicator());
+    // 一个轨迹点都没有时，这页每个数字都是 0、日历整片空白：那不像「还没开始」，
+    // 更像坏了。所以整页换成一句能照着做的话。
+    if (s.pointCount == 0) {
+      return const EmptyState(
+        title: '还没有走过的路',
+        hint: '回地图页点底部中间那个圆按钮开始记录，或者到「图层与标签」里'
+            '「导入轨迹文件」，距离、连续天数和活动日历就会在这里长出来。',
+        sprite: PixelSprites.steps,
+      );
+    }
     final cs = Theme.of(context).colorScheme;
     final now = DateTime.now();
     final d = _data;

@@ -26,6 +26,7 @@ import '../../services/playback/merged_trip_model.dart';
 import '../../services/playback/quick_video_encoder_sink.dart';
 import '../../services/playback/replay_model.dart';
 import '../../services/playback/replay_video_exporter.dart';
+import '../common/failure.dart';
 import '../common/pixel.dart';
 
 /// 回放总结：以"一次有效记录（开始→停止，≥10 个点，单图层）"为单位的列表，
@@ -39,6 +40,17 @@ class PlaybackScreen extends ConsumerStatefulWidget {
   const PlaybackScreen({super.key});
   @override
   ConsumerState<PlaybackScreen> createState() => _PlaybackScreenState();
+}
+
+/// 进度条的读屏播报值。`Slider` 默认念的是「37%」——回放里毫无意义；这里念的
+/// 是进度条右边那个真实时刻，跨天时带上日期（与可见标签同一套格式）。
+///
+/// 抽成公开顶层函数是为了能在 widget test 里直接断言：播放器 `_PlayerScreen`
+/// 是库私有的，测试拿不到它。
+String replayProgressSemanticValue(
+    {required DateTime real, required bool multiDay}) {
+  final f = DateFormat(multiDay ? 'M 月 d 日 HH:mm' : 'HH:mm:ss');
+  return '已播放到 ${f.format(real)}';
 }
 
 /// Per-layer look used by the list and the player.
@@ -231,6 +243,8 @@ class _PlaybackScreenState extends ConsumerState<PlaybackScreen> {
               child: const Text('全选'),
             ),
           IconButton(
+            // 唯一一颗没有 tooltip 的图标按钮，读屏原来什么都念不出来。
+            tooltip: '重新扫描记录',
             icon: const Icon(Icons.refresh_rounded),
             onPressed: _reload,
           ),
@@ -455,7 +469,12 @@ class _SessionTile extends StatelessWidget {
         '${session.pointCount} 点',
         style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
       ),
-      trailing: Checkbox(value: selected, onChanged: (_) => onToggle()),
+      // 勾选框自己只有「已选中/未选中」状态，没有名字：读屏得知道勾的是哪一段
+      // （ListTile 的标题不会并进它这个独立节点）。
+      trailing: Semantics(
+        label: '选择 ${DateFormat('M 月 d 日 HH:mm').format(session.start)} 这段',
+        child: Checkbox(value: selected, onChanged: (_) => onToggle()),
+      ),
       onTap: selecting ? onToggle : onOpen,
       onLongPress: onToggle,
     );
@@ -741,74 +760,79 @@ class _PlayerScreenState extends ConsumerState<_PlayerScreen>
           // summary and export overlay never end up in the video.
           RepaintBoundary(
             key: _captureKey,
-            child: FlutterMap(
-              mapController: _mapCtrl,
-              options: MapOptions(
-                initialCameraFit: CameraFit.bounds(
-                  bounds: _allBounds,
-                  padding: const EdgeInsets.all(48),
-                  maxZoom: 16,
+            // flutter_map 的 RawGestureDetector 往语义树里挂一个带 tap /
+            // longPress / scroll 的全屏节点，自己却没标签——读屏扫到只会念空白。
+            child: Semantics(
+              label: '回放地图',
+              child: FlutterMap(
+                mapController: _mapCtrl,
+                options: MapOptions(
+                  initialCameraFit: CameraFit.bounds(
+                    bounds: _allBounds,
+                    padding: const EdgeInsets.all(48),
+                    maxZoom: 16,
+                  ),
+                  interactionOptions: const InteractionOptions(
+                    flags: InteractiveFlag.all & ~InteractiveFlag.rotate,
+                  ),
+                  onPositionChanged: (_, hasGesture) {
+                    if (hasGesture && _follow && !_exporting) {
+                      setState(() => _follow = false);
+                    }
+                  },
                 ),
-                interactionOptions: const InteractionOptions(
-                  flags: InteractiveFlag.all & ~InteractiveFlag.rotate,
-                ),
-                onPositionChanged: (_, hasGesture) {
-                  if (hasGesture && _follow && !_exporting) {
-                    setState(() => _follow = false);
-                  }
-                },
-              ),
-              children: [
-                buildTileLayer(
-                  provider: s.mapProvider,
-                  style: s.mapStyle,
-                  amapKey: s.amapApiKey,
-                  googleKey: s.googleMapKey,
-                  customOsmUrl: s.customOsmTileUrl,
-                  ovitalUrl: s.ovitalTileUrl,
-                ),
-                // 随播放头移动的图层单独听 _cursor 重建；底图和手账气泡不动。
-                // 分两个 builder 夹着手账层，是为了保住原来的叠放顺序（头部圆点
-                // 压在气泡之上）。
-                ValueListenableBuilder<Duration>(
-                  valueListenable: _trailCursor,
-                  builder: (_, cursor, __) => _trailLayers(_tl.realAt(cursor)),
-                ),
-                if (_showJournals && _journalsInWindow.isNotEmpty)
-                  MarkerLayer(
-                    markers: [
-                      for (final j in _journalsInWindow)
-                        Marker(
-                          point: _toDisplay(LatLng(j.lat, j.lng)),
-                          width: 36,
-                          height: 36,
-                          child: Tooltip(
-                            message: j.title,
-                            child: Container(
-                              decoration: BoxDecoration(
-                                color: const Color(0xFFFF8A65),
-                                shape: BoxShape.circle,
-                                border:
-                                    Border.all(color: Colors.white, width: 2),
-                                boxShadow: [
-                                  BoxShadow(
-                                    color: Colors.black.withValues(alpha: 0.3),
-                                    blurRadius: 4,
-                                  ),
-                                ],
+                children: [
+                  buildTileLayer(
+                    provider: s.mapProvider,
+                    style: s.mapStyle,
+                    amapKey: s.amapApiKey,
+                    googleKey: s.googleMapKey,
+                    customOsmUrl: s.customOsmTileUrl,
+                    ovitalUrl: s.ovitalTileUrl,
+                  ),
+                  // 随播放头移动的图层单独听 _cursor 重建；底图和手账气泡不动。
+                  // 分两个 builder 夹着手账层，是为了保住原来的叠放顺序（头部圆点
+                  // 压在气泡之上）。
+                  ValueListenableBuilder<Duration>(
+                    valueListenable: _trailCursor,
+                    builder: (_, cursor, __) => _trailLayers(_tl.realAt(cursor)),
+                  ),
+                  if (_showJournals && _journalsInWindow.isNotEmpty)
+                    MarkerLayer(
+                      markers: [
+                        for (final j in _journalsInWindow)
+                          Marker(
+                            point: _toDisplay(LatLng(j.lat, j.lng)),
+                            width: 36,
+                            height: 36,
+                            child: Tooltip(
+                              message: j.title,
+                              child: Container(
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFFF8A65),
+                                  shape: BoxShape.circle,
+                                  border:
+                                      Border.all(color: Colors.white, width: 2),
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: Colors.black.withValues(alpha: 0.3),
+                                      blurRadius: 4,
+                                    ),
+                                  ],
+                                ),
+                                child: const Icon(Icons.menu_book_rounded,
+                                    color: Colors.white, size: 18),
                               ),
-                              child: const Icon(Icons.menu_book_rounded,
-                                  color: Colors.white, size: 18),
                             ),
                           ),
-                        ),
-                    ],
+                      ],
+                    ),
+                  ValueListenableBuilder<Duration>(
+                    valueListenable: _cursor,
+                    builder: (_, cursor, __) => _headLayer(_tl.realAt(cursor)),
                   ),
-                ValueListenableBuilder<Duration>(
-                  valueListenable: _cursor,
-                  builder: (_, cursor, __) => _headLayer(_tl.realAt(cursor)),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
           if (!_exporting) _transportBar(),
@@ -936,22 +960,30 @@ class _PlayerScreenState extends ConsumerState<_PlayerScreen>
         ),
         child: Row(
           children: [
-            Material(
-              color: Colors.transparent,
-              child: InkWell(
-                customBorder: const CircleBorder(),
-                onTap: _togglePlay,
-                child: Container(
-                  width: 40,
-                  height: 40,
-                  decoration: const BoxDecoration(
-                    color: Color(0xFF26A69A),
-                    shape: BoxShape.circle,
+            Semantics(
+              button: true,
+              // 这一栏的主控件，只有一个三角/双竖线图标。
+              label: _playing ? '暂停回放' : '播放回放',
+              child: Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  customBorder: const CircleBorder(),
+                  onTap: _togglePlay,
+                  child: Container(
+                    // 48：原先 40 差 8dp 到 Material 的触控下限。图标仍是 22。
+                    width: 48,
+                    height: 48,
+                    decoration: const BoxDecoration(
+                      color: Color(0xFF26A69A),
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(
+                        _playing
+                            ? Icons.pause_rounded
+                            : Icons.play_arrow_rounded,
+                        color: Colors.white,
+                        size: 22),
                   ),
-                  child: Icon(
-                      _playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
-                      color: Colors.white,
-                      size: 22),
                 ),
               ),
             ),
@@ -978,6 +1010,13 @@ class _PlayerScreenState extends ConsumerState<_PlayerScreen>
                             cursor.inMilliseconds.clamp(0, totalMs).toDouble(),
                         min: 0,
                         max: totalMs.toDouble(),
+                        // 不给的话读屏念的是「37%」这种毫无意义的百分比；这里
+                        // 念的是进度条旁边那个真实时刻。
+                        semanticFormatterCallback: (v) =>
+                            replayProgressSemanticValue(
+                          real: _tl.realAt(Duration(milliseconds: v.round())),
+                          multiDay: _multiDay,
+                        ),
                         onChanged: (v) =>
                             _cursor.value = Duration(milliseconds: v.round()),
                       ),
@@ -995,7 +1034,9 @@ class _PlayerScreenState extends ConsumerState<_PlayerScreen>
             const SizedBox(width: 8),
             PopupMenuButton<double>(
               initialValue: _speed,
-              tooltip: '播放速度（真实时间倍率）',
+              // tooltip 置空：语义由下面的 Semantics 一次给全（它还带上了当前
+              // 倍率），两个都留会被读两遍。
+              tooltip: '',
               onSelected: (v) => setState(() => _speed = v),
               color: const Color(0xFF223040),
               itemBuilder: (_) => [
@@ -1005,18 +1046,31 @@ class _PlayerScreenState extends ConsumerState<_PlayerScreen>
                       child: Text('${v.toInt()}×',
                           style: const TextStyle(color: Colors.white))),
               ],
-              child: Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                decoration: BoxDecoration(
-                  color: Colors.white12,
-                  borderRadius: BorderRadius.circular(3),
+              child: Semantics(
+                button: true,
+                label: '播放速度 ${_speed.toInt()} 倍，点按切换',
+                excludeSemantics: true,
+                // 48×48 的透明触控框：可见的胶囊还是原来那么小（~34×21），
+                // 但点得到的区域够 Material 的下限了。
+                child: SizedBox(
+                  width: 48,
+                  height: 48,
+                  child: Center(
+                    child: Container(
+                      padding:
+                          const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: Colors.white12,
+                        borderRadius: BorderRadius.circular(3),
+                      ),
+                      child: Text('${_speed.toInt()}×',
+                          style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600)),
+                    ),
+                  ),
                 ),
-                child: Text('${_speed.toInt()}×',
-                    style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600)),
               ),
             ),
           ],
@@ -1192,7 +1246,10 @@ class _PlayerScreenState extends ConsumerState<_PlayerScreen>
     _cursor.value = savedCursor;
     setState(() => _exporting = false);
     if (error != null) {
-      _toast('导出失败：$error');
+      // 重试从「导出为视频」那张时长选择单重新开始——导出只往临时文件写，
+      // 重来一次没有副作用。
+      showFailure(context,
+          action: '导出视频', error: error, onRetry: _exportVideo);
       return;
     }
     if (result == null || result.cancelled) {
@@ -1290,8 +1347,13 @@ class _PlayerScreenState extends ConsumerState<_PlayerScreen>
         await File(path).writeAsBytes(bytes);
       }
       _toast('已保存：$path');
-    } catch (e) {
-      _toast('保存失败：$e');
+    } catch (e, st) {
+      if (!mounted) return;
+      showFailure(context,
+          action: '保存',
+          error: e,
+          stack: st,
+          onRetry: () => _saveLocally(file));
     }
   }
 

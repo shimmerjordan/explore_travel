@@ -9,6 +9,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart' show Position;
 import '../../app/providers.dart';
 import '../../services/fog/fog_engine.dart';
+import '../common/map_chrome.dart';
 
 /// A 3D globe (Google-Earth style) reached by trying to zoom the 2D map out
 /// past its minimum. Real day (Blue-Marble) + night (city-lights) textures
@@ -517,8 +518,15 @@ class _GlobeScreenState extends ConsumerState<GlobeScreen>
             ),
           ),
           if (_loading)
+            // 地球画布是**固定深色**（#02060E，跟主题无关，和地图浮层同一类），
+            // 所以这里不能用 Theme.of(context).status.*：亮色主题下警告色是
+            // 深棕 #875200，压在这块黑底上只剩 3.13:1，刚够图形、暗得像没在转。
+            // 改用浮层的次要前景色（11.20:1），和本屏其它 white70 / white54
+            // 归成一族——原来的 Colors.amber 对比度本身没问题，只是它是这屏上
+            // 唯一一枚游离的 Material 直出色。
             const Center(
-                child: CircularProgressIndicator(color: Colors.amber)),
+                child: CircularProgressIndicator(
+                    color: MapChrome.onChromeMuted)),
           if (!_loading && _rawCount == 0)
             const Center(
               child: Padding(

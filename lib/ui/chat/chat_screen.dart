@@ -5,7 +5,10 @@ import 'package:intl/intl.dart';
 import '../../app/providers.dart';
 import '../../core/prefs.dart' show PeerOverrideX;
 import '../../services/group/group_service.dart';
+import '../common/empty_state.dart';
 import '../common/format.dart' show fmtRelativeTime;
+import '../common/pixel.dart';
+import '../common/status_palette.dart';
 import 'private_chat_screen.dart';
 
 /// Group screen.
@@ -59,8 +62,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
           ),
           IconButton(
             tooltip: running ? '断开' : '连接',
+            // 连接状态图标坐在 AppBar（= scaffold 面）上，跟主题走。
             icon: Icon(running ? Icons.cloud_done : Icons.cloud_off,
-                color: running ? Colors.greenAccent : Colors.grey),
+                color: running
+                    ? Theme.of(context).status.success
+                    : Theme.of(context).status.neutral),
             onPressed: () {
               final ctrl = ref.read(groupLifecycleProvider);
               running ? ctrl.stop() : ctrl.start();
@@ -84,7 +90,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                       border: const OutlineInputBorder(),
                       suffixIcon: (s.groupId ?? '').isEmpty
                           ? null
-                          : const Icon(Icons.check, color: Colors.greenAccent),
+                          : Icon(Icons.check,
+                              color: Theme.of(context).status.success),
                     ),
                     onSubmitted: _joinGroup,
                   ),
@@ -212,6 +219,7 @@ class _MembersTab extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final peers = ref.watch(groupPeersProvider);
     final me = ref.watch(settingsProvider);
+    final running = ref.watch(groupRunningProvider);
 
     return ListView(
       children: [
@@ -229,17 +237,18 @@ class _MembersTab extends ConsumerWidget {
               maxLines: 1, overflow: TextOverflow.ellipsis),
         ),
         const Divider(height: 1),
+        // 多播 + 子网扫描找齐一轮要十几秒。在这十几秒里说「没有其他成员在线」
+        // 会被当成结论，其实只是还在找——所以在线时先给加载态。
         if (peers.isEmpty)
-          Padding(
-            padding: const EdgeInsets.all(40),
-            child: Center(
-              child: Text(
-                '没有其他成员在线\n确认对方也加入了同一群组',
-                textAlign: TextAlign.center,
-                style: TextStyle(color: Theme.of(context).hintColor),
-              ),
-            ),
-          )
+          running
+              ? const LoadingState(label: '正在找附近的队友…', expand: false)
+              : const EmptyState(
+                  title: '还没有连上群组',
+                  hint: '在上面的「群组 ID」里填一个（队友填同一个），点「加入」，'
+                      '队友就会自动出现在这里。',
+                  sprite: PixelSprites.compass,
+                  expand: false,
+                )
         else
           ...peers.map((p) {
             final stale = DateTime.now().difference(p.lastSeen) >
@@ -267,7 +276,11 @@ class _MembersTab extends ConsumerWidget {
                       width: 12,
                       height: 12,
                       decoration: BoxDecoration(
-                        color: stale ? Colors.grey : Colors.greenAccent,
+                        // 在线点在**成员列表**里（应用表面），不是地图浮层，
+                        // 所以用跟随主题的语义色，而不是 MapChrome.online。
+                        color: stale
+                            ? Theme.of(context).status.neutral
+                            : Theme.of(context).status.success,
                         shape: BoxShape.circle,
                         border: Border.all(
                             color: Theme.of(context).scaffoldBackgroundColor,

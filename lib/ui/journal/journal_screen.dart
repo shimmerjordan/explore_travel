@@ -18,6 +18,7 @@ import '../../services/map/tile_providers.dart';
 import '../../services/media/exif_service.dart';
 import '../../services/media/journal_media_store.dart';
 import '../common/pixel.dart';
+import '../common/status_palette.dart';
 import '../map/native_file_image_io.dart';
 import 'location_picker.dart';
 import 'quill_editor_screen.dart';
@@ -83,7 +84,12 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
               onPressed: () => Navigator.pop(context, false),
               child: const Text('取消')),
           FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            // 不可逆操作用 M3 的 error 角色：白字压在 Colors.red 上只有
+            // 3.68:1，过不了正文 4.5:1；error/onError 这一对是按明暗各调过的。
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(context).colorScheme.error,
+              foregroundColor: Theme.of(context).colorScheme.onError,
+            ),
             onPressed: () => Navigator.pop(context, true),
             child: const Text('删除'),
           ),
@@ -739,7 +745,8 @@ Future<bool> showJournalEditor(
         actions: [
           if (entry != null)
             TextButton(
-              style: TextButton.styleFrom(foregroundColor: Colors.red),
+              style: TextButton.styleFrom(
+                  foregroundColor: Theme.of(dialogCtx).colorScheme.error),
               onPressed: () async {
                 final db = ref.read(dbProvider);
                 // Best-effort remote cleanup BEFORE we drop the DB row,
@@ -953,7 +960,10 @@ class JournalMediaThumb extends ConsumerWidget {
       child: Container(
         width: size,
         height: size,
-        color: Colors.grey.shade300,
+        // 缩略图未加载出来时露出的底。原先的 grey.shade300 是一块固定亮灰，
+        // 在暗色主题的卡片上等于一个发光方块；用主题最高一级容器面，两套
+        // 主题下都只是"比卡片略亮一点"。
+        color: Theme.of(context).colorScheme.surfaceContainerHighest,
         child: child,
       ),
     );
@@ -1193,10 +1203,10 @@ class _UploadStatusBarState extends ConsumerState<_UploadStatusBar> {
                       : Icons.cloud_done_outlined),
               size: 16,
               color: failed > 0
-                  ? Colors.redAccent
+                  ? Theme.of(context).status.danger
                   : (localImages.isNotEmpty || pending > 0
                       ? cs.primary
-                      : Colors.green),
+                      : Theme.of(context).status.success),
             ),
             const SizedBox(width: 6),
             Expanded(
@@ -1231,26 +1241,29 @@ class _UploadStatusBarState extends ConsumerState<_UploadStatusBar> {
 ({IconData icon, Color color, String label})? _statusOf(
     List<UploadRecord> recs, BuildContext context) {
   if (recs.isEmpty) return null;
+  // 这三种状态是"看错了会做错事"的信息（以为传完了就删本地图），必须在两套
+  // 主题的卡片/列表面上都过 4.5:1 —— 交给对比度已验证过的语义色板。
+  final status = Theme.of(context).status;
   final failed = recs.where((r) => r.status == 'failed').length;
   final pending = recs.where((r) => r.status == 'pending').length;
   final done = recs.where((r) => r.status == 'done').length;
   if (failed > 0) {
     return (
       icon: Icons.cloud_off_rounded,
-      color: Colors.red,
+      color: status.danger,
       label: '$failed 失败'
     );
   }
   if (pending > 0) {
     return (
       icon: Icons.cloud_sync_rounded,
-      color: Colors.orange,
+      color: status.warning,
       label: '$pending 待传'
     );
   }
   return (
     icon: Icons.cloud_done_rounded,
-    color: Colors.green,
+    color: status.success,
     label: done > 1 ? '已传 $done' : '已传'
   );
 }
@@ -1417,8 +1430,10 @@ Future<void> _showUploadQueue(BuildContext context, WidgetRef ref) async {
                                 fontWeight: FontWeight.w700, fontSize: 16)),
                         const Spacer(),
                         if (s.imgHostKind == 'none')
-                          const Text('未启用图床',
-                              style: TextStyle(color: Colors.grey))
+                          // 未启用 = 中性，不是警告。
+                          Text('未启用图床',
+                              style: TextStyle(
+                                  color: Theme.of(ctx).status.neutral))
                         else if (pending > 0)
                           FilledButton.icon(
                             onPressed: () => queue.drainNow(),
@@ -1428,13 +1443,15 @@ Future<void> _showUploadQueue(BuildContext context, WidgetRef ref) async {
                       ]),
                     ),
                     if (!s.autoUploadImages && s.imgHostKind != 'none')
-                      const Padding(
-                        padding: EdgeInsets.symmetric(horizontal: 16),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
                         child: Align(
                           alignment: Alignment.centerLeft,
+                          // 「已关闭某项自动行为」= 警告：用户可能以为图在传。
                           child: Text('自动上传已关闭 · 上传需手动触发',
                               style: TextStyle(
-                                  fontSize: 12, color: Colors.orange)),
+                                  fontSize: 12,
+                                  color: Theme.of(ctx).status.warning)),
                         ),
                       ),
                     const Divider(height: 16),
@@ -1656,7 +1673,10 @@ class _JournalDetailScreenState extends ConsumerState<JournalDetailScreen> {
               onPressed: () => Navigator.pop(dctx, false),
               child: const Text('取消')),
           FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(dctx).colorScheme.error,
+              foregroundColor: Theme.of(dctx).colorScheme.onError,
+            ),
             onPressed: () => Navigator.pop(dctx, true),
             child: const Text('删除'),
           ),
@@ -1720,12 +1740,14 @@ class _JournalDetailScreenState extends ConsumerState<JournalDetailScreen> {
                   if (v == 'delete') _delete();
                 },
                 itemBuilder: (_) => [
-                  const PopupMenuItem(
+                  PopupMenuItem(
                     value: 'delete',
                     child: ListTile(
                       contentPadding: EdgeInsets.zero,
-                      leading: Icon(Icons.delete_outline, color: Colors.red),
-                      title: Text('删除', style: TextStyle(color: Colors.red)),
+                      // 菜单面是 surfaceContainerHigh；cs.error 在两套主题的
+                      // 这块面上都已由对比度测试断言过。
+                      leading: Icon(Icons.delete_outline, color: cs.error),
+                      title: Text('删除', style: TextStyle(color: cs.error)),
                     ),
                   ),
                 ],
@@ -1947,7 +1969,7 @@ class _JournalDetailScreenState extends ConsumerState<JournalDetailScreen> {
               onPressed: _delete,
               icon: const Icon(Icons.delete_outline, size: 18),
               label: const Text('删除这条手账'),
-              style: TextButton.styleFrom(foregroundColor: Colors.red),
+              style: TextButton.styleFrom(foregroundColor: cs.error),
             ),
           ),
         ],

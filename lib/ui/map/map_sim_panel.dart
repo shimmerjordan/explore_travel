@@ -26,7 +26,7 @@ class _SimPanel extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(8),
       decoration: BoxDecoration(
-        color: Colors.deepPurple.withValues(alpha: 0.85),
+        color: MapChrome.simulated.withValues(alpha: 0.85),
         borderRadius: BorderRadius.circular(6),
         boxShadow: [
           BoxShadow(
@@ -40,7 +40,7 @@ class _SimPanel extends StatelessWidget {
         children: [
           const Text('SIM',
               style: TextStyle(
-                  color: Colors.white70,
+                  color: MapChrome.onChromeMuted,
                   fontSize: 10,
                   fontWeight: FontWeight.w700,
                   letterSpacing: 2)),
@@ -93,7 +93,7 @@ class _SimPanel extends StatelessWidget {
               ),
               onPressed: onStop,
               child: const Text('关闭',
-                  style: TextStyle(color: Colors.white54, fontSize: 11)),
+                  style: TextStyle(color: MapChrome.onChromeMuted, fontSize: 11)),
             ),
           ),
         ],

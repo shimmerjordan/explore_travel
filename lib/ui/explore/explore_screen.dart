@@ -15,6 +15,7 @@ import '../../services/geo/admin_regions.dart';
 import '../../services/geo/learned_regions.dart';
 import '../../services/map/tile_providers.dart';
 import '../common/atmosphere.dart';
+import '../common/failure.dart';
 import '../common/pixel.dart';
 import 'footprint_tab.dart';
 
@@ -443,7 +444,9 @@ class _LitMapTabState extends ConsumerState<_LitMapTab>
       _busy = true;
       _phase = '统计足迹…';
     });
-    String msg;
+    String? msg;
+    Object? failure;
+    StackTrace? failureStack;
     try {
       msg = await _store.update(
           learned: await _learnedNow(),
@@ -451,8 +454,9 @@ class _LitMapTabState extends ConsumerState<_LitMapTab>
           onPhase: (p) {
         if (mounted) setState(() => _phase = p);
       });
-    } catch (e) {
-      msg = '更新失败：$e';
+    } catch (e, st) {
+      failure = e;
+      failureStack = st;
     }
     if (!mounted) return;
     setState(() {
@@ -461,8 +465,16 @@ class _LitMapTabState extends ConsumerState<_LitMapTab>
     });
     await _load();
     if (mounted) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(msg)));
+      if (failure != null) {
+        showFailure(context,
+            action: '更新',
+            error: failure,
+            stack: failureStack,
+            onRetry: _update);
+      } else {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(msg!)));
+      }
     }
   }
 

@@ -4,6 +4,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../app/providers.dart';
 import '../../data/db/database.dart';
 import '../../services/export/track_export.dart';
+import '../common/empty_state.dart';
+import '../common/failure.dart';
+import '../common/pixel.dart';
 import '../import/track_import_flow.dart';
 
 class LayersScreen extends ConsumerWidget {
@@ -31,7 +34,13 @@ class LayersScreen extends ConsumerWidget {
       ),
       body: layersAsync.when(
         loading: () => const Center(child: CircularProgressIndicator()),
-        error: (e, _) => Center(child: Text('错误：$e')),
+        error: (e, _) => EmptyState(
+          title: failureMessage('读取图层', e),
+          hint: '图层列表没能读出来。可以重试一次，或者退出这页再进来。',
+          sprite: PixelSprites.map,
+          actionLabel: '重试',
+          onAction: () => ref.invalidate(layersProvider),
+        ),
         data: (layers) {
           return StatefulBuilder(
             builder: (context, setState) => Column(
@@ -169,8 +178,15 @@ class LayersScreen extends ConsumerWidget {
                                     child: const Text('取消'),
                                   ),
                                   FilledButton(
+                                    // 不可逆操作：白字压在 Colors.red 上只有
+                                    // 3.68:1，改用 M3 保证成对的 error/onError。
                                     style: FilledButton.styleFrom(
-                                        backgroundColor: Colors.red),
+                                      backgroundColor:
+                                          Theme.of(confirmCtx).colorScheme.error,
+                                      foregroundColor: Theme.of(confirmCtx)
+                                          .colorScheme
+                                          .onError,
+                                    ),
                                     onPressed: () =>
                                         Navigator.of(confirmCtx).pop(true),
                                     child: const Text('删除'),
@@ -185,7 +201,8 @@ class LayersScreen extends ConsumerWidget {
                             setState(selected.clear);
                           },
                           style: TextButton.styleFrom(
-                              foregroundColor: Colors.red),
+                              foregroundColor:
+                                  Theme.of(context).colorScheme.error),
                           icon: const Icon(Icons.delete_outline),
                           label: Text('删除所选 (${selected.length})'),
                         ),
@@ -454,7 +471,11 @@ class LayersScreen extends ConsumerWidget {
                     ),
                     FilledButton(
                       style: FilledButton.styleFrom(
-                          backgroundColor: Colors.red),
+                        backgroundColor:
+                            Theme.of(confirmCtx).colorScheme.error,
+                        foregroundColor:
+                            Theme.of(confirmCtx).colorScheme.onError,
+                      ),
                       onPressed: () => Navigator.of(confirmCtx).pop(true),
                       child: const Text('删除'),
                     ),
@@ -465,7 +486,8 @@ class LayersScreen extends ConsumerWidget {
               await db.deleteLayer(l.id);
               if (dialogCtx.mounted) Navigator.of(dialogCtx).pop();
             },
-            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            style: TextButton.styleFrom(
+                foregroundColor: Theme.of(dialogCtx).colorScheme.error),
             child: const Text('删除'),
           ),
           FilledButton(

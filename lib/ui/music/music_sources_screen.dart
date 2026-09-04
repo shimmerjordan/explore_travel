@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../app/providers.dart';
+import '../common/empty_state.dart';
+import '../common/failure.dart';
+import '../common/status_palette.dart';
 import 'cookie_webview_screen.dart';
 
 /// "音乐平台配置" — five sources presented as peers, with credential entry
@@ -74,7 +77,8 @@ class _MusicSourcesScreenState
             r.isEmpty ? '空 — gdstudio 后端可能未登录或被限流' : 'ok · ${r.length} 首');
       }
     } catch (e) {
-      if (mounted) setState(() => _status[source] = 'error: $e');
+      debugPrint('[UI] 音乐平台 $source 测试 失败: $e');
+      if (mounted) setState(() => _status[source] = failureMessage('测试', e));
     } finally {
       if (mounted) setState(() => _testing.remove(source));
     }
@@ -125,7 +129,12 @@ class _MusicSourcesScreenState
             Container(
               padding: const EdgeInsets.all(8),
               decoration: BoxDecoration(
-                color: Colors.orangeAccent.withValues(alpha: 0.12),
+                // 只是给这段说明染一层警示底色；正文仍用 onSurface（亮 13.65:1 /
+                // 暗 8.62:1），所以这里跟随主题的警告色比固定的 orangeAccent 稳。
+                color: Theme.of(context)
+                    .status
+                    .warning
+                    .withValues(alpha: 0.12),
                 borderRadius: BorderRadius.circular(6),
               ),
               child: const Text(
@@ -208,9 +217,10 @@ class _MusicSourcesScreenState
             final m = _meta[src]!;
             final status = _status[src];
             final busy = _testing.contains(src);
-            final isError = status != null &&
-                (status.startsWith('error') || status.startsWith('空'));
             final isOk = status != null && status.startsWith('ok');
+            // 失败文案已统一成「测试失败 · …」，不再有 'error' 前缀可认；
+            // 除了明确 ok 的，其余有状态的都按失败上色。
+            final isError = status != null && !isOk;
             final hasCred = (s.musicCredentials[src] ?? '').isNotEmpty;
             return Padding(
               padding: const EdgeInsets.symmetric(
@@ -237,10 +247,13 @@ class _MusicSourcesScreenState
                                   color: Colors.lightBlueAccent),
                             ),
                           _Tag(
+                            // _Tag 把同一枚色当文字色、又当 0.18 的底色，等于
+                            // 自己降自己的对比度；语义色板在这种自染底上仍有
+                            // 亮 4.7:1 / 暗 5.3:1，Material 直出的两枚不行。
                             text: m.stable ? '稳定' : '实验性',
                             color: m.stable
-                                ? Colors.greenAccent
-                                : Colors.orangeAccent,
+                                ? Theme.of(context).status.success
+                                : Theme.of(context).status.warning,
                           ),
                         ],
                       ),
@@ -270,8 +283,8 @@ class _MusicSourcesScreenState
                               color: status == null
                                   ? Theme.of(context).hintColor
                                   : (isOk
-                                      ? Colors.greenAccent
-                                      : Colors.redAccent),
+                                      ? Theme.of(context).status.success
+                                      : Theme.of(context).status.danger),
                             ),
                           const SizedBox(width: 6),
                           Expanded(
@@ -282,9 +295,9 @@ class _MusicSourcesScreenState
                                   color: status == null
                                       ? Theme.of(context).hintColor
                                       : (isOk
-                                          ? Colors.greenAccent
+                                          ? Theme.of(context).status.success
                                           : (isError
-                                              ? Colors.redAccent
+                                              ? Theme.of(context).status.danger
                                               : null))),
                             ),
                           ),
@@ -337,6 +350,16 @@ class _MusicSourcesScreenState
               ),
             );
           }),
+          // 一份凭证都没存时，这页只是四张「未配置」的卡片；说清这不算没配好，
+          // 并指到真正要用的那两个按钮上。
+          if (!_sources.any(
+              (src) => (s.musicCredentials[src] ?? '').isNotEmpty))
+            const EmptyState(
+              title: '还没有保存任何平台凭证',
+              hint: '免费曲目不登录也能搜、能放。想听 VIP 曲目，在对应平台上点「登录」'
+                  '或「手填」存一份 Cookie。',
+              expand: false,
+            ),
           const SizedBox(height: 24),
         ],
       ),

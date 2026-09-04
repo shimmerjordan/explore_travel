@@ -16,6 +16,7 @@ import '../../core/prefs.dart';
 import '../../services/backup/backup_service.dart';
 import '../../services/sync/local_folder_storage.dart';
 import '../../services/sync/onedrive_service.dart';
+import '../common/failure.dart';
 import '../common/format.dart' show fmtBytes;
 import '../../services/sync/onedrive_sync_engine.dart';
 import '../../services/fog/fog_engine.dart';
@@ -470,7 +471,8 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
       return null;
     }
     if (error != null) {
-      if (mounted) setState(() => _status = '$title失败：$error');
+      debugPrint('[UI] $title 失败: $error');
+      if (mounted) setState(() => _status = failureMessage(title, error));
       return null;
     }
     return result;
@@ -782,7 +784,8 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
       final label = await ref.read(oneDriveServiceProvider).connect();
       setState(() => _status = '已连接 OneDrive：$label');
     } catch (e) {
-      setState(() => _status = '连接失败：$e');
+      debugPrint('[UI] 连接 OneDrive 失败: $e');
+      setState(() => _status = failureMessage('连接', e));
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -832,7 +835,12 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
             child: const Text('取消'),
           ),
           FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            // 不可逆的清除：用 M3 成对的 error/onError，白字压 Colors.red
+            // 只有 3.68:1。
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(dialogCtx).colorScheme.error,
+              foregroundColor: Theme.of(dialogCtx).colorScheme.onError,
+            ),
             onPressed: () => Navigator.of(dialogCtx).pop(true),
             child: const Text('清除'),
           ),
@@ -851,7 +859,8 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
       }
       if (mounted) setState(() => _status = msg);
     } catch (e) {
-      if (mounted) setState(() => _status = '清除失败：$e');
+      debugPrint('[UI] 清除模块 $key 失败: $e');
+      if (mounted) setState(() => _status = failureMessage('清除', e));
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -1057,7 +1066,8 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
         onPhase: (p) => phase.value = p,
       );
     } catch (e) {
-      result = 'FOW 导入失败：$e';
+      debugPrint('[UI] FOW 导入 失败: $e');
+      result = failureMessage('FOW 导入', e);
     } finally {
       if (showUi && mounted) {
         Navigator.of(context, rootNavigator: true).pop(); // close the dialog
@@ -1179,7 +1189,8 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
           '内部结构与世界迷雾原生 Sync.zip 一致（Sync/ 目录 + 混淆名瓦片），'
           '可直接用于 FOW 云同步，也可再导回本应用。');
     } catch (e) {
-      setState(() => _status = 'FOW 导出失败：$e');
+      debugPrint('[UI] FOW 导出 失败: $e');
+      setState(() => _status = failureMessage('FOW 导出', e));
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -1508,8 +1519,10 @@ class _ConsolePushSectionState extends ConsumerState<ConsolePushSection> {
       setState(() {
         _needsRelogin = false;
         _lastPushAt = null;
+        // 这里只要「原因」那半句：humanizeLoginError 的兜底现在是「登录失败 ·
+        // …」，接在「清理会话记录时出错：」后面就成了病句。
         _message = '已在本机退出（会话令牌已丢弃），但清理会话记录时出错：'
-            '${humanizeLoginError(e)}';
+            '${describeFailure(e) ?? '未知原因'}';
         _isError = true;
       });
     } finally {

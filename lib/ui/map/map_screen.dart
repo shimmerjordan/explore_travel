@@ -28,6 +28,7 @@ import '../../services/heat/heat_source.dart';
 import '../../services/heat/heat_tile_provider.dart';
 import '../../services/map/fog_tile_provider.dart';
 import '../../services/map/tile_providers.dart';
+import '../common/failure.dart';
 import '../common/format.dart' show fmtRelativeTime;
 import '../common/pixel.dart';
 import '../journal/quill_editor_screen.dart' show quillToPreview;
@@ -37,6 +38,7 @@ import '../companion/companion_card.dart';
 import '../journal/journal_screen.dart' as journal_ui;
 import '../import/track_import_flow.dart';
 import '../widgets/top_toast.dart';
+import '../common/map_chrome.dart';
 
 part 'map_sim_panel.dart';
 part 'map_markers.dart';
@@ -267,7 +269,12 @@ class _MapScreenState extends ConsumerState<MapScreen>
       });
     } catch (e, st) {
       debugPrint('[HEAT] enter 3D failed: $e\n$st');
-      if (mounted) TopToast.show(context, '3D 热图打开失败：$e');
+      // TopToast 没有动作按钮（它就是为了不挤走 FAB/底栏才存在的），
+      // 所以「怎么重试」只能写进话里。
+      if (mounted) {
+        TopToast.show(context,
+            '${failureMessage('打开 3D 热图', e)}。再点一次火苗按钮可重试');
+      }
     } finally {
       if (mounted) setState(() => _tiltBusy = false);
     }
@@ -807,7 +814,10 @@ class _MapScreenState extends ConsumerState<MapScreen>
             TopToast.show(
               context,
               err ?? '已开始记录，走动几步看看迷雾',
-              background: err == null ? null : Colors.red.shade700,
+              // 这条 toast 浮在地图影像上，用固定的浮层色而不是主题色。
+              // red.shade700 配白字本来就有 4.98:1（勉强达标），换成 toastDanger
+              // 是 6.54:1，且和下面「还没有位置」那条走同一套已断言的 token。
+              background: err == null ? null : MapChrome.toastDanger,
             );
             // First-start nudge: if Android, prompt the user to walk
             // through the permission + autostart checklist once.
@@ -846,213 +856,220 @@ class _MapScreenState extends ConsumerState<MapScreen>
             onPointerCancel: _onPointerUp,
             // RepaintBoundary: isolates map repaints from the chrome above.
             child: RepaintBoundary(
-              child: FlutterMap(
-              mapController: _mapCtrl,
-              options: MapOptions(
-                initialCenter: _center,
-                initialZoom: 13,
-                initialRotation: 0,
-                // Floor the zoom so the map always fills the screen — below
-                // this the world is smaller than a tall viewport and the grey
-                // backdrop showed through as a full-white screen. Combined with
-                // the world cameraConstraint below, zoom-out stops at a filled
-                // view (you see most of the world, not blank margins).
-                minZoom: 3,
-                maxZoom: 19,
-                cameraConstraint: CameraConstraint.contain(
-                  bounds: LatLngBounds(
-                    const LatLng(-85.05, -180),
-                    const LatLng(85.05, 180),
+              // flutter_map 的 RawGestureDetector 会往语义树里挂一个带
+              // tap / longPress / scroll 的全屏节点，自己却没有任何标签
+              // ——读屏扫到这里只会念一句空白。地图本体就是这个节点，给它一个
+              // 名字（编辑模式下 tap 会擦除/加点，所以顺带说清）。
+              child: Semantics(
+                label: '地图',
+                child: FlutterMap(
+                mapController: _mapCtrl,
+                options: MapOptions(
+                  initialCenter: _center,
+                  initialZoom: 13,
+                  initialRotation: 0,
+                  // Floor the zoom so the map always fills the screen — below
+                  // this the world is smaller than a tall viewport and the grey
+                  // backdrop showed through as a full-white screen. Combined with
+                  // the world cameraConstraint below, zoom-out stops at a filled
+                  // view (you see most of the world, not blank margins).
+                  minZoom: 3,
+                  maxZoom: 19,
+                  cameraConstraint: CameraConstraint.contain(
+                    bounds: LatLngBounds(
+                      const LatLng(-85.05, -180),
+                      const LatLng(85.05, 180),
+                    ),
                   ),
-                ),
-                // Backdrop for not-yet-fetched tiles. Amap's day-style land
-                // beige, NOT a cool grey: the dark fog veil multiplies over
-                // whatever shows through, and veil-over-beige lands within a
-                // couple of grey levels of veil-over-real-tiles — a cold area
-                // reads as "map still sharpening", not a black hole.
-                backgroundColor: const Color(0xFFEAE6DE),
-                interactionOptions: InteractionOptions(
-                  // Rotation is opt-in (default off): most two-finger gestures
-                  // are just pinch-zoom, so by default we strip the rotate flag
-                  // entirely — no accidental tilt. When the user enables it, a
-                  // high rotation threshold still ignores small twists during a
-                  // pinch, and the top-right compass snaps back to north.
-                  flags: settings.allowMapRotation
-                      ? InteractiveFlag.all
-                      : InteractiveFlag.all & ~InteractiveFlag.rotate,
-                  rotationThreshold: 25.0,
-                ),
-                onPositionChanged: (camera, hasGesture) {
-                  // A user-driven pan/zoom/rotate breaks auto-follow so the
-                  // map stops yanking back to centre while they look around.
-                  // Programmatic moves (our own follow re-centring, the locate
-                  // FAB) report hasGesture == false, so they don't disarm it.
-                  if (hasGesture && _followCamera) {
-                    setState(() => _followCamera = false);
-                  }
-                },
-                onMapEvent: (e) {
-                  // Mirror the camera's rotation into local state so
-                  // build() can render the compass chip without ever
-                  // touching `_mapCtrl.camera` (which throws before
-                  // the first frame). After the first onMapReady the
-                  // camera is safe to read here.
-                  if (e is MapEventRotate ||
-                      e is MapEventRotateStart ||
-                      e is MapEventRotateEnd ||
-                      e is MapEventMoveEnd) {
-                    if (!mounted) return;
-                    // Only when the compass actually needs to turn: with
-                    // rotation off this fired a full MapScreen rebuild
-                    // (Scaffold, FABs, every map layer) at the end of EVERY
-                    // pan and pinch, to redraw an unchanged north arrow.
-                    final rot = e.camera.rotation;
-                    if (rot != _mapRotation) {
-                      setState(() => _mapRotation = rot);
+                  // Backdrop for not-yet-fetched tiles. Amap's day-style land
+                  // beige, NOT a cool grey: the dark fog veil multiplies over
+                  // whatever shows through, and veil-over-beige lands within a
+                  // couple of grey levels of veil-over-real-tiles — a cold area
+                  // reads as "map still sharpening", not a black hole.
+                  backgroundColor: const Color(0xFFEAE6DE),
+                  interactionOptions: InteractionOptions(
+                    // Rotation is opt-in (default off): most two-finger gestures
+                    // are just pinch-zoom, so by default we strip the rotate flag
+                    // entirely — no accidental tilt. When the user enables it, a
+                    // high rotation threshold still ignores small twists during a
+                    // pinch, and the top-right compass snaps back to north.
+                    flags: settings.allowMapRotation
+                        ? InteractiveFlag.all
+                        : InteractiveFlag.all & ~InteractiveFlag.rotate,
+                    rotationThreshold: 25.0,
+                  ),
+                  onPositionChanged: (camera, hasGesture) {
+                    // A user-driven pan/zoom/rotate breaks auto-follow so the
+                    // map stops yanking back to centre while they look around.
+                    // Programmatic moves (our own follow re-centring, the locate
+                    // FAB) report hasGesture == false, so they don't disarm it.
+                    if (hasGesture && _followCamera) {
+                      setState(() => _followCamera = false);
                     }
-                  }
-                  // Track whether we're pressed against the zoom floor; that's
-                  // the only time pinch-in attempts count toward the 3D globe.
-                  final atMin = e.camera.zoom <= _kMinZoom + 0.05;
-                  if (atMin != _atMinZoom) {
-                    if (mounted) setState(() => _atMinZoom = atMin);
-                  }
-                  // Zooming back in cancels the streak.
-                  if (!atMin && _zoomOutTries != 0) {
-                    _zoomTriesReset?.cancel();
-                    if (mounted) setState(() => _zoomOutTries = 0);
-                  }
-                  // Web has no two-finger pinch — count mouse-wheel zoom-out
-                  // ticks while pressed against the floor as the path into the
-                  // 3D globe (parity with the 3× pinch gesture on mobile).
-                  if (kIsWeb &&
-                      e is MapEventScrollWheelZoom &&
-                      atMin &&
-                      e.camera.zoom <= _prevZoom + 0.001) {
-                    _registerZoomOutTry();
-                  }
-                  _prevZoom = e.camera.zoom;
-                },
-                onTap: (tapPos, latlng) => _onMapTap(latlng, activeLayerId),
-                onLongPress:
-                    (kDebugMode || ref.read(settingsProvider).debugMode)
-                        ? (tapPos, latlng) {
-                            final wgs =
-                                _fromDisplay(latlng.latitude, latlng.longitude);
-                            setState(() {
-                              _simActive = true;
-                              _simLat = wgs.latitude;
-                              _simLng = wgs.longitude;
-                              _wgsLat = wgs.latitude;
-                              _wgsLng = wgs.longitude;
-                            });
-                          }
-                        : null,
-              ),
-              children: [
-                // Tile layer — always rendered at full brightness. Dark mode
-                // is no longer a client-side invert of the raster (which
-                // dimmed the explored trail too); instead the fog veil below
-                // turns dark, so walked corridors reveal the bright original
-                // map exactly as in light mode while everything else is
-                // pressed dark. See the FogLayer's dark veil below.
-                buildTileLayer(
-                  provider: settings.mapProvider,
-                  style: settings.mapStyle,
-                  amapKey: settings.amapApiKey,
-                  googleKey: settings.googleMapKey,
-                  customOsmUrl: settings.customOsmTileUrl,
-                  ovitalUrl: settings.ovitalTileUrl,
+                  },
+                  onMapEvent: (e) {
+                    // Mirror the camera's rotation into local state so
+                    // build() can render the compass chip without ever
+                    // touching `_mapCtrl.camera` (which throws before
+                    // the first frame). After the first onMapReady the
+                    // camera is safe to read here.
+                    if (e is MapEventRotate ||
+                        e is MapEventRotateStart ||
+                        e is MapEventRotateEnd ||
+                        e is MapEventMoveEnd) {
+                      if (!mounted) return;
+                      // Only when the compass actually needs to turn: with
+                      // rotation off this fired a full MapScreen rebuild
+                      // (Scaffold, FABs, every map layer) at the end of EVERY
+                      // pan and pinch, to redraw an unchanged north arrow.
+                      final rot = e.camera.rotation;
+                      if (rot != _mapRotation) {
+                        setState(() => _mapRotation = rot);
+                      }
+                    }
+                    // Track whether we're pressed against the zoom floor; that's
+                    // the only time pinch-in attempts count toward the 3D globe.
+                    final atMin = e.camera.zoom <= _kMinZoom + 0.05;
+                    if (atMin != _atMinZoom) {
+                      if (mounted) setState(() => _atMinZoom = atMin);
+                    }
+                    // Zooming back in cancels the streak.
+                    if (!atMin && _zoomOutTries != 0) {
+                      _zoomTriesReset?.cancel();
+                      if (mounted) setState(() => _zoomOutTries = 0);
+                    }
+                    // Web has no two-finger pinch — count mouse-wheel zoom-out
+                    // ticks while pressed against the floor as the path into the
+                    // 3D globe (parity with the 3× pinch gesture on mobile).
+                    if (kIsWeb &&
+                        e is MapEventScrollWheelZoom &&
+                        atMin &&
+                        e.camera.zoom <= _prevZoom + 0.001) {
+                      _registerZoomOutTry();
+                    }
+                    _prevZoom = e.camera.zoom;
+                  },
+                  onTap: (tapPos, latlng) => _onMapTap(latlng, activeLayerId),
+                  onLongPress:
+                      (kDebugMode || ref.read(settingsProvider).debugMode)
+                          ? (tapPos, latlng) {
+                              final wgs =
+                                  _fromDisplay(latlng.latitude, latlng.longitude);
+                              setState(() {
+                                _simActive = true;
+                                _simLat = wgs.latitude;
+                                _simLng = wgs.longitude;
+                                _wgsLat = wgs.latitude;
+                                _wgsLng = wgs.longitude;
+                              });
+                            }
+                          : null,
                 ),
-                // Explored-area fog, baked into real map tiles so it pans/zooms
-                // pixel-for-pixel with the base map (fixed thickness, no custom
-                // per-zoom re-rasterisation). Rendered whenever there are visible
-                // layers OR dark mode is on (empty data → a solid dark scrim).
-                // Gated on settings.loaded: painting with the not-yet-loaded
-                // default veil colour / widths flashed a wrong first frame on
-                // every cold start.
-                if (settings.loaded &&
-                    (visibleLayerIds.isNotEmpty || settings.darkMap))
-                  FogTileLayer(
-                    db: ref.read(dbProvider),
-                    layerIds: visibleLayerIds,
-                    veil: fogVeil,
-                    tints: fogTints,
-                    mapProvider: settings.mapProvider,
-                    refreshKey: fogRefresh,
-                    // Live reveal/erase rows merge into the snapshot in memory;
-                    // fogRefresh (imports, layer ops) still forces a full reload.
-                    changes: ref.read(fogEngineProvider).changes,
+                children: [
+                  // Tile layer — always rendered at full brightness. Dark mode
+                  // is no longer a client-side invert of the raster (which
+                  // dimmed the explored trail too); instead the fog veil below
+                  // turns dark, so walked corridors reveal the bright original
+                  // map exactly as in light mode while everything else is
+                  // pressed dark. See the FogLayer's dark veil below.
+                  buildTileLayer(
+                    provider: settings.mapProvider,
+                    style: settings.mapStyle,
+                    amapKey: settings.amapApiKey,
+                    googleKey: settings.googleMapKey,
+                    customOsmUrl: settings.customOsmTileUrl,
+                    ovitalUrl: settings.ovitalTileUrl,
                   ),
-                // Cold-start guard: until prefs AND the layer list are loaded
-                // we can't know the real veil/visible layers, and the frames
-                // in between flashed a bright unfogged map ("闪一下白色地图").
-                // Cover the map with an approximate veil for those first
-                // frames; it's replaced by the real fog tiles the moment the
-                // data is in.
-                if (!settings.loaded || layersAsync.isLoading)
-                  IgnorePointer(
-                    child: ColoredBox(
-                      // Default AppSettings veil (fogColor 0xFF101820 @ 0.78)
-                      // for the pre-prefs frames; the real veil once loaded.
-                      color: settings.loaded
-                          ? fogVeil
-                          : const Color(0xC7101820),
-                      child: const SizedBox.expand(),
+                  // Explored-area fog, baked into real map tiles so it pans/zooms
+                  // pixel-for-pixel with the base map (fixed thickness, no custom
+                  // per-zoom re-rasterisation). Rendered whenever there are visible
+                  // layers OR dark mode is on (empty data → a solid dark scrim).
+                  // Gated on settings.loaded: painting with the not-yet-loaded
+                  // default veil colour / widths flashed a wrong first frame on
+                  // every cold start.
+                  if (settings.loaded &&
+                      (visibleLayerIds.isNotEmpty || settings.darkMap))
+                    FogTileLayer(
+                      db: ref.read(dbProvider),
+                      layerIds: visibleLayerIds,
+                      veil: fogVeil,
+                      tints: fogTints,
+                      mapProvider: settings.mapProvider,
+                      refreshKey: fogRefresh,
+                      // Live reveal/erase rows merge into the snapshot in memory;
+                      // fogRefresh (imports, layer ops) still forces a full reload.
+                      changes: ref.read(fogEngineProvider).changes,
                     ),
-                  ),
-                if (displayPos != null)
-                  MarkerLayer(markers: [
-                    Marker(
-                      point: displayPos,
-                      width: 36,
-                      height: 36,
-                      child: _LocationDot(
-                          simulated: _simActive, heading: _heading),
+                  // Cold-start guard: until prefs AND the layer list are loaded
+                  // we can't know the real veil/visible layers, and the frames
+                  // in between flashed a bright unfogged map ("闪一下白色地图").
+                  // Cover the map with an approximate veil for those first
+                  // frames; it's replaced by the real fog tiles the moment the
+                  // data is in.
+                  if (!settings.loaded || layersAsync.isLoading)
+                    IgnorePointer(
+                      child: ColoredBox(
+                        // Default AppSettings veil (fogColor 0xFF101820 @ 0.78)
+                        // for the pre-prefs frames; the real veil once loaded.
+                        color: settings.loaded
+                            ? fogVeil
+                            : const Color(0xC7101820),
+                        child: const SizedBox.expand(),
+                      ),
                     ),
-                  ]),
-                _PeerTrailsLayer(toDisplay: _toDisplay),
-                // Journal pins — tappable thumbnail bubbles for every recent
-                // entry. Loaded once and refreshed on save/delete. Hidden
-                // wholesale (when [_allPinsHidden]) or per-pin (when its id is
-                // in [_hiddenJournalIds]).
-                if (!_allPinsHidden)
-                  FutureBuilder<List<db_t.JournalEntry>>(
-                    key: ValueKey('journal-pins-$_journalPinsRev'),
-                    future: _journalPinsFuture,
-                    builder: (ctx, snap) {
-                      final list = (snap.data ?? const <db_t.JournalEntry>[])
-                          .where((j) => !_hiddenJournalIds.contains(j.id))
-                          .toList();
-                      if (list.isEmpty) return const SizedBox.shrink();
-                      // Pin size. On NATIVE pins scale with zoom; on WEB the
-                      // per-frame rebuild of every marker is the main zoom jank,
-                      // so pins are a FIXED size there (no camera read at all).
-                      // Native reads the camera through a QUANTISED bucket
-                      // (0.1 zoom): the builder below re-runs per frame, but it
-                      // returns the CACHED MarkerLayer instance until the bucket
-                      // actually flips, so the O(entries) marker/pin subtree —
-                      // including Image.file thumbnails — is not rebuilt while
-                      // panning or during sub-bucket zoom.
-                      if (kIsWeb) return _buildPinLayer(list, 1.0);
-                      return _ZoomBucketed(
-                        buckets: 10, // 0.1-zoom steps
-                        builder: (ctx, zoomBucket) {
-                          // Proportional with the map (like the fog paths),
-                          // but floored so a pin never shrinks past a
-                          // recognisable ~12px sprite. The old 0.5 floor
-                          // kicked in at z15 already — pins loomed huge over
-                          // a zoomed-out city view.
-                          final double scale = math
-                              .pow(2.0, zoomBucket - 16.0)
-                              .toDouble()
-                              .clamp(0.28, 3.0);
-                          return _buildPinLayer(list, scale);
-                        },
-                      );
-                    },
-                  ),
-              ],
+                  if (displayPos != null)
+                    MarkerLayer(markers: [
+                      Marker(
+                        point: displayPos,
+                        width: 36,
+                        height: 36,
+                        child: _LocationDot(
+                            simulated: _simActive, heading: _heading),
+                      ),
+                    ]),
+                  _PeerTrailsLayer(toDisplay: _toDisplay),
+                  // Journal pins — tappable thumbnail bubbles for every recent
+                  // entry. Loaded once and refreshed on save/delete. Hidden
+                  // wholesale (when [_allPinsHidden]) or per-pin (when its id is
+                  // in [_hiddenJournalIds]).
+                  if (!_allPinsHidden)
+                    FutureBuilder<List<db_t.JournalEntry>>(
+                      key: ValueKey('journal-pins-$_journalPinsRev'),
+                      future: _journalPinsFuture,
+                      builder: (ctx, snap) {
+                        final list = (snap.data ?? const <db_t.JournalEntry>[])
+                            .where((j) => !_hiddenJournalIds.contains(j.id))
+                            .toList();
+                        if (list.isEmpty) return const SizedBox.shrink();
+                        // Pin size. On NATIVE pins scale with zoom; on WEB the
+                        // per-frame rebuild of every marker is the main zoom jank,
+                        // so pins are a FIXED size there (no camera read at all).
+                        // Native reads the camera through a QUANTISED bucket
+                        // (0.1 zoom): the builder below re-runs per frame, but it
+                        // returns the CACHED MarkerLayer instance until the bucket
+                        // actually flips, so the O(entries) marker/pin subtree —
+                        // including Image.file thumbnails — is not rebuilt while
+                        // panning or during sub-bucket zoom.
+                        if (kIsWeb) return _buildPinLayer(list, 1.0);
+                        return _ZoomBucketed(
+                          buckets: 10, // 0.1-zoom steps
+                          builder: (ctx, zoomBucket) {
+                            // Proportional with the map (like the fog paths),
+                            // but floored so a pin never shrinks past a
+                            // recognisable ~12px sprite. The old 0.5 floor
+                            // kicked in at z15 already — pins loomed huge over
+                            // a zoomed-out city view.
+                            final double scale = math
+                                .pow(2.0, zoomBucket - 16.0)
+                                .toDouble()
+                                .clamp(0.28, 3.0);
+                            return _buildPinLayer(list, scale);
+                          },
+                        );
+                      },
+                    ),
+                ],
+                ),
               ),
             ),
           ),
@@ -1064,9 +1081,12 @@ class _MapScreenState extends ConsumerState<MapScreen>
               child: Container(
                 padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
                 decoration: BoxDecoration(
+                  // 这条模式提示横幅浮在**地图影像**上，且内含白色正文，所以
+                  // 用固定的浮层色而不是主题色。擦除态原先的 redAccent 带
+                  // 0.9 不透明度盖在雪地底图上只有 2.90:1。
                   color: (_editMode == _EditMode.erase
-                          ? Colors.redAccent
-                          : const Color(0xFF26A69A))
+                          ? MapChrome.toastDanger
+                          : MapChrome.brandDeep)
                       .withValues(alpha: 0.9),
                   borderRadius: BorderRadius.circular(6),
                 ),
@@ -1126,10 +1146,18 @@ class _MapScreenState extends ConsumerState<MapScreen>
                 // Explicit zoom controls — the only reliable way to zoom on a
                 // desktop browser (and the −, at the floor, is the path into
                 // the 3D globe where the scroll-wheel gesture is unreliable).
-                _MapFab(icon: Icons.add_rounded, onTap: () => _zoomBy(1)),
+                _MapFab(
+                    icon: Icons.add_rounded,
+                    semanticLabel: '放大',
+                    onTap: () => _zoomBy(1)),
                 const SizedBox(height: 10),
                 _MapFab(
                   icon: Icons.remove_rounded,
+                  // 已经贴着缩放下限时，这颗按钮的意义变成「再按进 3D 地球」，
+                  // 读屏得跟着变（视觉上是靠变色提示的）。
+                  semanticLabel: _atMinZoom && _zoomOutTries > 0
+                      ? '缩小，再按 ${3 - _zoomOutTries} 次进入 3D 地球'
+                      : '缩小',
                   active: _atMinZoom && _zoomOutTries > 0,
                   activeColor: const Color(0xFF26A69A),
                   onTap: _zoomOutOrGlobe,
@@ -1140,8 +1168,13 @@ class _MapScreenState extends ConsumerState<MapScreen>
                 if (!viewOnly) ...[
                   _MapFab(
                     icon: Icons.cleaning_services_rounded,
+                    semanticLabel: _editMode == _EditMode.erase
+                        ? '退出擦除迷雾'
+                        : '擦除迷雾',
                     active: _editMode == _EditMode.erase,
-                    activeColor: Colors.redAccent,
+                    // _MapFab 的图标是 MapChrome.onChrome（白）。跟它一起亮起来
+                    // 的那条提示横幅同色，两个部件读成一组。
+                    activeColor: MapChrome.toastDanger,
                     onTap: () => setState(() => _editMode =
                         _editMode == _EditMode.erase
                             ? _EditMode.none
@@ -1150,8 +1183,12 @@ class _MapScreenState extends ConsumerState<MapScreen>
                   const SizedBox(height: 10),
                   _MapFab(
                     icon: Icons.add_location_alt_rounded,
+                    semanticLabel: _editMode == _EditMode.add
+                        ? '退出添加记录点'
+                        : '添加记录点',
                     active: _editMode == _EditMode.add,
-                    activeColor: const Color(0xFF26A69A),
+                    // 与它点亮的那条横幅同色（见上面 erase 的同款注释）。
+                    activeColor: MapChrome.brandDeep,
                     onTap: () => setState(() => _editMode =
                         _editMode == _EditMode.add
                             ? _EditMode.none
@@ -1161,12 +1198,12 @@ class _MapScreenState extends ConsumerState<MapScreen>
                   // Import record points from photos' GPS — lights up the trail
                   // at each picked photo's location. Same flow as the layers
                   // page; lives here so it's reachable from the home map too.
-                  Tooltip(
-                    message: '从照片定位点亮记录点',
-                    child: _MapFab(
-                      icon: Icons.add_photo_alternate_rounded,
-                      onTap: () => TrackImportFlow.fromPhotos(context, ref),
-                    ),
+                  // Tooltip 不再包在外面：_MapFab 自己就会用 semanticLabel 挂
+                  // tooltip（并把它排除在语义外），包两层只会被读两遍。
+                  _MapFab(
+                    icon: Icons.add_photo_alternate_rounded,
+                    semanticLabel: '从照片定位点亮记录点',
+                    onTap: () => TrackImportFlow.fromPhotos(context, ref),
                   ),
                   const SizedBox(height: 10),
                 ],
@@ -1178,6 +1215,12 @@ class _MapScreenState extends ConsumerState<MapScreen>
                   icon: (recording && !_followCamera)
                       ? Icons.location_searching_rounded
                       : Icons.my_location_rounded,
+                  // 三种状态在视觉上靠图标空心/实心 + 高亮区分，读屏只能靠这句。
+                  semanticLabel: recording
+                      ? (_followCamera
+                          ? '正在跟随我的位置'
+                          : '回到我的位置并继续跟随')
+                      : '回到我的位置',
                   active: recording && _followCamera,
                   activeColor: const Color(0xFF26A69A),
                   onTap: _gotoCurrent,
@@ -1193,6 +1236,9 @@ class _MapScreenState extends ConsumerState<MapScreen>
               children: [
                 _MapChip(
                   icon: _satellite ? Icons.satellite_alt : Icons.map_outlined,
+                  semanticLabel: _satellite
+                      ? '底图：卫星影像，点按切换为标准地图'
+                      : '底图：标准地图，点按切换为卫星影像',
                   onTap: () {
                     setState(() => _satellite = !_satellite);
                     ref.read(settingsProvider.notifier).update((p) =>
@@ -1210,6 +1256,13 @@ class _MapScreenState extends ConsumerState<MapScreen>
                     MapProvider.google => 'G',
                     MapProvider.ovital => '奥维',
                   },
+                  // 可见标签是缩写（「G」/「OSM」），语义要说全称 + 这是什么。
+                  semanticLabel: '地图源：${switch (settings.mapProvider) {
+                    MapProvider.osm => 'OpenStreetMap',
+                    MapProvider.amap => '高德地图',
+                    MapProvider.google => '谷歌地图',
+                    MapProvider.ovital => '奥维地图',
+                  }}，点按切换',
                   onTap: () {
                     final providers = MapProvider.values;
                     final next = providers[
@@ -1223,6 +1276,9 @@ class _MapScreenState extends ConsumerState<MapScreen>
                   icon: settings.darkMap
                       ? Icons.dark_mode_rounded
                       : Icons.light_mode_outlined,
+                  semanticLabel: settings.darkMap
+                      ? '地图夜间配色已开，点按关闭'
+                      : '地图夜间配色已关，点按开启',
                   onTap: () => ref
                       .read(settingsProvider.notifier)
                       .update((p) => p.copyWith(darkMap: !p.darkMap)),
@@ -1234,6 +1290,9 @@ class _MapScreenState extends ConsumerState<MapScreen>
                       ? Icons.hourglass_top_rounded
                       : Icons.local_fire_department_rounded,
                   label: _tiltBusy ? '热图…' : null,
+                  semanticLabel:
+                      _tiltBusy ? '正在生成 3D 热力图' : '进入 3D 热力图',
+                  longPressHint: '调整热图样式',
                   onTap: _enterHeat3D,
                   onLongPress: () => showHeatStyleSheet(context),
                 ),
@@ -1245,6 +1304,9 @@ class _MapScreenState extends ConsumerState<MapScreen>
                   icon: settings.allowMapRotation
                       ? Icons.screen_rotation_rounded
                       : Icons.screen_lock_rotation_rounded,
+                  semanticLabel: settings.allowMapRotation
+                      ? '双指旋转已开启，点按锁定朝北'
+                      : '地图已锁定朝北，点按允许双指旋转',
                   onTap: () {
                     final next = !settings.allowMapRotation;
                     ref
@@ -1326,23 +1388,22 @@ class _MapScreenState extends ConsumerState<MapScreen>
           Positioned(
             top: MediaQuery.of(context).padding.top + 64,
             right: 16,
-            child: Tooltip(
-              message: (_allPinsHidden || _hiddenJournalIds.isNotEmpty)
+            // Tooltip 交给 _MapFab 自己挂（见那里的注释），这里只给标签。
+            child: _MapFab(
+              icon: (_allPinsHidden || _hiddenJournalIds.isNotEmpty)
+                  ? Icons.visibility_outlined
+                  : Icons.visibility_off_outlined,
+              semanticLabel: (_allPinsHidden || _hiddenJournalIds.isNotEmpty)
                   ? '恢复显示手账气泡'
                   : '隐藏全部手账气泡',
-              child: _MapFab(
-                icon: (_allPinsHidden || _hiddenJournalIds.isNotEmpty)
-                    ? Icons.visibility_outlined
-                    : Icons.visibility_off_outlined,
-                onTap: () => setState(() {
-                  if (_allPinsHidden || _hiddenJournalIds.isNotEmpty) {
-                    _allPinsHidden = false;
-                    _hiddenJournalIds.clear();
-                  } else {
-                    _allPinsHidden = true;
-                  }
-                }),
-              ),
+              onTap: () => setState(() {
+                if (_allPinsHidden || _hiddenJournalIds.isNotEmpty) {
+                  _allPinsHidden = false;
+                  _hiddenJournalIds.clear();
+                } else {
+                  _allPinsHidden = true;
+                }
+              }),
             ),
           ),
           // ─── Debug simulation panel ───
@@ -1371,6 +1432,7 @@ class _MapScreenState extends ConsumerState<MapScreen>
               bottom: 80,
               child: _MapFab(
                 icon: Icons.bug_report_rounded,
+                semanticLabel: '打开模拟行走面板',
                 onTap: () => setState(() {
                   _simActive = true;
                   if (_wgsLat != null) _simLat = _wgsLat!;
@@ -1383,17 +1445,23 @@ class _MapScreenState extends ConsumerState<MapScreen>
           Positioned(
             left: 12,
             bottom: 136,
-            child: CompanionAvatarButton(
-              onTap: () {
-                if (_companionOpen) {
-                  _companionKey.currentState?.close();
-                } else {
-                  setState(() => _companionOpen = true);
-                  final c = ref.read(companionProvider);
-                  c.setCardOpen(true);
-                  c.updatePosition(_wgsLat, _wgsLng);
-                }
-              },
+            // CompanionAvatarButton 是一张像素脸（CustomPaint），自己没有标签；
+            // 它不在本次改动范围内，所以在调用点补上语义。
+            child: Semantics(
+              button: true,
+              label: _companionOpen ? 'AI 旅伴，点按收起' : 'AI 旅伴',
+              child: CompanionAvatarButton(
+                onTap: () {
+                  if (_companionOpen) {
+                    _companionKey.currentState?.close();
+                  } else {
+                    setState(() => _companionOpen = true);
+                    final c = ref.read(companionProvider);
+                    c.setCardOpen(true);
+                    c.updatePosition(_wgsLat, _wgsLng);
+                  }
+                },
+              ),
             ),
           ),
           // Read-only badge (web / 展示模式). Enable debug mode to unlock
@@ -1592,7 +1660,10 @@ class _MapScreenState extends ConsumerState<MapScreen>
     if (_wgsLat == null || _wgsLng == null) {
       // Top toast so this doesn't dock to the bottom Scaffold and
       // hide the centred REC button. Same UX as "已开始记录" etc.
-      TopToast.show(context, '还没有位置', background: Colors.orange.shade700);
+      // orange.shade700 配 TopToast 写死的白字只有 2.70:1，是这一轮里最糟的
+      // 一处；toastWarning 同色相压深到 6.51:1。
+      TopToast.show(context, '还没有位置',
+          background: MapChrome.toastWarning);
       return;
     }
     final db = ref.read(dbProvider);
@@ -1812,33 +1883,42 @@ class _MapScreenState extends ConsumerState<MapScreen>
                 const SizedBox(height: 16),
                 Row(
                   children: [
-                    GestureDetector(
-                      onTap: () => _pickAvatarOnMap(sheetCtx, sheetRef),
-                      child: Stack(
-                        alignment: Alignment.bottomRight,
-                        children: [
-                          _SelfAvatar(
-                            radius: 28,
-                            b64: settings.avatarBase64,
-                            seed: settings.selfPeerId ?? settings.displayName,
+                    Semantics(
+                      button: true,
+                      // 一张头像 + 一枚相机小徽章，没有任何文字。
+                      label: '更换头像',
+                      child: GestureDetector(
+                        onTap: () => _pickAvatarOnMap(sheetCtx, sheetRef),
+                        // ExcludeSemantics 只包画面：包住 GestureDetector 会把
+                        // tap 动作也排除，读屏就点不动了。
+                        child: ExcludeSemantics(
+                          child: Stack(
+                            alignment: Alignment.bottomRight,
+                            children: [
+                              _SelfAvatar(
+                                radius: 28,
+                                b64: settings.avatarBase64,
+                                seed: settings.selfPeerId ?? settings.displayName,
+                              ),
+                              // Tiny camera badge — same affordance pattern
+                              // as common chat apps. Tapping anywhere on the
+                              // avatar triggers the picker.
+                              Container(
+                                width: 20,
+                                height: 20,
+                                decoration: const BoxDecoration(
+                                  color: Color(0xFF26A69A),
+                                  shape: BoxShape.circle,
+                                ),
+                                child: const Icon(
+                                  Icons.photo_camera_outlined,
+                                  size: 12,
+                                  color: Colors.white,
+                                ),
+                              ),
+                            ],
                           ),
-                          // Tiny camera badge — same affordance pattern
-                          // as common chat apps. Tapping anywhere on the
-                          // avatar triggers the picker.
-                          Container(
-                            width: 20,
-                            height: 20,
-                            decoration: const BoxDecoration(
-                              color: Color(0xFF26A69A),
-                              shape: BoxShape.circle,
-                            ),
-                            child: const Icon(
-                              Icons.photo_camera_outlined,
-                              size: 12,
-                              color: Colors.white,
-                            ),
-                          ),
-                        ],
+                        ),
                       ),
                     ),
                     const SizedBox(width: 12),
@@ -1846,21 +1926,29 @@ class _MapScreenState extends ConsumerState<MapScreen>
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          GestureDetector(
-                            onTap: () => _editDisplayName(sheetCtx, sheetRef),
-                            child: Row(
-                              children: [
-                                Flexible(
-                                  child: Text(settings.displayName,
-                                      style: const TextStyle(
-                                          color: Colors.white,
-                                          fontSize: 18,
-                                          fontWeight: FontWeight.w600)),
+                          Semantics(
+                            button: true,
+                            // 只有一支铅笔图标暗示可改，读屏听不见图标。
+                            label: '昵称 ${settings.displayName}，点按修改',
+                            child: GestureDetector(
+                              onTap: () => _editDisplayName(sheetCtx, sheetRef),
+                              // 只包画面，别包住 GestureDetector（见上）。
+                              child: ExcludeSemantics(
+                                child: Row(
+                                  children: [
+                                    Flexible(
+                                      child: Text(settings.displayName,
+                                          style: const TextStyle(
+                                              color: Colors.white,
+                                              fontSize: 18,
+                                              fontWeight: FontWeight.w600)),
+                                    ),
+                                    const SizedBox(width: 6),
+                                    const Icon(Icons.edit_outlined,
+                                        color: Colors.white54, size: 14),
+                                  ],
                                 ),
-                                const SizedBox(width: 6),
-                                const Icon(Icons.edit_outlined,
-                                    color: Colors.white54, size: 14),
-                              ],
+                              ),
                             ),
                           ),
                           Text(
@@ -2011,10 +2099,15 @@ class _MapScreenState extends ConsumerState<MapScreen>
       await ref
           .read(settingsProvider.notifier)
           .update((p) => p.copyWith(avatarBase64: b64));
-    } catch (e) {
+    } catch (e, st) {
+      // 这里是设置面板里的头像选择，不是地图本体：SnackBar 不会挤到
+      // FAB/底栏，所以保持 SnackBar，还能带「重试」。
       if (ctx.mounted) {
-        ScaffoldMessenger.of(ctx)
-            .showSnackBar(SnackBar(content: Text('选择图片失败：$e')));
+        showFailure(ctx,
+            action: '选择图片',
+            error: e,
+            stack: st,
+            onRetry: () => _pickAvatarOnMap(ctx, ref));
       }
     }
   }
@@ -2103,19 +2196,25 @@ class _MapScreenState extends ConsumerState<MapScreen>
           // Counter-rotate so the pin always stays upright
           // (tip pointing down) however the map is rotated.
           rotate: true,
-          child: GestureDetector(
-            onTap: () async {
-              await journal_ui.openJournalDetail(context, ref, j);
-              if (mounted) setState(_reloadJournalPins);
-            },
-            onLongPress: () => _showPinHideMenu(j),
-            // Each pin is a blurred shadow + anti-aliased circular clip +
-            // photo: cache its raster so panning only translates the layer
-            // instead of re-painting every visible pin per frame.
-            child: RepaintBoundary(
-              child: FittedBox(
-                fit: BoxFit.contain,
-                child: _JournalPin(entry: j),
+          // 标签在 _JournalPin 里给（「手账：标题」）；这里补上「是颗按钮」与
+          // 长按能做什么——长按菜单在视觉上没有任何提示。
+          child: Semantics(
+            button: true,
+            onLongPressHint: '隐藏这条手账气泡',
+            child: GestureDetector(
+              onTap: () async {
+                await journal_ui.openJournalDetail(context, ref, j);
+                if (mounted) setState(_reloadJournalPins);
+              },
+              onLongPress: () => _showPinHideMenu(j),
+              // Each pin is a blurred shadow + anti-aliased circular clip +
+              // photo: cache its raster so panning only translates the layer
+              // instead of re-painting every visible pin per frame.
+              child: RepaintBoundary(
+                child: FittedBox(
+                  fit: BoxFit.contain,
+                  child: _JournalPin(entry: j),
+                ),
               ),
             ),
           ),

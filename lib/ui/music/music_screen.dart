@@ -7,7 +7,9 @@ import 'package:just_audio/just_audio.dart' show PlayerState;
 import '../../app/providers.dart';
 import '../../data/db/database.dart';
 import '../../services/music/music_service.dart';
+import '../common/failure.dart';
 import '../common/pixel.dart';
+import '../common/status_palette.dart';
 
 /// Music screen: search → play → favorite, plus an AI-driven "make me a
 /// travel playlist" tab that derives keywords from current location and mood.
@@ -144,10 +146,13 @@ class _MusicScreenState extends ConsumerState<MusicScreen>
     try {
       final r = await svc.search(keyword.trim(), source: _source);
       if (mounted) setState(() => _results = r);
-    } catch (e) {
+    } catch (e, st) {
       if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('搜索失败：$e')));
+        showFailure(context,
+            action: '搜索',
+            error: e,
+            stack: st,
+            onRetry: () => _doSearch(keyword));
       }
     } finally {
       if (mounted) setState(() => _loading = false);
@@ -200,7 +205,8 @@ class _MusicScreenState extends ConsumerState<MusicScreen>
         _aiStatus = '已生成 ${uniq.length} 首旅行歌单 — 点单首播放，或点上方"播放整张"';
       });
     } catch (e) {
-      setState(() => _aiStatus = '失败：$e');
+      debugPrint('[UI] 生成旅行歌单 失败: $e');
+      setState(() => _aiStatus = failureMessage('生成歌单', e));
     } finally {
       if (mounted) setState(() => _aiLoading = false);
     }
@@ -219,7 +225,8 @@ class _MusicScreenState extends ConsumerState<MusicScreen>
             '已入队 $queued 首 — 自动顺序播放，跳过下一首/上一首用系统通知');
       }
     } catch (e) {
-      if (mounted) setState(() => _aiStatus = '入队失败：$e');
+      debugPrint('[UI] 整张入队 失败: $e');
+      if (mounted) setState(() => _aiStatus = failureMessage('入队', e));
     }
   }
 
@@ -266,10 +273,10 @@ class _MusicScreenState extends ConsumerState<MusicScreen>
           }
         } catch (_) {}
       }
-    } catch (e) {
+    } catch (e, st) {
       if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('播放失败：$e')));
+        showFailure(context,
+            action: '播放', error: e, stack: st, onRetry: () => _play(t));
       }
     }
   }
@@ -292,7 +299,7 @@ class _MusicScreenState extends ConsumerState<MusicScreen>
                     ? Icons.cast_connected
                     : Icons.cast,
                 color: s.groupBroadcastMusic && inGroup
-                    ? Colors.greenAccent
+                    ? Theme.of(context).status.success
                     : null,
               ),
               tooltip: inGroup
@@ -551,8 +558,8 @@ class _MusicScreenState extends ConsumerState<MusicScreen>
         final favs = snap.data!
             .where((f) => !_dismissedFavIds.contains(f.id))
             .toList();
+        final cs = Theme.of(context).colorScheme;
         if (favs.isEmpty) {
-          final cs = Theme.of(context).colorScheme;
           return Center(
             child: Column(mainAxisSize: MainAxisSize.min, children: [
               PixelSprite(
@@ -569,7 +576,8 @@ class _MusicScreenState extends ConsumerState<MusicScreen>
             return Dismissible(
               key: ValueKey('fav-${f.id}'),
               direction: DismissDirection.endToStart,
-              background: Container(color: Colors.red),
+              // 左滑删除露出的底：不可逆操作用 M3 的 error 角色。
+              background: Container(color: cs.error),
               onDismissed: (_) async {
                 // 先把这行从列表里藏掉（Dismissible 要求回调一返回它就不在树里），
                 // 再落库、重查。
@@ -579,7 +587,9 @@ class _MusicScreenState extends ConsumerState<MusicScreen>
                 _reloadFavorites();
               },
               child: ListTile(
-                leading: const Icon(Icons.favorite, color: Colors.red),
+                // 收藏红心不是「危险」，是高亮：用主题里那枚专门为 heart/flag
+                // 留的珊瑚色 tertiary（亮色 5.64:1、暗色 7.11:1），别跟删除同色。
+                leading: Icon(Icons.favorite, color: cs.tertiary),
                 title: Text(f.title),
                 subtitle: Text(
                     '${f.artist} · ${f.source}${f.lat != null ? '  📍${f.lat!.toStringAsFixed(2)},${f.lng!.toStringAsFixed(2)}' : ''}'),

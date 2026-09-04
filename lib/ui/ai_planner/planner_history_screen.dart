@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
+import '../common/empty_state.dart';
+import '../common/pixel.dart';
 import 'planner_history.dart';
 
 /// Browse / resume / delete previous planner sessions.
@@ -45,10 +47,12 @@ class _PlannerHistoryScreenState
       body: list == null
           ? const Center(child: CircularProgressIndicator())
           : list.isEmpty
-              ? Center(
-                  child: Text('暂无历史 — 30 天内的规划会出现在这里',
-                      style: TextStyle(
-                          color: Theme.of(context).hintColor)))
+              ? const EmptyState(
+                  title: '还没有历史规划',
+                  hint: '回「AI 旅游规划」聊出一份行程，它会自动存到这里，'
+                      '30 天内都能翻回来接着聊。',
+                  sprite: PixelSprites.book,
+                )
               : ListView.separated(
                   itemCount: list.length,
                   separatorBuilder: (_, __) => const Divider(height: 1),
@@ -56,12 +60,14 @@ class _PlannerHistoryScreenState
                     final s = list[i];
                     return Dismissible(
                       key: ValueKey(s.id),
+                      // 左滑删除露出的底：白色垃圾桶图标压在 redAccent 上只有
+                      // 3.19:1，勉强够图标；error/onError 这对是 6.5:1 以上。
                       background: Container(
-                        color: Colors.redAccent,
+                        color: Theme.of(context).colorScheme.error,
                         alignment: Alignment.centerRight,
                         padding: const EdgeInsets.only(right: 16),
-                        child: const Icon(Icons.delete,
-                            color: Colors.white),
+                        child: Icon(Icons.delete,
+                            color: Theme.of(context).colorScheme.onError),
                       ),
                       direction: DismissDirection.endToStart,
                       onDismissed: (_) async {

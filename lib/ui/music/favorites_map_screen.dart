@@ -6,6 +6,7 @@ import '../../app/providers.dart';
 import '../../data/db/database.dart';
 import '../../services/map/tile_providers.dart';
 import '../../services/music/music_service.dart';
+import '../common/failure.dart';
 
 class FavoritesMapScreen extends ConsumerStatefulWidget {
   const FavoritesMapScreen({super.key});
@@ -125,6 +126,22 @@ class _FavoritesMapScreenState extends ConsumerState<FavoritesMapScreen> {
     );
   }
 
+  /// 单独一个方法，好让失败提示里的「重试」原样再点一次同一首。
+  Future<void> _play(
+      BuildContext context, MusicService svc, MusicTrack track) async {
+    try {
+      await svc.play(track);
+    } catch (e, st) {
+      if (context.mounted) {
+        showFailure(context,
+            action: '播放',
+            error: e,
+            stack: st,
+            onRetry: () => _play(context, svc, track));
+      }
+    }
+  }
+
   Future<void> _playAt(
       BuildContext context, WidgetRef ref, SongFavorite f) async {
     final svc = ref.read(musicServiceProvider);
@@ -176,16 +193,9 @@ class _FavoritesMapScreenState extends ConsumerState<FavoritesMapScreen> {
               child: FilledButton.icon(
                 icon: const Icon(Icons.play_arrow_rounded),
                 label: const Text('播放'),
-                onPressed: () async {
+                onPressed: () {
                   Navigator.pop(context);
-                  try {
-                    await svc.play(track);
-                  } catch (e) {
-                    if (context.mounted) {
-                      ScaffoldMessenger.of(context)
-                          .showSnackBar(SnackBar(content: Text('播放失败：$e')));
-                    }
-                  }
+                  _play(context, svc, track);
                 },
               ),
             ),

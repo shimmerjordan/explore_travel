@@ -7,6 +7,9 @@ import 'dart:io';
 
 import '../../app/providers.dart';
 import '../../services/ai/ai_service.dart';
+import '../common/empty_state.dart';
+import '../common/failure.dart';
+import '../common/status_palette.dart';
 
 /// AI 服务设置 —— 从原设置页的三字段小抽屉升级成完整页面：
 /// 对话模型 / 图片理解 / 人设、语音识别（STT）、语音合成（TTS，三引擎多音色）、
@@ -76,7 +79,11 @@ class _AiSettingsScreenState extends ConsumerState<AiSettingsScreen> {
       }
       if (mounted) setState(() => _speakStatus = '✅ 正常');
     } catch (e) {
-      if (mounted) setState(() => _speakStatus = '❌ $e');
+      debugPrint('[UI] TTS 试听 失败: $e');
+      // '❌' 前缀是这条状态的上色依据（见下面的 subtitle），保留。
+      if (mounted) {
+        setState(() => _speakStatus = '❌ ${failureMessage('试听', e)}');
+      }
     } finally {
       if (mounted) setState(() => _speaking = false);
     }
@@ -128,6 +135,17 @@ class _AiSettingsScreenState extends ConsumerState<AiSettingsScreen> {
             ),
           ),
 
+          // 一个字段都没填时，下面每一栏都是空的，而「测试连接」只会失败；
+          // 先说清缺的是哪两格。
+          if ((s.aiBaseUrl ?? '').trim().isEmpty &&
+              (s.aiApiKey ?? '').trim().isEmpty)
+            const EmptyState(
+              title: '还没有接上 AI 服务',
+              hint: '把下面的「Base URL」和「API Key」填好，旅伴、语音通话和 AI 规划'
+                  '就都能用了。',
+              expand: false,
+            ),
+
           // ── 对话模型 ────────────────────────────────────────────────────
           const _SectionHeader('对话模型（OpenAI 兼容）'),
           _Text('Base URL', s.aiBaseUrl ?? '',
@@ -156,7 +174,7 @@ class _AiSettingsScreenState extends ConsumerState<AiSettingsScreen> {
                 color: _pingResult == null
                     ? cs.onSurfaceVariant
                     : _pingResult!.success
-                        ? Colors.green
+                        ? Theme.of(context).status.success
                         : cs.error),
             title: const Text('测试连接'),
             subtitle: Text(

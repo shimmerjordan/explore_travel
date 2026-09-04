@@ -7,6 +7,7 @@ import 'package:share_plus/share_plus.dart';
 import '../../app/providers.dart';
 import '../../services/debug/log_buffer.dart';
 import '../../services/fog/fog_engine.dart';
+import '../common/failure.dart';
 
 /// 调试面板（只在 debugMode 开启或 kDebugMode 下可见）。
 /// 入口：首页底部版本号点 10 次 → 切换 debugMode。
@@ -165,10 +166,10 @@ class _DebugScreenState extends ConsumerState<DebugScreen> {
       await f.writeAsString(LogBuffer.exportText());
       await Share.shareXFiles([XFile(f.path)],
           subject: 'Explore Journal log');
-    } catch (e) {
+    } catch (e, st) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('导出失败：$e')));
+      showFailure(context,
+          action: '导出日志', error: e, stack: st, onRetry: _exportLogs);
     }
   }
 }

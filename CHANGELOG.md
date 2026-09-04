@@ -3,6 +3,48 @@
 All notable changes to Explore Journal are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow SemVer once releases start.
 
+## [Unreleased] — 2026-09-04
+
+持续优化第三轮：UX。把「颜色 / 文案 / 无障碍」从各页面手写改成有单一出处、且**由测试守住**的系统。
+
+### 重构
+
+- `lib/ui/map/map_screen.dart` 3513 行拆成主文件 2166 行 + 6 个 `part` 文件（`map_sim_panel` / `map_markers` / `map_controls` / `map_journal_pins` / `map_nav_bar` / `map_peers`）。`part` 共享父库作用域与 import，因此无重命名、无可见性变化；拼回后与拆分前的代码行逐行一致。顺带删掉文件末尾一段描述早已移走的矢量轨迹图层的孤立文档。
+- 主题从 `main.dart` 抽到 `lib/ui/common/app_theme.dart`（`buildAppTheme(Brightness)`），测试因此能直接构建两套主题做断言；`main.dart` 565 → 407 行。
+
+### 新增（设计系统）
+
+- **`ui/common/map_chrome.dart`** —— 地图浮层配色。**故意不跟随明暗主题**，并把理由写在文件里：地图影像的明暗由迷雾幕与「暗色地图」开关决定，与 `themePref` 无关，浮层若跟着主题走就会在一半情形下变成浅底浅字。原先同一个「深色半透明」角色散落着 5 个不同数值，现在收成三级（`glass` 0.55 / `readout` 0.78 / `panel` / `bar`）。
+- **`ui/common/status_palette.dart`** —— 语义状态色 success / warning / danger / neutral，明暗各一套（danger 走 M3 的 `error` 角色）。约 50 处 `Colors.green/orange/red/grey` 全部换成它或 `cs.error`。
+- **`ui/common/failure.dart`** —— 失败提示统一出口。`describeFailure` 把异常归成一句人话（网络连不上 / 存储空间不足 / 凭据已过期…），service 层用中文 `StateError` 携带的配置指引原样透出、纯英文的内部断言挡住；`showFailure` 可带「重试」。三十多处 `'播放失败：$e'` 不再把 `SocketException … errno = 7` 糊在用户脸上，异常原文只进 `LogBuffer`。
+- **`ui/common/empty_state.dart`** —— `EmptyState` / `LoadingState`。9 处空状态与 4 处加载态改成「一句现状 + 一句下一步该做什么」，不再是「暂无数据」或一屏全零的仪表盘。
+- 主题补上 12px 网格的 `displaySmall` / `headlineSmall`（像素字体只有落在 12 的整数倍上才不发糊），数值与 `PixelText` 逐字段一致。
+
+### 无障碍
+
+- 全应用此前 `Semantics` **0 处**。补齐地图底栏四项与中央录制键、右侧按钮列、顶部五枚胶囊、图层 / 信号 / 指北胶囊、队友与手账标记、回放播放控制与进度条、3D 热图顶栏。读数类控件按值播报（「GPS 信号良好，精度正负 24 米」而不是四根格子），进度条播报时刻而不是百分比。
+- 触控目标：`_MapFab` 44→48、底栏项 39→64、个人卡 40→48、播放键 40→48、倍率胶囊与首页头像 / 版本行补足 48dp。地图顶栏几枚刻意做小的胶囊未动（放大要连带改版式，属设计改动）。
+- `test/ui/a11y_guidelines_test.dart` 17 条，把 `androidTapTargetGuideline` / `labeledTapTargetGuideline` / `textContrastGuideline` 变成 CI 门禁。
+
+### 修复
+
+- **开了系统「移除动画」的用户每退出一次 3D 热图就崩**：`late final AnimationController` 在跳过动画的那条路径上从未被构造，直到 `dispose()` 里才第一次创建，此时 element 已 deactivate → `Looking up a deactivated widget's ancestor is unsafe`。改成按需创建的可空控制器。
+- `Semantics(excludeSemantics: true, child: GestureDetector(...))` 会把手势动作一起排除——读屏念得出、点不动，而两条无障碍准则都发现不了（无 tap 的节点被跳过）。5 处已改为「只排除画面部分」，并在测试里断言 tap 动作存在。
+- 「贡献到社区榜单」在没有自己成绩时抛的 `StateError('请先刷新自己的成绩')` 位于 `try` 之外、无人捕获，那句提示从未上过屏，用户只看到点了没反应。
+- 高德地名搜索失败时会把整个响应体拼进提示语。
+- 音乐平台凭证测试的上色判据是 `startsWith('error')`，文案改成人话后失色。
+
+### 对比度（测试发现的真实缺陷，全部已修）
+
+`test/ui/contrast_test.dart` 26 条：明暗两套主题 × scaffold / surface / card / 两级 container，以及地图浮层在**最亮（纯白雪地）与最暗（`#05070A`）两端**的底图上。它抓出：
+
+- 队友在线绿点的白环对 green 500 只有 2.78:1（WCAG 1.4.11 要 3:1）→ 换 green 600 得 3.30:1。
+- GPS 信号四档色阶压在亮底图上只有 1.59–2.86:1 → 底衬从 0.55 加厚到 0.78（正好是应用默认迷雾幕的不透明度），整条色阶过 3:1，**不必把「弱信号红」淡成粉色**。
+- `TopToast` 的 `orange.shade700` 配白字仅 2.70:1；地图模式横幅的品牌青绿承载白字 2.68:1 → 新增压深的 `brandDeep` / `toastDanger` / `toastWarning`，色相不变。
+- 排行榜金银奖牌在亮色主题下只有 1.70 / 1.78:1；AI 规划的警告横幅在亮色主题下是深底配浅字（主题瞎）；私聊「按住说话」的白色麦克风压在浅青绿上只有 1.71:1。
+
+全量 628 测试通过，`flutter analyze --fatal-infos` 零问题。
+
 ## [Unreleased] — 2026-09-03
 
 持续优化第一轮：清冗余 + CI 门禁。

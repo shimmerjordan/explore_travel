@@ -5,6 +5,10 @@ import 'package:path_provider/path_provider.dart';
 import '../../app/providers.dart' show settingsProvider, SettingsNotifier;
 import '../../core/prefs.dart';
 import '../../services/imghost/imghost_service.dart';
+import '../common/empty_state.dart';
+import '../common/failure.dart';
+import '../common/pixel.dart';
+import '../common/status_palette.dart';
 
 /// 图床配置页：在"手账设置 → 图床"里出现。三种模式：none / github / custom。
 /// 保存时本地优先，后台异步上传，失败可在手账详情里手动重试。
@@ -125,9 +129,11 @@ class _ImgHostSettingsScreenState
           ],
           const _SectionHeader('连通性测试'),
           if (s.imgHostKind == 'none')
-            const ListTile(
-              leading: Icon(Icons.info_outline),
-              title: Text('请先在上面选择图床来源'),
+            const EmptyState(
+              title: '还没有配置图床',
+              hint: '在上面的「图床来源」里挑一个，把仓库或地址填好，这里就能测连通。',
+              sprite: PixelSprites.cloud,
+              expand: false,
             )
           else if (s.imgHostKind == 'github') ...[
             _testTile('public', '测试公开图床（上传后自动删除）'),
@@ -150,8 +156,8 @@ class _ImgHostSettingsScreenState
               color: status == null
                   ? Theme.of(context).hintColor
                   : (status.startsWith('ok')
-                      ? Colors.green
-                      : Colors.redAccent))),
+                      ? Theme.of(context).status.success
+                      : Theme.of(context).status.danger))),
       trailing: busy
           ? const SizedBox(
               width: 18,
@@ -176,7 +182,7 @@ class _ImgHostSettingsScreenState
       if (backend is NoopBackend) {
         if (mounted) {
           setState(() => _testStatus[level] =
-              level == 'private' ? 'error: 私有图床未配置' : 'error: 图床未配置');
+              level == 'private' ? '私有图床还没配置' : '图床还没配置');
         }
         return;
       }
@@ -192,11 +198,18 @@ class _ImgHostSettingsScreenState
         await backend.delete(res.displayUrl, res.deleteToken);
         note = 'ok · 上传并已自动删除，连通正常';
       } catch (e) {
-        note = 'ok · 上传成功，但自动删除失败（请手动清理）：$e';
+        // 'ok' 前缀决定了这条状态的颜色（见 _testTile），删失败仍属「传通了」，
+        // 所以只把原因那半句嵌进来，不换成整句的 failureMessage。
+        debugPrint('[UI] 图床测试自动删除 失败: $e');
+        note = 'ok · 上传成功，但自动删除失败（请手动清理）：'
+            '${describeFailure(e) ?? '原因不明'}';
       }
       if (mounted) setState(() => _testStatus[level] = note);
     } catch (e) {
-      if (mounted) setState(() => _testStatus[level] = 'error: $e');
+      debugPrint('[UI] 图床连通性测试 失败: $e');
+      if (mounted) {
+        setState(() => _testStatus[level] = failureMessage('测试', e));
+      }
     } finally {
       try {
         if (local != null && local.existsSync()) await local.delete();

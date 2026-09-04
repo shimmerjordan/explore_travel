@@ -72,8 +72,14 @@ class _Heat3DViewState extends ConsumerState<Heat3DView>
   bool _regionMode = false;
   RegionCloudSource? _cloud;
 
-  late final AnimationController _enter = AnimationController(
-      vsync: this, duration: const Duration(milliseconds: 700));
+  /// 入场倾斜（0° → [_kRestPitch]，700 ms）。系统「移除动画」时**根本不建**，
+  /// 所以它是可空的：原来写成 `late final … = AnimationController(vsync: this)`，
+  /// 而 late final 是懒初始化——省掉动画那条路径下谁都没碰过它，直到 dispose()
+  /// 里 `_enter.dispose()` 才第一次构造，此时 element 已经 deactivate，
+  /// createTicker 去查 TickerMode 祖先就撞断言（"Looking up a deactivated
+  /// widget's ancestor is unsafe"）：开了「移除动画」的用户每退出一次 3D 热图
+  /// 就炸一次。
+  AnimationController? _enter;
   bool _entered = false;
 
   // Gesture bookkeeping.
@@ -108,20 +114,23 @@ class _Heat3DViewState extends ConsumerState<Heat3DView>
     _entered = true;
     final reduce = MediaQuery.maybeDisableAnimationsOf(context) ?? false;
     if (reduce) {
+      // 一步到位落到最终俯仰角：不建控制器、不走那 700 ms。
       _cam.pitchDeg = _kRestPitch;
     } else {
-      final curve = CurvedAnimation(parent: _enter, curve: Curves.easeOutCubic);
+      final ctrl = _enter = AnimationController(
+          vsync: this, duration: const Duration(milliseconds: 700));
+      final curve = CurvedAnimation(parent: ctrl, curve: Curves.easeOutCubic);
       curve.addListener(() {
         if (mounted) setState(() => _cam.pitchDeg = _kRestPitch * curve.value);
       });
-      _enter.forward();
+      ctrl.forward();
     }
   }
 
   @override
   void dispose() {
     _fieldDebounce?.cancel();
-    _enter.dispose();
+    _enter?.dispose();
     _engine?.dispose();
     _cloud?.dispose();
     super.dispose();
@@ -403,7 +412,8 @@ class _Heat3DViewState extends ConsumerState<Heat3DView>
   // ─── Gestures ───
 
   void _onScaleStart(ScaleStartDetails d) {
-    _enter.stop();
+    // 手一碰就掐掉入场动画；开了「移除动画」时它根本没建过（null）。
+    _enter?.stop();
     _gestureStartZoom = _cam.zoom;
     _gestureStartYaw = _cam.yawDeg;
     _lastFocal = d.focalPoint;
@@ -1030,25 +1040,36 @@ class _ModeToggle extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // 两段是一个二选一开关：选中态只靠底色深浅表示，读屏得靠 selected 才知道
+    // 自己此刻在哪一段；图标与文字整块排除，标签统一给一份。
+    // 注意 ExcludeSemantics 只包「画面」，绝不能包住 GestureDetector——那样会
+    // 把它的 tap 动作一起排除掉，读屏就只能读、点不动了。
     Widget seg(String label, IconData icon, bool active, bool target) =>
-        GestureDetector(
-          onTap: () => onChanged(target),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
-            decoration: BoxDecoration(
-              color: active ? Colors.white24 : Colors.transparent,
-              borderRadius: BorderRadius.circular(5),
+        Semantics(
+          button: true,
+          selected: active,
+          label: '$label视图',
+          child: GestureDetector(
+            onTap: () => onChanged(target),
+            child: ExcludeSemantics(
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+                decoration: BoxDecoration(
+                  color: active ? Colors.white24 : Colors.transparent,
+                  borderRadius: BorderRadius.circular(5),
+                ),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  Icon(icon,
+                      size: 14,
+                      color: active ? Colors.white : Colors.white54),
+                  const SizedBox(width: 4),
+                  Text(label,
+                      style: TextStyle(
+                          fontSize: 11.5,
+                          color: active ? Colors.white : Colors.white54)),
+                ]),
+              ),
             ),
-            child: Row(mainAxisSize: MainAxisSize.min, children: [
-              Icon(icon,
-                  size: 14,
-                  color: active ? Colors.white : Colors.white54),
-              const SizedBox(width: 4),
-              Text(label,
-                  style: TextStyle(
-                      fontSize: 11.5,
-                      color: active ? Colors.white : Colors.white54)),
-            ]),
           ),
         );
     return Container(
@@ -1097,7 +1118,9 @@ class _TimeRangeChip extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final s = settings;
     return PopupMenuButton<int>(
-      tooltip: '时间范围',
+      // tooltip 置空（PopupMenuButton 不给就会用英文的 "Show menu"）：语义由下面
+      // 的 Semantics 一次给全，否则读屏会先念「全部」再念一遍 tooltip。
+      tooltip: '',
       color: const Color(0xFF1A2733),
       position: PopupMenuPosition.under,
       itemBuilder: (_) => [
@@ -1155,20 +1178,27 @@ class _TimeRangeChip extends ConsumerWidget {
                   .millisecondsSinceEpoch,
             ));
       },
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
-        decoration: BoxDecoration(
-          color: Colors.black38,
-          borderRadius: BorderRadius.circular(7),
+      // 可见的只有「全部」「今年」这类词，听不出它说的是哪一维；标签补上「时间
+      // 范围」这个主语，并说清点按会打开菜单。
+      child: Semantics(
+        button: true,
+        label: '时间范围：${labelOf(s)}，点按切换',
+        excludeSemantics: true,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+          decoration: BoxDecoration(
+            color: Colors.black38,
+            borderRadius: BorderRadius.circular(7),
+          ),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            const Icon(Icons.schedule_rounded, size: 13, color: Colors.white70),
+            const SizedBox(width: 4),
+            Text(labelOf(s),
+                style: const TextStyle(fontSize: 11.5, color: Colors.white)),
+            const Icon(Icons.arrow_drop_down_rounded,
+                size: 16, color: Colors.white70),
+          ]),
         ),
-        child: Row(mainAxisSize: MainAxisSize.min, children: [
-          const Icon(Icons.schedule_rounded, size: 13, color: Colors.white70),
-          const SizedBox(width: 4),
-          Text(labelOf(s),
-              style: const TextStyle(fontSize: 11.5, color: Colors.white)),
-          const Icon(Icons.arrow_drop_down_rounded,
-              size: 16, color: Colors.white70),
-        ]),
       ),
     );
   }

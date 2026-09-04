@@ -12,32 +12,44 @@ class _ProfileCard extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final s = ref.watch(settingsProvider);
-    return Material(
-      color: Colors.black.withValues(alpha: 0.45),
-      borderRadius: BorderRadius.circular(4),
-      child: InkWell(
+    return Semantics(
+      button: true,
+      // 头像的兜底首字母原本也会被读进来（「旅 旅人」），所以整块画面排除，
+      // 只留这一句：是谁 + 点开做什么。
+      label: '${s.displayName}，查看个人资料与探索统计',
+      child: Material(
+        color: MapChrome.glass,
         borderRadius: BorderRadius.circular(4),
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-          child: Row(
-            children: [
-              _SelfAvatar(
-                radius: 16,
-                b64: s.avatarBase64,
-                seed: s.selfPeerId ?? s.displayName,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(4),
+          onTap: onTap,
+          // ExcludeSemantics 包住画面就好，绝不能包住 InkWell —— 那样连它的
+          // tap 动作一起没了，读屏能读不能点。
+          child: ExcludeSemantics(
+            child: Padding(
+              // vertical 8（原 4）：头像 32 + 上下 8 = 48dp，够 Material 的触控
+              // 下限；胶囊只高了 8dp，右上角仍留 8dp 到下面的气泡开关。
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 8),
+              child: Row(
+                children: [
+                  _SelfAvatar(
+                    radius: 16,
+                    b64: s.avatarBase64,
+                    seed: s.selfPeerId ?? s.displayName,
+                  ),
+                  const SizedBox(width: 8),
+                  Text(s.displayName,
+                      style: const TextStyle(
+                          color: MapChrome.onChrome,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w500)),
+                  const SizedBox(width: 8),
+                  const Icon(Icons.expand_more_rounded,
+                      color: MapChrome.onChromeMuted, size: 18),
+                  const SizedBox(width: 4),
+                ],
               ),
-              const SizedBox(width: 8),
-              Text(s.displayName,
-                  style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 13,
-                      fontWeight: FontWeight.w500)),
-              const SizedBox(width: 8),
-              const Icon(Icons.expand_more_rounded,
-                  color: Colors.white70, size: 18),
-              const SizedBox(width: 4),
-            ],
+            ),
           ),
         ),
       ),
@@ -55,7 +67,7 @@ class _StatTile extends StatelessWidget {
       margin: const EdgeInsets.only(right: 6),
       padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
       decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.05),
+        color: MapChrome.onChrome.withValues(alpha: 0.05),
         borderRadius: BorderRadius.circular(4),
       ),
       child: Column(
@@ -63,10 +75,10 @@ class _StatTile extends StatelessWidget {
           // Stats are collection numbers — pixel display face.
           Text(value,
               style: PixelText.label
-                  .copyWith(fontSize: 16, color: Colors.white)),
+                  .copyWith(fontSize: 16, color: MapChrome.onChrome)),
           const SizedBox(height: 2),
           Text(label,
-              style: const TextStyle(color: Colors.white60, fontSize: 11)),
+              style: const TextStyle(color: MapChrome.onChromeMuted, fontSize: 11)),
         ],
       ),
     );
@@ -162,6 +174,19 @@ class _PeerTrailsLayer extends ConsumerWidget {
   }
 }
 
+/// 队友标记的语义标签：地图上只是一个彩色头像圈加一颗在线小点，读屏得听出
+/// 这是谁、以及位置是不是已经旧了（在线点看不见）。
+///
+/// 公开函数便于在 widget test 里直接断言（[_PeerMarker] 是库私有部件）。
+String peerMarkerSemanticLabel({required String name, required Duration age}) {
+  final who = name.trim().isEmpty ? '队友' : '队友 $name';
+  // 30 s 与 _PeerMarker 里判定「变灰」的阈值同一个数。
+  if (age <= const Duration(seconds: 30)) return '$who，位置实时';
+  if (age.inMinutes < 1) return '$who，${age.inSeconds} 秒未联系';
+  if (age.inHours < 1) return '$who，${age.inMinutes} 分钟未联系';
+  return '$who，${age.inHours} 小时未联系';
+}
+
 class _PeerMarker extends StatelessWidget {
   final GroupPeer peer;
   final Color color;
@@ -190,40 +215,47 @@ class _PeerMarker extends StatelessWidget {
         : DecorationImage(image: avatar, fit: BoxFit.cover);
     return Tooltip(
       message: stale ? '$name · ${age.inSeconds}s 未联系' : name,
-      child: Stack(
-        alignment: Alignment.bottomRight,
-        children: [
-          Container(
-            decoration: BoxDecoration(
-              color: avatarImg == null ? shown : null,
-              image: avatarImg,
-              shape: BoxShape.circle,
-              border: Border.all(color: stale ? Colors.grey : shown, width: 3),
-              boxShadow: [
-                BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.4), blurRadius: 6),
-              ],
-            ),
-            alignment: Alignment.center,
-            child: avatarImg != null
-                ? null
-                : Text(initial,
-                    style: const TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.bold,
-                        fontSize: 16)),
-          ),
-          if (!stale)
+      // tooltip 与下面的 label 是同一件事（label 说得更全），两个都留会被念两遍。
+      excludeFromSemantics: true,
+      child: Semantics(
+        label: peerMarkerSemanticLabel(name: name, age: age),
+        // 头像的兜底首字母是「没有照片时的替代画面」，从不是信息。
+        excludeSemantics: true,
+        child: Stack(
+          alignment: Alignment.bottomRight,
+          children: [
             Container(
-              width: 10,
-              height: 10,
               decoration: BoxDecoration(
-                color: const Color(0xFF4CAF50),
+                color: avatarImg == null ? shown : null,
+                image: avatarImg,
                 shape: BoxShape.circle,
-                border: Border.all(color: Colors.white, width: 1.5),
+                border: Border.all(color: stale ? MapChrome.onChromeMuted : shown, width: 3),
+                boxShadow: [
+                  BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.4), blurRadius: 6),
+                ],
               ),
+              alignment: Alignment.center,
+              child: avatarImg != null
+                  ? null
+                  : Text(initial,
+                      style: const TextStyle(
+                          color: MapChrome.onChrome,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16)),
             ),
-        ],
+            if (!stale)
+              Container(
+                width: 10,
+                height: 10,
+                decoration: BoxDecoration(
+                  color: MapChrome.online,
+                  shape: BoxShape.circle,
+                  border: Border.all(color: MapChrome.markerRing, width: 1.5),
+                ),
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -250,12 +282,16 @@ class _SelfAvatar extends StatelessWidget {
     return CircleAvatar(
       radius: radius,
       backgroundColor: HSLColor.fromAHSL(1, hue, 0.55, 0.55).toColor(),
-      child: Text(
-        seed.isEmpty ? '?' : seed.characters.first.toUpperCase(),
-        style: TextStyle(
-            color: Colors.white,
-            fontSize: radius * 0.8,
-            fontWeight: FontWeight.w600),
+      // 首字母是「没有照片时的替代画面」，不是信息：它旁边永远有真正的昵称，
+      // 不排除的话读屏会先念一个孤立的字（「旅 旅人」）。
+      child: ExcludeSemantics(
+        child: Text(
+          seed.isEmpty ? '?' : seed.characters.first.toUpperCase(),
+          style: TextStyle(
+              color: MapChrome.onChrome,
+              fontSize: radius * 0.8,
+              fontWeight: FontWeight.w600),
+        ),
       ),
     );
   }

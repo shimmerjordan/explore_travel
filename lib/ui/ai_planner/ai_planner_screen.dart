@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../app/providers.dart';
+import '../common/failure.dart';
 import 'planner_history.dart';
 import 'planner_history_screen.dart';
 import 'trip_plan.dart';
@@ -222,24 +223,30 @@ class _AiPlannerScreenState extends ConsumerState<AiPlannerScreen> {
   }
 
   Widget _missingKeyBanner(BuildContext context) {
+    // 原先这条是「暗底 + 浅琥珀字」的固定搭配：亮色主题下变成一块深琥珀压在
+    // 浅色脚手架上、字却是 amber.shade200，只有 1.x:1。改用主题里那对琥珀
+    // container 角色（就是本应用的「金币」色族），亮色 9.93:1 / 暗色 7.46:1，
+    // 且两套主题下都自动是"浅底深字 / 深底浅字"的正确方向。
+    final cs = Theme.of(context).colorScheme;
     return Container(
       width: double.infinity,
       margin: const EdgeInsets.all(12),
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: Colors.amber.shade900.withValues(alpha: 0.3),
+        color: cs.secondaryContainer,
         borderRadius: BorderRadius.circular(4),
-        border: Border.all(color: Colors.amber.withValues(alpha: 0.3)),
+        border: Border.all(
+            color: cs.onSecondaryContainer.withValues(alpha: 0.3)),
       ),
       child: Row(
         children: [
-          const Icon(Icons.info_outline_rounded,
-              color: Colors.amber, size: 18),
+          Icon(Icons.info_outline_rounded,
+              color: cs.onSecondaryContainer, size: 18),
           const SizedBox(width: 10),
           Expanded(
             child: Text('请先到「设置」配置 AI API Key',
                 style: TextStyle(
-                    color: Colors.amber.shade200, fontSize: 13)),
+                    color: cs.onSecondaryContainer, fontSize: 13)),
           ),
         ],
       ),
@@ -361,8 +368,13 @@ class _AiPlannerScreenState extends ConsumerState<AiPlannerScreen> {
             width: double.infinity,
             child: _running
                 ? FilledButton.icon(
+                    // 「停止」是打断动作，用 error 角色；FilledButton 一旦被
+                    // 指定了 backgroundColor 就不会自己去配前景，必须同时给
+                    // onError，否则前景仍是 onPrimary。
                     style: FilledButton.styleFrom(
-                        backgroundColor: Colors.redAccent),
+                      backgroundColor: Theme.of(context).colorScheme.error,
+                      foregroundColor: Theme.of(context).colorScheme.onError,
+                    ),
                     icon: const Icon(Icons.stop_rounded),
                     onPressed: _stop,
                     label: const Text('停止生成'),
@@ -410,7 +422,9 @@ class _AiPlannerScreenState extends ConsumerState<AiPlannerScreen> {
             if (_running)
               IconButton.filled(
                 style: IconButton.styleFrom(
-                    backgroundColor: Colors.redAccent),
+                  backgroundColor: Theme.of(context).colorScheme.error,
+                  foregroundColor: Theme.of(context).colorScheme.onError,
+                ),
                 icon: const Icon(Icons.stop_rounded),
                 onPressed: _stop,
               )
@@ -579,7 +593,9 @@ class _AiPlannerScreenState extends ConsumerState<AiPlannerScreen> {
         }
       }
     } catch (e) {
-      buf.write('\n\n**出错：**$e');
+      debugPrint('[UI] AI 规划生成 失败: $e');
+      // 这句会跟着回答一起渲染成 Markdown 留在对话里，所以走同一套文案。
+      buf.write('\n\n**${failureMessage('生成', e)}**');
     }
     _cancelToken = null;
     if (!mounted) return;

@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import '../../app/providers.dart';
 import '../../models/models.dart';
 import '../about/about_screen.dart' show openServerGuide;
+import '../common/empty_state.dart';
 
 /// Standalone group setup. Intentionally minimal:
 ///   - run mode (auto-on toggle + live status)
@@ -128,6 +129,16 @@ class GroupSetupScreen extends ConsumerWidget {
                   r.read(groupLifecycleProvider).service.localIps;
               final picked = s.lanScanIp;
               if (ips.isEmpty) {
+                // 群组 ID 空着时组队服务根本不会起，这一整块就只剩「服务未启动」
+                // 一句话，看不出该去哪儿补。
+                if ((s.groupId ?? '').isEmpty) {
+                  return const EmptyState(
+                    title: '还没有群组 ID，成员发现不会开始',
+                    hint: '回群组页在「群组 ID」里填一个（比如 川西自驾2026），点「加入」，'
+                        '这里就会列出可扫描的网卡。',
+                    expand: false,
+                  );
+                }
                 return const ListTile(
                   leading: Icon(Icons.wifi_tethering_rounded),
                   title: Text('我的 IP'),

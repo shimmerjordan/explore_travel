@@ -10,6 +10,7 @@ import '../../app/providers.dart';
 import '../../services/geo/coord_converter.dart';
 import '../../services/map/tile_providers.dart';
 import '../../services/security/http_guard.dart';
+import '../common/failure.dart';
 
 /// 全屏地图选点：拖动地图把中心针对准位置，或搜索地名跳过去。
 /// 返回 **WGS-84** 坐标（内部按底图 provider 做 GCJ-02 换算），取消返回 null。
@@ -174,7 +175,11 @@ class _LocationPickerScreenState extends ConsumerState<_LocationPickerScreen> {
         ];
         if (hits.isEmpty &&
             (resp.data?['status']?.toString() ?? '1') != '1') {
-          throw '高德搜索失败：${resp.data?['info'] ?? resp.data}';
+          // info 是高德自己的错误名（INVALID_USER_KEY / USER_DAILY_QUERY_OVER_LIMIT
+          // 之类），用户照着它能去改 Key；把整个响应体糊上屏就没用了。
+          final info = resp.data?['info'];
+          throw '高德搜索失败：'
+              '${info is String && info.isNotEmpty ? info : '接口返回异常'}';
         }
       } else {
         final resp = await _dio.get<List<dynamic>>(
@@ -207,10 +212,13 @@ class _LocationPickerScreenState extends ConsumerState<_LocationPickerScreen> {
         if (hits.isEmpty) _searchError = '没搜到「$query」，换个关键词试试';
       });
     } catch (e) {
+      debugPrint('[UI] 地名搜索 失败: $e');
       if (!mounted) return;
       setState(() {
         _searching = false;
-        _searchError = '搜索失败：$e';
+        // 上面自己 throw 的那句已经是人话（带高德的 info），原样透出去比
+        // 换成通用文案更有用；真异常才走统一文案。
+        _searchError = e is String ? e : failureMessage('搜索', e);
       });
     }
   }
