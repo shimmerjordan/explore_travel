@@ -52,7 +52,11 @@ version 一起改**，`scripts/version.sh --check` 会在每次 push 的门禁�
 
 - **发布流水线的输入从 8 个减到 3 个**：`version`（留空 = 用 CHANGELOG 的）、`publish`（取消勾选 = 四个产物照编照验但一个都不推）、`prerelease`。删掉的 5 个里，`build_image` / `build_site` / `build_android` / `build_ios` 是因为四个产物现在每次都全建（要的就是同号），`flutter_version` 是因为钉点只该有一处——临时换 SDK 属于改钉点，不该是发版时的一个下拉框。按 diff 细筛的 `changes` job 也随之删掉（手动触发本来就没有 diff 可算）。
 - `test.yml` 加一步 `flutter build web --release`。`flutter test` 跑在 Dart VM 上、不经过 dart2js，web 端独有的编译失败它一个都看不见——`flutter-setup` 里记的那次 `flutter_quill` 事故正是 analyze 与 test 全绿、web 编不出来。合并前 `deploy-web.yml` 每次 push 都会编一次 web，顺带做了这个门禁；发布改成手动之后那份覆盖没了，所以显式补回自动侧。
-- `backends/scripts/docker-e2e.sh` 的启动等待从 20 秒放宽到 150 秒（`E2E_BOOT_TIMEOUT` 可覆盖），并每 10 秒打一行进度。CI 的 arm64 冒烟连续两次挂在这一步，而**同一个容器**在 `web-front` 那套冒烟里却过了——唯一的差别就是它等 60 秒。合并成单镜像后启动要做的事更多（entrypoint 建目录 / 改属主 / 迁旧数据 → supervisord 拉起两个进程），QEMU 下慢一个数量级。本机原生 1-2 秒就绪，所以放宽是纯保险。
+- **修复 arm64 冒烟连挂三次的真正原因**：`/api/status` 的 `rssMb` 断言。`rssMb` 来自 `process.memoryUsage().rss`，QEMU 用户态模拟下 libuv 读不到真实常驻集、恒为 0，于是 `assert.ok(s.rssMb > 0)` 必然失败。这是模拟环境的限制而不是产品缺陷（字段在、类型对、值是如实透传的），所以外来架构上改为只要求「是个非负数」，**原生架构仍然要求为正**——真到了服务报不出内存那天，amd64 那一轮照样红。
+
+  （之前那轮把启动等待从 20 秒放宽到 150 秒是基于「web-front 那套等 60 秒却过了」的推断，读到日志后证明**推断是错的**：容器 16 毫秒就 `/healthz` 通了。放宽保留着当保险——合并成单镜像后启动要做的事确实更多——但它不是这次的原因，脚本里的注释已改正。）
+
+- `docker-e2e.sh` 支持 `PLATFORM`（与 `web-front/scripts/docker-smoke.sh` 同一约定）：给 `docker run` 传 `--platform`，并在跑用例前核对镜像架构确为目标架构。此前这套用例从不核对，交叉编译静默产出宿主架构的产物也能一路绿灯——web-front 那套一直核对，这边缺了。CI 的 arm64 步骤已补上。
 - `test.yml` 的触发用 `paths-ignore` 而不是 `paths` 白名单：门禁的安全方向是「拿不准就跑」——白名单漏掉一个新目录等于那部分代码静默地没有门禁，黑名单漏掉一个纯文档目录只是白跑一次。concurrency group 按 event 区分，所以一次手动发布的门禁不会把同一个 ref 上正在跑的 push 门禁顶掉（**不能**用 `event_name == 'workflow_call'` 判断「是不是被调用」：被调用时看到的是调用方的 event）。
 - Flutter 版本钉点仍只有一处（`.github/actions/flutter-setup`），但默认值改成空串：调用方常要把一个「可能为空」的 workflow 输入直接透传进来，默认值若是版本号，透传空串反而会把版本号覆盖成空。空值归一化改在 composite 内部做。
 - 删掉 `image-build-setup` composite。它当初的理由是「两条镜像流水线唯一真正重复的那一段」，合并后只剩一个调用方，纯粹是一层间接。

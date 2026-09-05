@@ -15,6 +15,19 @@ NAME="ej-e2e-$$"
 PORT=${E2E_PORT:-18990}
 VOL="${NAME}-data"
 
+# 跑外来架构的镜像时传 PLATFORM（与 web-front/scripts/docker-smoke.sh 同一个约定）：
+#
+#   PLATFORM=linux/arm64 SKIP_BUILD=1 E2E_IMAGE=ej-app:smoke-arm64 ./scripts/docker-e2e.sh
+#
+# 不传的后果不只是 docker 那句 "no specific platform was requested" 的警告 ——
+# 这套用例从来没核对过跑起来的到底是哪个架构，交叉编译静默产出宿主架构的产物
+# 也能一路绿灯过去（web-front 那套一直是核对的，这边缺了）。
+PLATFORM=${PLATFORM:-}
+PLAT_ARG=()
+if [ -n "$PLATFORM" ]; then
+  PLAT_ARG=(--platform "$PLATFORM")
+fi
+
 say() { printf '\n\033[1;36m── %s\033[0m\n' "$*"; }
 
 cleanup() {
@@ -33,14 +46,16 @@ else
   docker build -q -t "$IMG" . >/dev/null
 fi
 
-# 启动等待预算。原值是 100 × 0.2s = 20 秒，在 QEMU 下不够：CI 的 arm64 冒烟
-# 2026-09-05 与 09-06 两次都恰好挂在这一步，而**同一个容器**在 web-front 那套
-# 冒烟里却过了 —— 唯一的差别就是它等 150 × 0.4s = 60 秒。合并成单镜像之后启动
-# 要做的事更多（entrypoint 建目录 / 改属主 / 迁旧数据 → supervisord 拉起 Rust
-# 与 Node 两个进程），模拟执行下慢一个数量级。
+# 启动等待预算。原值是 100 × 0.2s = 20 秒，放宽到 150 秒纯粹是保险：
 #
-# 本机原生启动 1-2 秒就绪，所以放宽上限是纯保险、不影响本地速度：轮询 0.2 秒
-# 一次的粒度没变，就绪即返回。
+# 合并成单镜像之后启动要做的事更多（entrypoint 建目录 / 改属主 / 迁旧数据 →
+# supervisord 拉起 Rust 与 Node 两个进程），而模拟执行慢一个数量级；web-front
+# 那套冒烟一直给 60 秒，这边只给 20 秒，差得不合理。本机原生 1-2 秒就绪，
+# 轮询粒度仍是 0.2 秒、就绪即返回，所以放宽不影响本地速度。
+#
+# **但它不是当初那两次 arm64 失败的原因** —— 那是 /api/status 的 rssMb 断言，
+# 见下面 EMULATED 那段。别因为这个上限大就以为启动很慢：真慢的时候日志里每
+# 10 秒会打一行。
 BOOT_TIMEOUT=${E2E_BOOT_TIMEOUT:-150}
 
 wait_healthy() {
@@ -63,27 +78,46 @@ wait_healthy() {
   return 1
 }
 
+# 镜像架构核对。放在起容器之前：不对就没必要再跑几分钟用例。
+# 与 web-front/scripts/docker-smoke.sh 同一条断言 —— 证明产物真是要的那个架构，
+# 而不是交叉编译静默塞过来的宿主架构。
+EMULATED=0
+if [ -n "$PLATFORM" ]; then
+  GOT=$(docker inspect --format '{{.Architecture}}' "$IMG")
+  WANT=${PLATFORM##*/}
+  if [ "$GOT" != "$WANT" ]; then
+    echo "image arch is $GOT, expected $WANT" >&2
+    exit 1
+  fi
+  say "image architecture is $GOT"
+  HOST_ARCH=$(docker version -f '{{.Server.Arch}}' 2>/dev/null || echo unknown)
+  if [ "$GOT" != "$HOST_ARCH" ]; then
+    EMULATED=1
+    say "foreign arch ($GOT on $HOST_ARCH host) — 走 QEMU，放宽依赖宿主内核的断言"
+  fi
+fi
+
 say "round 1: open mode (full API + data correctness + relay + docker-restart persistence)"
 docker volume create "$VOL" >/dev/null
-docker run -d --name "$NAME" \
+docker run -d --name "$NAME" "${PLAT_ARG[@]}" \
   -p "127.0.0.1:$PORT:48081" \
   -v "$VOL:/data" \
   -e TRUST_PROXY=1 -e LOG_LEVEL=warn \
   "$IMG" >/dev/null
 wait_healthy
-E2E_BASE_URL="http://127.0.0.1:$PORT" E2E_CONTAINER="$NAME" \
+E2E_BASE_URL="http://127.0.0.1:$PORT" E2E_CONTAINER="$NAME" E2E_EMULATED="$EMULATED" \
   node --test --test-force-exit test/docker-e2e.test.js
 
 say "round 2: auth mode (LB_WRITE_TOKEN + GROUP_TOKEN enforced)"
 docker rm -f "$NAME" >/dev/null
-docker run -d --name "$NAME" \
+docker run -d --name "$NAME" "${PLAT_ARG[@]}" \
   -p "127.0.0.1:$PORT:48081" \
   -v "$VOL:/data" \
   -e TRUST_PROXY=1 -e LOG_LEVEL=warn \
   -e LB_WRITE_TOKEN=e2e-lb-secret -e GROUP_TOKEN=e2e-group-secret \
   "$IMG" >/dev/null
 wait_healthy
-E2E_BASE_URL="http://127.0.0.1:$PORT" \
+E2E_BASE_URL="http://127.0.0.1:$PORT" E2E_EMULATED="$EMULATED" \
 E2E_LB_TOKEN=e2e-lb-secret E2E_GROUP_TOKEN=e2e-group-secret \
   node --test --test-force-exit test/docker-e2e.test.js
 

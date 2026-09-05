@@ -29,6 +29,9 @@ const BASE = process.env.E2E_BASE_URL;
 const CONTAINER = process.env.E2E_CONTAINER || '';
 const LB_TOKEN = process.env.E2E_LB_TOKEN || '';
 const GROUP_TOKEN = process.env.E2E_GROUP_TOKEN || '';
+// 由 scripts/docker-e2e.sh 置位：镜像架构与宿主不同（走 QEMU）时为 1。
+// 只用来放宽那些依赖宿主内核如实上报的断言，不放宽任何产品行为。
+const EMULATED = process.env.E2E_EMULATED === '1';
 const AUTH_MODE = Boolean(LB_TOKEN || GROUP_TOKEN);
 
 if (!BASE) {
@@ -115,7 +118,16 @@ if (AUTH_MODE) {
     await t.test('/api/status exposes both modules', async () => {
       const s = await (await fetch(`${BASE}/api/status`)).json();
       assert.ok(s.uptimeSec >= 0);
-      assert.ok(s.rssMb > 0);
+      // rssMb 来自 process.memoryUsage().rss。QEMU 用户态模拟下 libuv 读不到
+      // 真实的常驻集，rss 恒为 0，于是 rssMb 也是 0 —— 这是模拟环境的限制，
+      // 不是产品缺陷（字段在、类型对、值是如实透传的）。所以外来架构上只要求
+      // 「是个非负数」，原生架构仍然要求为正：真到了那天服务报不出内存，
+      // amd64 那一轮会红。
+      assert.strictEqual(typeof s.rssMb, 'number', `rssMb 不是数字: ${s.rssMb}`);
+      assert.ok(s.rssMb >= 0, `rssMb 为负: ${s.rssMb}`);
+      if (!EMULATED) {
+        assert.ok(s.rssMb > 0, `原生架构上 rssMb 应为正数，实际 ${s.rssMb}`);
+      }
       assert.ok('leaderboard' in s.modules);
       assert.ok('group' in s.modules);
     });

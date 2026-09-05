@@ -250,9 +250,12 @@ jobs:
         working-directory: web-front
         run: IMAGE=ej-app:smoke-arm64 PLATFORM=linux/arm64 ./scripts/docker-smoke.sh
 
-      - name: 冒烟 arm64 · 后端容器级 E2E
+      # PLATFORM 与 web-front 那步同一个约定：既让 docker 别再警告「没指定平台」，
+      # 也让脚本核对镜像架构确为 arm64，并放宽依赖宿主内核如实上报的断言
+      # （QEMU 下 /api/status 的 rssMb 恒为 0，见 backends/test/docker-e2e.test.js）。
+      - name: 冒烟 arm64 · 后端容器级 E2E + 架构核对
         working-directory: backends
-        run: SKIP_BUILD=1 E2E_IMAGE=ej-app:smoke-arm64 ./scripts/docker-e2e.sh
+        run: SKIP_BUILD=1 E2E_IMAGE=ej-app:smoke-arm64 PLATFORM=linux/arm64 ./scripts/docker-e2e.sh
 
       # 升级路径。合并成单镜像之前两个服务各自把 /data 当自己的根，现在分住
       # /data/web 与 /data/backend，entrypoint 要把旧布局搬过去。这一步造一份

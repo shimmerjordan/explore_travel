@@ -38,6 +38,10 @@ npm test                                   # 单元/集成 23 用例，含 Dart 
 ./scripts/docker-e2e.sh                    # 容器级 E2E：构建镜像→全 API/数据正确性/
                                            # 中继/重启持久化（开放+鉴权两轮）
 
+# 跑外来架构的镜像（CI 就是这么跑 arm64 的）：核对镜像架构确为目标架构，并放宽
+# 依赖宿主内核如实上报的断言（QEMU 下 /api/status 的 rssMb 恒为 0）。
+SKIP_BUILD=1 E2E_IMAGE=ej-app:smoke-arm64 PLATFORM=linux/arm64 ./scripts/docker-e2e.sh
+
 # Docker（生产）
 docker compose up -d --build
 curl http://localhost:48081/healthz         # → ok
