@@ -50,8 +50,12 @@
 > 从两个容器升级过来时，容器内数据目录从 `/data` 变成了 `/data/web`，第一次启动
 > 会自动迁移（幂等、目标已存在时不覆盖）。**迁移前备份数据目录。**
 
-CI 每次推 `main` 都会在两套容器级冒烟（本服务的完整 API + 后端的 E2E）都通过
-之后，把双架构（amd64 + arm64）镜像推到 GHCR。NAS 上不需要源码、不需要编译器：
+镜像由「构建与发布」流水线**手动触发**发布（Actions 页 → Run workflow）：全部测试
+通过、两套容器级冒烟（本服务的完整 API + 后端的 E2E）在 amd64 与 arm64 上各过一遍、
+再验过旧数据布局的迁移之后，才把双架构 manifest 推到 GHCR。改成手动是刻意的——
+一次成功发布会把 `latest` 顶掉，而 NAS 上 `compose pull` 拉的正是它。
+
+NAS 上不需要源码、不需要编译器：
 
 ```bash
 sudo mkdir -p /volume1/docker/explore-journal/data && cd /volume1/docker/explore-journal

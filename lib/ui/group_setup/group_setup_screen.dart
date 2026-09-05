@@ -6,6 +6,7 @@ import '../../app/providers.dart';
 import '../../models/models.dart';
 import '../about/about_screen.dart' show openServerGuide;
 import '../common/empty_state.dart';
+import 'probe_card.dart';
 
 /// Standalone group setup. Intentionally minimal:
 ///   - run mode (auto-on toggle + live status)
@@ -78,6 +79,8 @@ class GroupSetupScreen extends ConsumerWidget {
             onChanged: (v) =>
                 n.update((p) => p.copyWith(groupTransport: v)),
           ),
+          const SizedBox(height: 8),
+          const ProbeCard(),
           const _SectionHeader('身份'),
           _TextSetting(Icons.badge_rounded, '显示昵称', s.displayName,
               (v) => n.update((p) => p.copyWith(displayName: v))),

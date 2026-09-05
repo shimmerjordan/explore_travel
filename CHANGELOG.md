@@ -427,6 +427,88 @@ SurfaceFlinger 逐帧时间戳统计：
 空闲前台 1 路 / 后台 0 路 / 录制 1 路（@10 s，前台服务那路）/ 停止后回到 1 路；
 15 秒导出得到 496×1080、30 fps、450 帧、15.000 s 的 H.264 mp4，SAF 保存到
 Download 成功。
+## [Unreleased] — 2026-07-30
+
+### 组队（连通性测试）
+
+- **组队设置页新增「测试连接」**：按当前选中的通道跑一遍到**协议握手层**的探测，逐条
+  给结果与失败提示。不是「能 ping 通」——中继要真的完成 WebSocket 升级、WebDAV 要真的
+  写进去再读回来、frp 要真的让 frpc 登录并注册上 xtcp proxy、局域网要真的能绑 mesh
+  端口并发出多播。
+- **三处刻意的诚实**（测不出来就说测不出来，一个全绿的报告不该给人错误的信心）：
+  - 「共享口令与对方是否一致」标记为**无法验证**并说明原因（单机测不出来，症状是能
+    连上但看不到消息）。
+  - 局域网只判**本机是否就绪**（接口 / MulticastLock / mesh 端口 / 多播能否发出）。
+    「有几个成员在线」同样标记为**无法验证**：探测用的是临时端口（不能去抢正在运行的
+    组队服务占着的发现端口），而对端的常规信标是发往发现端口的，结构上收不到。
+  - 中继的 WebSocket 升级被拒时**不猜原因**：Dart 的客户端不交出状态码（服务端令牌
+    不对时回的是裸 `HTTP/1.1 401`），所以只报「被拒绝」，并把令牌不一致列为首要
+    嫌疑、反代没转发 `Upgrade` 头列为次要。
+- frp 通道在**已有 frpc 在运行**时读现有状态而不重启（判断依据是引擎自己，不是 UI 上
+  那个「组队运行中」标记——后者要等 `start()` 全部完成才置位，启动过程中会误判），
+  「用着的时候查为什么连不上」不需要先断开。
+- 局域网探测**不会碰**正在运行的组队所持有的 `MulticastLock`（原生锁是进程级且不做
+  引用计数，探针误释放它会让真实服务此后静默收不到信标）。
+- 探针复用与真实连接同一套客户端构造（`group_wire.dart` 里的多播常量与 relay URI
+  构造现在由服务与探针共用），避免「测试通过但实际连不上」。
+
+### 安全（限流分桶在 Cloudflare 后面是可被操纵的）
+
+- **`web-front` 的 `client_ip()` 改为 `CF-Connecting-IP` 优先**，取不到才回退
+  `X-Forwarded-For` **最右项**（[main.rs](web-front/src/main.rs)）。此前只看 XFF 最左项，
+  而 **Cloudflare 是把真实 IP 追加在 XFF 末尾的**——调用方自带一个伪造的
+  `X-Forwarded-For: 1.2.3.4`，到达源站就是 `1.2.3.4, <真实IP>`，于是每个来访者都能
+  自选限流桶，**登录那条 10 次/分钟的爆破防护（admin 口令的唯一防线）等于不存在**。
+  这个缺口只在 `EJ_TRUST_PROXY=1` 时打开，正是把服务暴露到 Cloudflare 后必须开的那个
+  开关。次序与 `backends/server/lib/ratelimit.js` 的 `clientIp()` 对齐——两个服务在同
+  一条隧道后面应当分桶一致。顺带修掉空转发头会变成空桶键的问题（改为回退到 socket 地址）。
+- **XFF 回退取最右项，不是最左项**。追加型反代（Caddy 的 `reverse_proxy`、Nginx 常见的
+  `$proxy_add_x_forwarded_for`）下，最右项才是上一跳真正写进去的，左边全是调用方自己
+  填的文本；替换型反代下只有一项，两者等价。所以在所有受支持形态下都严格更安全 ——
+  「粘 compose（`EJ_TRUST_PROXY` 现在默认 `1`）+ 自建 Nginx」这个组合此前仍可自选桶。
+  单测覆盖伪造 XFF（有/无 Cloudflare）、替换型反代、多跳、空值与畸形分隔符六种形态。
+
+### 部署（Cloudflare Tunnel 暴露两个服务）
+
+- `web-front` 的 GHCR compose 默认 `EJ_TRUST_PROXY: "1"`（默认姿态是走隧道），并在注释
+  里写明反向风险：**没有反代却开着它等于没有限流**，局域网直连请改回 `0`。
+- 新增文档章节「经 Cloudflare Tunnel 暴露到公网」（`docs/web-display-deploy.md`）：一条
+  tunnel 同时带两个服务（`ej-front` → 48080、`ej-backend` → 48081），cloudflared 用
+  `network_mode: host` 以便 ingress 直接写 `localhost`（Container Station 里两个服务是
+  独立应用，容器名互不可见）；含 Cloudflare 的三条硬限制（约 100 秒请求超时、100 MB
+  请求体、CDN 条款对大文件分发的限制）与 `/admin` 暴露公网后的口令强度提醒。
+- `docs/self-host.md` 的 Cloudflare 一节指向上面这一处单一来源，并补上客户端该填什么；
+  `docs/onedrive_setup.md` 与部署文档补 `https://ej-front.<域名>/auth.html` 这条 SPA
+  重定向 URI（Azure 不做前缀匹配，多种访问方式要各加一条）。
+
+### 部署（数据落在宿主目录 + 图形界面能直接粘）
+
+- **两个服务的数据默认落到宿主目录**：`web-front` → `/share/Web/ej_data/front`，
+  `ej-backend` → `/share/Web/ej_data/backend`（QNAP 上共享文件夹的真实路径）。容器
+  升级、删了重建、NAS 自带的备份任务都不再受影响。首次启动前要 `chown` 一次：
+  web-front 是 UID **65532**（distroless nonroot），ej-backend 是 UID **1000**（node）
+  —— docker 会把不存在的挂载点建成 root 所有，不改权限服务起不来。命名卷方案仍然
+  保留为备选（改挂载那一行的左边即可），且卷名现在显式钉死为 `ej-web-front-data` /
+  `ej-backend-data`：此前真实卷名带 compose 项目前缀（命令行取目录名、Container
+  Station 取应用名），换个目录或重建应用就会静默挂上一个空卷，看起来像数据全丢。
+- **两份 GHCR compose 去掉全部 `${变量}`**（也因此不再需要 `.env`）：QNAP Container
+  Station / 群晖 Container Manager 的「创建应用程序」YAML 框不做变量插值，粘一份带
+  变量的进去会直接以 `invalid reference format` 失败——它把整串变量当成镜像名。现在
+  两份文件都能整段粘进去。令牌与端口改字面量，钉版本改 `image:` 那一行。
+- 两条镜像流水线的**运行摘要**同步重写（去掉 `.env` 那一步、补图形界面部署提示、
+  备份改成直接打包宿主目录），并把反代 / 安全上下文 / OneDrive 重定向 URI /
+  排错表收敛到 `docs/web-display-deploy.md` 单一来源，不在摘要页重复第二遍。
+
+### 文档（消重与合并）
+
+- `docs/self-host-server-deploy.md` + `docs/self-host-client-config.md` 合并为
+  **`docs/self-host.md`**（部署在前、客户端接入在后）。App 内「关于 → 文档」的入口
+  从两条并为一条，`openServerGuide()` 不再需要 `client` 参数。
+- `web-front/README.md` 与 `backends/README.md` 里与 docs 重复的逐步部署段落压缩为
+  指路；两个 README 只留组件知识（端点、配置项、威胁模型、模块 API）。
+- `PRODUCT.md` / `DESIGN.md` 移入 `docs/`（impeccable 技能支持该目录，已实测仍能
+  正确解析）；两份 README 新增**文档地图**一节，列全 `docs/` 下所有文档。
+- 修正两份 README 路线图里已完成却仍标未完成的「移动端推送配置到 NAS」。
 
 ## [Unreleased] — 2026-07-28
 

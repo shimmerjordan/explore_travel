@@ -520,7 +520,7 @@ Organised so a single feature lives in one folder.
 - [x] Read-only web "memory" version (import → display, PWA)
 - [x] Encrypted config store + optional Rust/Docker `web-front` (console / export / read-only WebDAV proxy)
 - [x] CI: build web on push → `web-build` branch → Vercel / Cloudflare Pages
-- [ ] Mobile-side "push settings to NAS" UI (web pull loop is in place)
+- [x] Mobile-side "push settings to NAS" UI (Backup → 「Web 前端 · 配置推送」)
 - [ ] Apple Watch / Wear OS companion
 - [ ] Real-time peer cursors on shared map
 
@@ -529,17 +529,35 @@ Organised so a single feature lives in one folder.
 ## Going to production
 
 Shipping a build to friends, putting it on a store, or running it under your own brand?
-These docs are tailored for that journey:
+Everything under `docs/` — that's the whole list, there is no fourth place to look:
 
+- **[docs/self-host.md](docs/self-host.md)** — the `ej-backend` service (community leaderboard +
+  group relay, port 48081): Docker deploy from the GHCR image or from source, exposing it via
+  open port / frpc / Cloudflare Tunnel, per-module switches, where the data lives — plus the
+  client side of all three integrations (leaderboard sync, cloud relay, pushing config to
+  `web-front`).
+- **[docs/web-display-deploy.md](docs/web-display-deploy.md)** — deploying & testing the web
+  memory version: the `web-front` service (port 48080) on a NAS, the GitHub Actions →
+  `web-build` → Vercel/Cloudflare flow for the marketing site, reverse proxies, secure-context
+  limits on a LAN, and a full troubleshooting section.
 - **[docs/security-data-safety.md](docs/security-data-safety.md)** — threat model, what lives in
   secure storage vs. SharedPreferences, what gets scrubbed from backups, the HTTPS-guard
   runtime check, and the privacy-policy clauses you'll want to copy when you publish.
 - **[docs/publishing.md](docs/publishing.md)** — step-by-step for Google Play, Chinese Android
   stores (Xiaomi / OPPO / vivo / Huawei / 应用宝), Apple App Store + TestFlight, plus signing,
   ProGuard, version-bump checklist, and review-rejection playbook.
-- **[docs/web-display-deploy.md](docs/web-display-deploy.md)** — deploying & testing the web
-  memory version: building `./dist`, the GitHub Actions → `web-build` → Vercel/Cloudflare flow,
-  running the NAS backend in Docker, and troubleshooting.
+- **[docs/leaderboard-server-api.md](docs/leaderboard-server-api.md)** — the REST contract, if you
+  want to write your own leaderboard server instead of running `ej-backend`.
+- **[docs/onedrive_setup.md](docs/onedrive_setup.md)** — the Azure app registration (auth-code +
+  PKCE, SPA redirect URIs) behind OneDrive sync.
+- **[docs/frp_embed.md](docs/frp_embed.md)** — the frpc client compiled into the app and the XTCP
+  hole punching it does for group mode.
+- **[docs/PRODUCT.md](docs/PRODUCT.md)** / **[docs/DESIGN.md](docs/DESIGN.md)** — product and
+  visual context (register, users, brand personality, the current theme's real values). The
+  design skill reads these; keep the filenames.
+
+Component-level notes live next to the code they describe: [web-front/README.md](web-front/README.md)
+(endpoints, config keys, threat model) and [backends/README.md](backends/README.md) (module API).
 
 ---
 

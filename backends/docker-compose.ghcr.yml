@@ -9,40 +9,53 @@
 # ej-backend（社区排行榜 + 组队中继）—— 直接用 GHCR 上编好的镜像部署，
 # 不需要源码、不需要在目标机器上编译。
 #
-# 这是 CI 运行摘要里给出的那份 NAS/服务器部署文件，刻意做成自包含：
-# 旁边放一个 .env，`docker compose up -d` 就完事。要从源码编译请用
-# docker-compose.yml。
-#
-# .env（摘要里的命令会帮你生成）：
-#   EJ_BACKEND_DATA_PATH=/volume1/docker/ej-backend/data   排行榜数据存哪
-#   LB_WRITE_TOKEN=<openssl rand -hex 24>                  留空=排行榜公开可写
-#   GROUP_TOKEN=<openssl rand -hex 24>                     留空=组队中继公开可连
+# 这份就是 CI 运行摘要里给出的部署文件，刻意**不使用任何 `${变量}`**：
+#   • SSH 上：丢进一个目录，`docker compose up -d` 就完事，不需要 .env。
+#   • QNAP Container Station / 群晖 Container Manager：可以整段粘进「创建应用
+#     程序」的 YAML 框。这些 UI 不做 `${VAR:-默认值}` 插值，粘一份带变量的进去
+#     会直接以 `invalid reference format` 失败（它把整串变量当成镜像名了）。
+# 两个令牌请在下面 environment 里直接填（`openssl rand -hex 24` 生成）。
+# 从源码编译请用 docker-compose.yml（那份用变量，面向命令行）。
 
 services:
   backend:
     # 多架构 manifest（amd64 + arm64），docker 自动选对应架构。
-    # 想要可复现的发布就钉 sha，别用 latest：
+    # 想要可复现、可回滚的发布就钉 sha，别用 latest：
     #   image: ghcr.io/shimmerjordan/explore_travel/ej-backend:sha-1a2b3c4
-    image: ${EJ_BACKEND_IMAGE:-ghcr.io/shimmerjordan/explore_travel/ej-backend:latest}
+    image: ghcr.io/shimmerjordan/explore_travel/ej-backend:latest
     container_name: ej-backend
     restart: unless-stopped
-    # 高端口。绝不要用 80 / 443 / 8080——家宽运营商封这三个的入方向，
-    # 家里/NAS 部署会从公网完全连不上。兄弟服务：web-front 48080（它自己托管 web 产物）。
+    # 左侧宿主端口可改，但**绝不要用 80 / 443 / 8080**：家宽运营商封这三个的
+    # 入方向，配上去从公网完全连不上。兄弟服务 web-front 用 48080。
     ports:
-      - "${EJ_BACKEND_PORT:-48081}:48081"
+      - "48081:48081"
     volumes:
-      # 数据存哪（排行榜条目落在这里）：
-      #   不设（默认）→ `ej-data` 命名卷，零宿主配置。
-      #   绝对路径     → bind mount，NAS 上的常规选择。首次启动前先授权
-      #                  （容器用户 node，UID 1000）：
-      #                    sudo mkdir -p <path> && sudo chown -R 1000:1000 <path>
-      - "${EJ_BACKEND_DATA_PATH:-ej-data}:/data"
+      # 排行榜数据存这里。数据在宿主目录里，容器怎么升级、删了重建都不受影响，
+      # NAS 自带的备份任务也能直接看到。
+      #
+      # ⚠ 首次启动前**必须**在 NAS 上跑一次这两条，否则排行榜写不进去：docker 会把
+      #   不存在的挂载点自动建成 root 所有，而服务以 node（UID 1000）运行。
+      #     sudo mkdir -p /share/Web/ej_data/backend
+      #     sudo chown -R 1000:1000 /share/Web/ej_data/backend
+      #
+      # 这里用的是 QNAP 上共享文件夹 `Web` 的真实路径（`/share/<共享文件夹名>/…`）。
+      # 换别的机器要改：群晖一般是 `/volume1/docker/…`。只能是本机文件系统，
+      # 别指向 NFS/SMB（原子改名 + fsync 语义不可靠）。
+      #
+      # 备选：不想在宿主上建目录、也不想操心权限，就把左边换成 `ej-backend-data`
+      # ——文件末尾声明好的 Docker 命名卷，零权限配置。代价是数据只能用 docker
+      # 命令导出（见文件末尾），而且 `docker compose down -v` 会连数据一起删掉。
+      - "/share/Web/ej_data/backend:/data"
     environment:
-      # 经 frp / Cloudflare / 反代暴露时必须为 1，否则所有用户共享一个限流桶。
-      TRUST_PROXY: "${TRUST_PROXY:-1}"
-      LB_WRITE_TOKEN: "${LB_WRITE_TOKEN:-}"
-      GROUP_TOKEN: "${GROUP_TOKEN:-}"
-      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      # 经 frp / Cloudflare / 任何反代暴露时必须为 "1"，否则所有用户共享一个
+      # 限流桶（看到的 IP 永远是反代自己）。直接暴露端口时设 "0"。
+      TRUST_PROXY: "1"
+      # 留空 = 排行榜公开可写 / 组队中继公开可连。填上后要把同样的值填进 App：
+      # 排行榜页「配置社区服务器」填 LB_WRITE_TOKEN，组队设置「中继令牌」填
+      # GROUP_TOKEN。生成：openssl rand -hex 24
+      LB_WRITE_TOKEN: ""
+      GROUP_TOKEN: ""
+      LOG_LEVEL: "info"
     # 镜像自带 HEALTHCHECK（wget 打自己的 /healthz），`docker ps` 直接看得到。
     mem_limit: 256m
     cpus: 0.5
@@ -51,7 +64,19 @@ services:
       options: { max-size: "10m", max-file: "3" }
 
 volumes:
-  # 仅在 EJ_BACKEND_DATA_PATH 未设时使用。真实卷名带 compose project 前缀。备份：
-  #   docker run --rm -v <project>_ej-data:/data -v "$PWD":/backup busybox \
-  #     tar czf /backup/ej-backend-data.tgz -C /data .
-  ej-data:
+  # 只在你把上面的挂载改成 `ej-backend-data:/data`（命名卷方案）时才用得到；
+  # 默认的宿主目录挂载不碰它。
+  ej-backend-data:
+    # 显式写 `name:` 是命名卷方案下「重建不丢数据」的关键。不写它，真实卷名会带上
+    # compose 项目前缀（命令行下默认取所在目录名，Container Station /
+    # Container Manager 下取应用名），于是换个目录 up、或者把应用删了重建，挂上来
+    # 的是一个全新的空卷 —— 排行榜看起来清空了，其实旧卷还在，只是没人挂它。
+    # 命名卷的数据只能用 docker 命令导出：
+    #   docker run --rm -v ej-backend-data:/data -v "$PWD":/backup busybox \
+    #     tar czf /backup/ej-backend-data.tgz -C /data .
+    # 从命名卷迁到宿主目录（或从 2026-07-30 之前的 `<项目名>_ej-data` 迁过来）：
+    #   sudo mkdir -p /share/Web/ej_data/backend
+    #   docker run --rm -v ej-backend-data:/from -v /share/Web/ej_data/backend:/to \
+    #     busybox sh -c 'cd /from && cp -a . /to'
+    #   sudo chown -R 1000:1000 /share/Web/ej_data/backend
+    name: ej-backend-data

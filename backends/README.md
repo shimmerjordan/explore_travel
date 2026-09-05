@@ -89,24 +89,33 @@ services:
 `docker-compose.ghcr.yml` 就是给这种部署用的：
 
 ```bash
-sudo mkdir -p /volume1/docker/ej-backend/data && cd /volume1/docker/ej-backend
-# 放好 docker-compose.ghcr.yml（改名 docker-compose.yml），然后：
-cat > .env <<EOF
-EJ_BACKEND_DATA_PATH=/volume1/docker/ej-backend/data
-LB_WRITE_TOKEN=$(openssl rand -hex 24)
-GROUP_TOKEN=$(openssl rand -hex 24)
-EOF
-sudo chown -R 1000:1000 /volume1/docker/ej-backend/data   # 容器以 node（UID 1000）运行
+sudo mkdir -p /share/Web/ej_data/backend
+sudo chown -R 1000:1000 /share/Web/ej_data/backend   # 容器以 node（UID 1000）运行
+cd /share/Web/ej_data/backend
+# 放好 docker-compose.ghcr.yml（改名 docker-compose.yml），把两个令牌填进它的
+# environment（openssl rand -hex 24 生成），然后：
 sudo docker compose up -d
 curl localhost:48081/healthz
 ```
 
+> compose 文件放在**这个服务自己的目录**里，别放到公共的 `/share/Web/ej_data`：
+> 兄弟服务 web-front 的部署指引长得一样，两份 `docker-compose.yml` 落到同一个目录会
+> 互相覆盖；而且 compose 用目录名当项目名，两个服务挤进一个 project 后，在那里
+> `docker compose up -d --remove-orphans` 会把另一个容器当孤儿删掉。
+
+那条 `chown` 是必须的：docker 会把不存在的挂载点自动建成 root 所有，排行榜就写不
+进去。这份 compose 刻意**不使用 `${变量}`**（也因此不需要 `.env`），所以它能整段
+粘进 QNAP Container Station / 群晖 Container Manager 的 YAML 框——那些图形界面不做
+变量插值。
+
 「Docker 后端编译」流水线的**运行摘要页**会把上面这套命令连同 compose 文件内容
 和本次提交对应的镜像标签一起打印出来，直接复制粘贴即可。
 
-**数据存哪**由 `EJ_BACKEND_DATA_PATH` 决定：留空是 Docker 命名卷（零宿主配置），
-填绝对路径就是 bind mount（备份方便，NAS 推荐；需先 `chown` 到 UID 1000）。
-别指向 NFS/SMB。
+**数据存哪**：GHCR 那份默认是上面那个宿主目录，源码构建那份（`docker-compose.yml`）
+默认是 Docker 命名卷 `ej-backend-data`。改 compose 里挂载那一行的左边就能互换：
+绝对路径 = 宿主目录，名字 = 命名卷（命名卷下 `docker compose down -v` 会连数据一起
+删掉）。两种都别指向 NFS/SMB。备份与迁移命令见
+[docs/self-host.md](../docs/self-host.md) 的「数据存哪」。
 
 **或者从源码现编**：
 

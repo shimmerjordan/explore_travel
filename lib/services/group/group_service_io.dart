@@ -7,6 +7,7 @@ import 'frp_engine.dart';
 import 'frp_group_service_io.dart';
 import 'group_diagnostics.dart';
 import 'group_types.dart';
+import 'group_wire.dart' as wire;
 import 'multicast_lock_io.dart';
 import 'relay_group_service_io.dart';
 import 'webrtc_group_service_io.dart';
@@ -211,10 +212,12 @@ abstract class GroupService {
 /// Public (not `_Lan…`) only so tests can construct it and read the cadence
 /// getters; app code still goes through [GroupService.create].
 class LanGroupService implements GroupService {
-  static const int kPortBase = 47830;
-  static const int kProbeCount = 5;
-  static const int kDiscoveryPort = 47829;
-  static const String _kMcastGroup = '239.42.42.42';
+  // Forwarded from group_wire.dart so this class keeps its own names (used
+  // throughout this file) while sharing the actual values with the probes.
+  static const int kPortBase = wire.kMeshPortBase;
+  static const int kProbeCount = wire.kMeshPortProbeCount;
+  static const int kDiscoveryPort = wire.kDiscoveryPort;
+  static const String _kMcastGroup = wire.kMcastGroup;
   static const _heartbeat = Duration(seconds: 8);
   static const _discoveryInterval = Duration(seconds: 4);
   /// 后台节奏。beacon 只负责发现新成员，放到 30 s 无妨；hello 却兼做"在线"
@@ -273,10 +276,11 @@ class LanGroupService implements GroupService {
     this.scanCidrBits = 24,
   });
 
-  static String _safeId(String s) =>
-      s.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '').padRight(1, 'g');
-
-  String get _safeGroup => _safeId(groupId);
+  /// Shared with the frp transport and the connectivity probes. This was the
+  /// fourth byte-identical copy of the same normalization; a beacon whose `g`
+  /// field is computed differently from the one the peer compares against is a
+  /// silent no-discovery bug, which is the reason group_wire.dart exists.
+  String get _safeGroup => wire.groupSafeId(groupId);
 
   /// 当前应生效的 hello / beacon 周期（随前后台切换）。
   @visibleForTesting

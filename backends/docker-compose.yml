@@ -39,16 +39,17 @@ services:
       # PORT 默认值绑定，改右侧要同步改 PORT。
       - "${EJ_BACKEND_PORT:-48081}:48081"
     volumes:
-      # 数据存哪 —— 一个变量两种模式（排行榜数据落在这里）：
-      #   不设（默认）→ 解析成 `ej-data`，Docker 命名卷，零宿主配置。
-      #   设成绝对路径 → bind mount，数据在你自己的目录里，例如
-      #     EJ_BACKEND_DATA_PATH=/volume1/docker/ej-backend/data
-      #     bind mount 不继承镜像里的所有权，首次启动前先授权（容器用户是
-      #     node，UID 1000）：
-      #       sudo mkdir -p /volume1/docker/ej-backend/data
-      #       sudo chown -R 1000:1000 /volume1/docker/ej-backend/data
-      #   本地文件系统限定，别指向 NFS/SMB（原子改名 + fsync 语义不可靠）。
-      - "${EJ_BACKEND_DATA_PATH:-ej-data}:/data"
+      # 排行榜数据存哪。这份文件从源码构建、面向本地开发，所以默认用文件末尾声明的
+      # Docker 命名卷：不落到开发机的文件系统上，也不用改权限。NAS 部署那份
+      # （docker-compose.ghcr.yml）默认反过来 —— 宿主目录 `/share/Web/ej_data/backend`。
+      #   ⚠ `docker compose down -v` 会删掉这个卷。停服务用不带 -v 的 `down`。
+      # 可选：EJ_BACKEND_DATA_PATH 设成绝对路径 → bind mount，数据在你自己的目录里，
+      # 例如 EJ_BACKEND_DATA_PATH=/share/Web/ej_data/backend。bind mount 不继承镜像里的
+      # 所有权，首次启动前先授权（容器用户是 node，UID 1000）：
+      #   sudo mkdir -p /share/Web/ej_data/backend
+      #   sudo chown -R 1000:1000 /share/Web/ej_data/backend
+      # 本地文件系统限定，别指向 NFS/SMB（原子改名 + fsync 语义不可靠）。
+      - "${EJ_BACKEND_DATA_PATH:-ej-backend-data}:/data"
     environment:
       # 见 README.md「配置项」一节；不设 token 即公开可用。
       TRUST_PROXY: "1"
@@ -83,7 +84,9 @@ services:
 
 volumes:
   # 仅在默认（命名卷）模式下使用；EJ_BACKEND_DATA_PATH 指向宿主目录时它被忽略。
-  # 真实卷名带 compose project 前缀，从本目录运行即 `backends_ej-data`。备份：
-  #   docker run --rm -v backends_ej-data:/data -v "$PWD":/backup busybox \
-  #     tar czf /backup/ej-backend-data.tgz -C /data .
-  ej-data:
+  ej-backend-data:
+    # 显式写 `name:` 才能让卷名脱离 compose 项目前缀（默认取所在目录名）——否则换个
+    # 目录 up 就会挂上一个全新的空卷，数据看起来没了。备份：
+    #   docker run --rm -v ej-backend-data:/data -v "$PWD":/backup busybox \
+    #     tar czf /backup/ej-backend-data.tgz -C /data .
+    name: ej-backend-data

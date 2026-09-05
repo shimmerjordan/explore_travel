@@ -485,9 +485,36 @@ web-front/                        可选 Rust + Docker 服务（登录 + 加密�
 - [x] 只读 Web「回忆版」（导入 → 展示，支持 PWA）
 - [x] 加密的设置保管 + 可选 Rust/Docker web-front（看板 / 导出 / 只读 WebDAV 代理）
 - [x] CI：推送即构建 Web → `web-build` 分支 → Vercel / Cloudflare Pages
-- [ ] 移动端「把设置推送到 NAS」的 UI（Web 端拉取闭环已就绪）
+- [x] 移动端「把设置推送到 NAS」的 UI（备份页 → 「Web 前端 · 配置推送」）
 - [ ] Apple Watch / Wear OS 配套
 - [ ] 实时共享地图中显示其他人的移动光标
+
+---
+
+## 文档地图
+
+`docs/` 下就是全部，没有第四个地方要找：
+
+- **[docs/self-host.md](docs/self-host.md)** — `ej-backend`（社区排行榜 + 组队中继，48081）：
+  用 GHCR 镜像或源码部署、直连端口 / frpc / Cloudflare Tunnel 三种暴露方式、按模块开关、
+  数据存哪；以及三条客户端接入（排行榜同步、云中继、把配置推给 `web-front`）。
+- **[docs/web-display-deploy.md](docs/web-display-deploy.md)** — Web 展示版：NAS 上部署
+  `web-front`（48080）、宣传站那条 `web-build` → Vercel/Cloudflare 流水线、反代、局域网 http
+  下的安全上下文限制，以及一整套排错。
+- **[docs/security-data-safety.md](docs/security-data-safety.md)** — 威胁模型、哪些数据在安全
+  存储里、备份脱敏了什么、HTTPS 运行时守卫，以及可直接抄进隐私政策的条款。
+- **[docs/publishing.md](docs/publishing.md)** — Google Play、国内各安卓商店、App Store +
+  TestFlight 的逐步流程，含签名、ProGuard、版本号清单与审核驳回应对。
+- **[docs/leaderboard-server-api.md](docs/leaderboard-server-api.md)** — 想自己写排行榜服务端
+  （而不是跑 `ej-backend`）时的接口契约。
+- **[docs/onedrive_setup.md](docs/onedrive_setup.md)** — OneDrive 同步背后的 Azure 应用注册
+  （授权码 + PKCE、SPA 重定向 URI）。
+- **[docs/frp_embed.md](docs/frp_embed.md)** — 编进 App 的 frpc 与组队用的 XTCP 打洞。
+- **[docs/PRODUCT.md](docs/PRODUCT.md)** / **[docs/DESIGN.md](docs/DESIGN.md)** — 产品与视觉
+  上下文（定位、用户、品牌性格、当前主题的真实取值）。设计技能按这两个文件名读取，别改名。
+
+组件级说明就放在各自代码旁边：[web-front/README.md](web-front/README.md)（端点、配置项、
+威胁模型）与 [backends/README.md](backends/README.md)（模块 API）。
 
 ---
 

@@ -2399,7 +2399,7 @@ const kVaultSecretKeys = <String>{
 /// It is the device's Ed25519 leaderboard identity, and a backup is the ONLY
 /// supported way to carry that identity to a new phone — scrubbing it would
 /// mean the new install signs as a stranger and the server refuses it under its
-/// TOFU rule (see docs/self-host-client-config.md). It is excluded from the
+/// TOFU rule (see docs/self-host.md). It is excluded from the
 /// roaming config payload for a different reason again; see
 /// `ConfigPayload.locatorKeys`.
 
