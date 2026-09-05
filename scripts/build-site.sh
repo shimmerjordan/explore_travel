@@ -11,8 +11,20 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-echo "==> flutter build web (base-href /app/)"
-flutter build web --release --base-href /app/
+# 版本号由调用方给（CI 里来自 CHANGELOG.md，见 scripts/version.sh）。本机直接跑
+# 时两个都留空，flutter 就吃 pubspec 里的 version —— 所以本机验证不需要额外参数。
+VERSION_ARGS=()
+if [ -n "${BUILD_NAME:-}" ]; then
+  VERSION_ARGS+=(--build-name "$BUILD_NAME")
+fi
+if [ -n "${BUILD_NUMBER:-}" ]; then
+  VERSION_ARGS+=(--build-number "$BUILD_NUMBER")
+fi
+
+echo "==> flutter build web (base-href /app/)${BUILD_NAME:+ · v$BUILD_NAME}"
+# `${arr[@]+"${arr[@]}"}` 而不是 `"${arr[@]}"`：后者在空数组 + `set -u` 下会被
+# 老版本 bash 当成未绑定变量而报错。
+flutter build web --release --base-href /app/ ${VERSION_ARGS[@]+"${VERSION_ARGS[@]}"}
 
 echo "==> assembling ./dist"
 rm -rf dist

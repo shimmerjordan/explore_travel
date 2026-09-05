@@ -1,7 +1,7 @@
 name: explore_journal
 description: "Travel exploration app with fog-of-war map, layered tracks, AI planning, and P2P sharing."
 publish_to: 'none'
-version: 0.1.0+1
+version: 0.2.0+1
 
 environment:
   sdk: ^3.5.0

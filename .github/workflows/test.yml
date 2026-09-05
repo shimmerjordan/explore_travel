@@ -34,13 +34,7 @@ on:
       - '.dockerignore'
   pull_request:
     paths-ignore: *docs_only
-  workflow_call:
-    inputs:
-      flutter-version:
-        description: 留空 = 用 .github/actions/flutter-setup 里的钉点（唯一钉点）
-        type: string
-        required: false
-        default: ''
+  workflow_call: {}
   workflow_dispatch: {}
 
 concurrency:
@@ -79,11 +73,14 @@ jobs:
         working-directory: backends
         run: npm test
 
+      # 版本号漂移断言。CHANGELOG.md 是版本号的唯一来源（发版流水线从它取），
+      # pubspec 的 version 只是本机构建的兜底值 —— 两处对不上就意味着本机编出来
+      # 的包与 CI 编出来的包会自称不同版本，这种漂移只能靠断言拦住。
+      - name: 版本号一致性（CHANGELOG ↔ pubspec）
+        run: ./scripts/version.sh --check
+
       # Flutter 版本钉在 .github/actions/flutter-setup 里（连 pub get 一起做）。
-      # 只有手动发版会传 flutter-version 覆盖它，保证「查的」和「发的」是同一套 SDK。
       - uses: ./.github/actions/flutter-setup
-        with:
-          flutter-version: ${{ inputs.flutter-version }}
 
       # --fatal-infos：info 级别（多半是 lint 建议）也算失败。宁可门禁严一点，
       # 也别让「只是 info」慢慢攒成没人敢看的几百条。

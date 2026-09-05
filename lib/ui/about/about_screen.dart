@@ -8,12 +8,9 @@ import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../../app/providers.dart';
+import '../../core/app_version.dart';
 import '../common/failure.dart';
 
-/// Hardcoded — bumped in lockstep with [pubspec.yaml]'s `version:`. We
-/// could read it via `package_info_plus` at runtime, but the extra
-/// plugin is the kind of dep this app doesn't otherwise need.
-const String _kAppVersion = '0.1.0';
 const String _kRepoUrl = 'https://github.com/shimmerjordan/explore_travel';
 const String _kRepoOwner = 'shimmerjordan';
 const String _kRepoName = 'explore_travel';
@@ -93,7 +90,7 @@ class AboutScreen extends ConsumerWidget {
                                 style:
                                     Theme.of(context).textTheme.titleLarge),
                             const SizedBox(height: 4),
-                            const _VersionTapBadge(version: _kAppVersion),
+                            const _VersionTapBadge(version: kAppVersion),
                           ],
                         ),
                       ),

@@ -24,17 +24,37 @@
 
 ## 1. Pre-release hardening (do once per release)
 
-1. **Bump versions**
+1. **Bump the version — in `CHANGELOG.md`**
+
+   `CHANGELOG.md` is the single source of truth for the version number
+   (`scripts/version.sh` reads it; same approach as xyz-studio-max's
+   `conanfile.py:get_version_changelog()`). Rename the top section:
+
+   ```markdown
+   ## [Unreleased] — …   →   ## [0.2.0] — TBD
+   ```
+
+   Then keep `pubspec.yaml` in step, because `test.yml` asserts they agree
+   (`scripts/version.sh --check`) — a mismatch means locally-built and
+   CI-built packages would claim different versions:
+
    ```yaml
    # pubspec.yaml
-   version: 0.2.0+5      # ↑ both name AND build code
+   version: 0.2.0+1      # the `+N` here is only the local fallback
    ```
-   ```dart
-   // lib/ui/about/about_screen.dart
-   const String _kAppVersion = '0.2.0';
+
+   **CI does not use that `+N`.** The release pipeline passes
+   `--build-name` from `CHANGELOG.md` and `--build-number` from the run
+   number, so every upload gets a fresh, monotonically increasing build
+   code — which is what Android requires (it increments by 1 every upload)
+   and what Apple reads as `CFBundleVersion`.
+
+   Verify before pushing:
+
+   ```bash
+   ./scripts/version.sh          # → 0.2.0
+   ./scripts/version.sh --check  # → 版本一致：0.2.0（pubspec: 0.2.0+1）
    ```
-   Android version code increments by 1 every upload; Apple uses the
-   `+5` part of `0.2.0+5` as `CFBundleVersion`.
 
 2. **Run the security checklist** at the bottom of
    [`security-data-safety.md`](security-data-safety.md).
@@ -291,14 +311,20 @@ testers. Run for at least 3 days before submitting to App Review.
 
 ## 5. Versioning & changelog discipline
 
-- Use semantic versioning: `MAJOR.MINOR.PATCH+BUILD`.
+- Use semantic versioning: `MAJOR.MINOR.PATCH`. `CHANGELOG.md` holds it;
+  `## [0.2.0] — TBD` while in progress, swap `TBD` for the date on release.
 - Bump `MAJOR` for any backup/database schema break that requires a
   migration path.
-- Maintain `CHANGELOG.md` per release; the App Store / Play store
-  "What's New" copy is literally just the latest section.
-- Tag the release in git: `git tag -a v0.2.0 -m "..." && git push --tags`.
-- Keep a GitHub Releases entry with the AAB attached as an asset (so
-  Chinese stores can also pick it up without rebuilding).
+- The App Store / Play store "What's New" copy is literally just the
+  latest section of `CHANGELOG.md`.
+- **Don't tag by hand.** The release pipeline creates / updates the
+  `v<version>` tag and its GitHub Release for you, with the APK and IPA
+  attached — so Chinese stores can pick them up without rebuilding.
+  Tagging first would invert the dependency: the tag is the *result* of a
+  release, not its input.
+- One run publishes all four artifacts at that same version — Docker
+  image (`ghcr.io/<owner>/<repo>/app:v0.2.0`), the public site, the APK
+  and the IPA. The Release notes list all four with their status.
 
 ---
 

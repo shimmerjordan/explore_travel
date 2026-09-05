@@ -1,9 +1,25 @@
 # Changelog
 
 All notable changes to Explore Journal are documented here.
-Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow SemVer once releases start.
+Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow SemVer.
 
-## [Unreleased] — 2026-09-05
+<!--
+**这个文件是版本号的唯一来源。** 发版流水线用 `scripts/version.sh` 读它，
+取所有 `## ` 标题里最大的那个语义化版本号，然后一次构建把同一个号打进
+Docker 镜像标签、web 产物、APK 与 IPA。所以：
+
+    ## [0.2.0] — TBD          开发中，还没发
+    ## [0.2.0] — 2026-09-06   已发布（发的时候把 TBD 换成日期）
+
+标题里的日期后缀随便写，解析只认版本号。改版本标题时**把 pubspec.yaml 的
+version 一起改**，`scripts/version.sh --check` 会在每次 push 的门禁里比对，
+对不上就红 —— 否则本机编出来的包与 CI 编出来的包会自称不同版本。
+
+下面那些还是 `[Unreleased]` 的历史段落是发版机制建立之前的开发日志，
+它们确实从未发布过，保持原样。
+-->
+
+## [0.2.0] — TBD
 
 ### 部署
 
@@ -28,7 +44,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 
   手动触发仍然绕不过门禁：第一个 job 就是 `uses: ./.github/workflows/test.yml`，与 push 上跑的是同一份定义。
 
-- 手动触发的勾选框取代了原先按 diff 细筛的 `changes` job（手动触发本来就没有 diff 可算）：`build_image` / `build_site` 分别控制发不发镜像与站点，`publish` 取消勾选 = 编译与四套冒烟照常全跑但不推 GHCR（想验证镜像改动而不顶掉 `latest` 时用它）。发版入口从「Release (manual)」搬到这里：`release_tag` 填了才出 APK / IPA，此时不动镜像与站点。
+- **版本号改由 `CHANGELOG.md` 决定，一次发布四个产物同号**。`scripts/version.sh` 取所有 `## ` 标题里最大的语义化版本号（与 xyz-studio-max 的 `conanfile.py:get_version_changelog()` 同一套做法），镜像标签、web 产物、APK、IPA 全部打这个号。
+
+  **不靠 git tag**：tag 是发布的结果而不是来源，靠它意味着「先打 tag 再构建」，打错了还得删。CHANGELOG 是写变更时顺手就改的地方，让它当唯一来源，版本号与变更说明天然同步。`test.yml` 里有 `version.sh --check`，拦住 CHANGELOG 与 `pubspec.yaml` 的漂移——否则本机编出来的包与 CI 编出来的包会自称不同版本。想临时发别的号用 `version` 输入覆盖。
+
+  以前四个产物各自决定版本（镜像用 sha、APK 用手填的 tag、web 产物压根没有版本），「线上这个镜像对应哪个 APK」没人答得上来。现在一次运行就是一次完整发布，Release 说明里把四个产物连状态一起列出来。
+
+- **发布流水线的输入从 8 个减到 3 个**：`version`（留空 = 用 CHANGELOG 的）、`publish`（取消勾选 = 四个产物照编照验但一个都不推）、`prerelease`。删掉的 5 个里，`build_image` / `build_site` / `build_android` / `build_ios` 是因为四个产物现在每次都全建（要的就是同号），`flutter_version` 是因为钉点只该有一处——临时换 SDK 属于改钉点，不该是发版时的一个下拉框。按 diff 细筛的 `changes` job 也随之删掉（手动触发本来就没有 diff 可算）。
 - `test.yml` 加一步 `flutter build web --release`。`flutter test` 跑在 Dart VM 上、不经过 dart2js，web 端独有的编译失败它一个都看不见——`flutter-setup` 里记的那次 `flutter_quill` 事故正是 analyze 与 test 全绿、web 编不出来。合并前 `deploy-web.yml` 每次 push 都会编一次 web，顺带做了这个门禁；发布改成手动之后那份覆盖没了，所以显式补回自动侧。
 - `backends/scripts/docker-e2e.sh` 的启动等待从 20 秒放宽到 150 秒（`E2E_BOOT_TIMEOUT` 可覆盖），并每 10 秒打一行进度。CI 的 arm64 冒烟连续两次挂在这一步，而**同一个容器**在 `web-front` 那套冒烟里却过了——唯一的差别就是它等 60 秒。合并成单镜像后启动要做的事更多（entrypoint 建目录 / 改属主 / 迁旧数据 → supervisord 拉起两个进程），QEMU 下慢一个数量级。本机原生 1-2 秒就绪，所以放宽是纯保险。
 - `test.yml` 的触发用 `paths-ignore` 而不是 `paths` 白名单：门禁的安全方向是「拿不准就跑」——白名单漏掉一个新目录等于那部分代码静默地没有门禁，黑名单漏掉一个纯文档目录只是白跑一次。concurrency group 按 event 区分，所以一次手动发布的门禁不会把同一个 ref 上正在跑的 push 门禁顶掉（**不能**用 `event_name == 'workflow_call'` 判断「是不是被调用」：被调用时看到的是调用方的 event）。

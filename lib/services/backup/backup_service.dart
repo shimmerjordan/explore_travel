@@ -9,6 +9,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'backup_credentials.dart';
+import '../../core/app_version.dart';
 import '../../data/db/database.dart';
 import '../fog/fow_compat.dart'
     show tileIdToFilename, buildFowTile, fowBlocksFromFile,
@@ -319,7 +320,7 @@ class BackupService {
       addJson('manifest.json', {
         'version': archiveVersion,
         if (!deterministic) 'exportedAt': DateTime.now().toIso8601String(),
-        'appVersion': '0.1.0',
+        'appVersion': kAppVersion,
         'modules': [...(manifestModules ?? modules)]..sort(),
       });
     }

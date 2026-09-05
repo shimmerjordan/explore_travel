@@ -3,12 +3,27 @@ name: 构建与发布
 # ════════════════════════════════════════════════════════════════════════
 # 本仓库只有两条流水线：这一条负责**所有产出物**，test.yml 负责**所有测试**。
 #
+#   version ── 从 CHANGELOG.md 取版本号
 #   test（调用 test.yml）── 三种语言的门禁，下面每一个 job 都 needs 它
 #     ├─ image    GHCR 单镜像：web-front(48080) + ej-backend(48081) 双架构
 #     ├─ site     公开站点 → web-build 分支 → Vercel / Cloudflare Pages
-#     ├─ android  APK（仅手动发版）
-#     ├─ ios      IPA（仅手动发版）
-#     └─ release  把 APK / IPA 挂到 GitHub Release（仅手动发版）
+#     ├─ android  APK
+#     ├─ ios      IPA
+#     └─ release  把 APK / IPA 挂到 GitHub Release
+#
+# ── 一次发布，四个产物，同一个版本号 ────────────────────────────────────
+# 镜像、web 产物、APK、IPA **每次都全部构建**，并且都打同一个版本号。以前它们
+# 各有一套开关、各自决定版本（镜像用 sha、APK 用手填的 tag、web 产物压根没有
+# 版本），于是「线上这个镜像对应哪个 APK」没人答得上来。现在一次运行就是一次
+# 完整发布，四个产物同版本，Release 说明里把四个一起列出来。
+#
+# ── 版本号来自 CHANGELOG.md ──────────────────────────────────────────────
+# `scripts/version.sh` 取所有 `## ` 标题里最大的语义化版本号（与 xyz-studio-max
+# 的 conanfile.py:get_version_changelog() 同一套做法）。**不靠 git tag**：tag 是
+# 发布的结果而不是来源，靠它意味着「先打 tag 再构建」，而 tag 打错了还得删。
+# CHANGELOG 是写变更时顺手就改的地方，让它当唯一来源，版本号与变更说明天然同步。
+# 每次 push 的门禁里有 `version.sh --check`，会拦住 CHANGELOG 与 pubspec 的漂移。
+# 想临时发一个别的号（例如 0.2.1-rc.1），用 version 输入覆盖它。
 #
 # 合并前是 4 条流水线（flutter-check / deploy-web / image / release）。代价有三个：
 #   · analyze + test 有 4 份复制，改一处漏三处；
@@ -26,15 +41,15 @@ name: 构建与发布
 # 发布手动化：push 只回答「代码是好的吗」，这条流水线回答「现在要发出去吗」。
 #
 # 也因此这里不再需要 workflow 级 paths 与按 diff 细筛的 changes job —— 手动触发
-# 本来就没有 diff 可算，改由下面的勾选框直接表达意图。
+# 本来就没有 diff 可算，「要不要发」由人按下按钮那一刻决定。
 #
 # ── 怎么用 ──────────────────────────────────────────────────────────────
 # Actions 页 → 构建与发布 → Run workflow。第一个 job 一定是测试（调用 test.yml，
 # 与 push 上跑的是同一份定义），红了后面全不动 —— 手动发布也绕不过门禁。
 #
-#   发镜像与站点     release_tag 留空，按需勾 build_image / build_site
-#   只验证不发布     publish 取消勾选（编 + 冒烟全跑，不推 GHCR）
-#   出 APK / IPA     release_tag 填 v0.2.0（此时不动镜像与站点）
+#   正常发布      三个输入全用默认，直接跑
+#   只验证不发布  publish 取消勾选（四个产物照编照验，但一个都不推出去）
+#   发个别的号    version 填 0.2.1-rc.1
 #
 # 可选 secrets（不配也能跑，产出降级为可侧载的包）：
 #   ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD
@@ -46,45 +61,23 @@ name: 构建与发布
 on:
   workflow_dispatch:
     inputs:
-      release_tag:
-        description: '发版 tag（如 v0.2.0）。留空 = 发镜像 / 站点；填了 = 只出 APK / IPA 并发版。'
+      version:
+        description: '版本号。留空 = 用 CHANGELOG.md 里的（推荐）。填了则覆盖，例如 0.2.1-rc.1'
         required: false
         default: ''
-      build_image:
-        description: '构建并发布 GHCR 镜像？（约 40 分钟）'
-        type: boolean
-        default: true
-      build_site:
-        description: '重新发布公开站点（web-build 分支 → Vercel）？'
-        type: boolean
-        default: true
       publish:
-        description: '真的推 GHCR？取消勾选 = 只编译 + 跑四套冒烟，不推。'
+        description: '真的发布？取消勾选 = 四个产物照编照验，但不推 GHCR / 不动 web-build / 不建 Release'
         type: boolean
         default: true
       prerelease:
-        description: '发版时标记为预发布？'
+        description: 'GitHub Release 标记为预发布？'
         type: boolean
         default: true
-      build_android:
-        description: '发版时构建 Android APK？'
-        type: boolean
-        default: true
-      build_ios:
-        description: '发版时构建 iOS IPA？'
-        type: boolean
-        default: true
-      flutter_version:
-        description: 'Flutter SDK 版本。留空 = 用仓库钉点（.github/actions/flutter-setup）。'
-        required: false
-        default: ''
 
-# group 里带上 release_tag：一次发版构建不该被随后的一次「重发镜像」取消，两者
-# 落在不同的组里。同一类的第二次触发会取消第一次（手动触发通常是「我按错了，
-# 重来一次」）—— 但发版例外，跑到一半的发版不该被顶掉。
+# 一次发布跑到一半不该被顶掉，所以不取消进行中的运行 —— 第二次触发排队等着。
 concurrency:
-  group: build-${{ github.ref }}-${{ github.event.inputs.release_tag || 'artifacts' }}
-  cancel-in-progress: ${{ github.event.inputs.release_tag == '' }}
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -93,15 +86,48 @@ env:
   IMAGE: ghcr.io/${{ github.repository }}/app
 
 jobs:
+  # ───────────────────────── 版本号 ─────────────────────────
+  # 单独一个 job 只为「算一次，四个产物共用」。放在最前面，版本号算不出来
+  # （CHANGELOG 里没有版本标题）就不必白编 40 分钟。
+  version:
+    name: 版本号
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        env:
+          OVERRIDE: ${{ github.event.inputs.version }}
+        run: |
+          set -euo pipefail
+          FROM_CHANGELOG=$(./scripts/version.sh)
+          if [ -n "${OVERRIDE:-}" ]; then
+            V="$OVERRIDE"
+            echo "::notice::版本由手动输入指定：$V（CHANGELOG.md 里是 $FROM_CHANGELOG）"
+          else
+            V="$FROM_CHANGELOG"
+            echo "::notice::版本取自 CHANGELOG.md：$V"
+          fi
+          printf 'version=%s\ntag=v%s\n' "$V" "$V" >> "$GITHUB_OUTPUT"
+          {
+            echo "## 发布 v$V"
+            echo ""
+            echo "| 产物 | 版本 |"
+            echo "|---|---|"
+            echo "| GHCR 镜像 | \`${IMAGE}:v$V\` |"
+            echo "| APK / IPA | \`$V+${GITHUB_RUN_NUMBER}\` |"
+            echo "| 公开站点 | \`$V\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # ───────────────────────── 门禁 ─────────────────────────
   # 三种语言的测试定义在 test.yml 里（唯一一处）。下面每个 job 都 needs 它，
   # 所以「测试红了就不发布」是真的依赖关系，不是两条流水线各自跑各自的。
   test:
     name: 测试
     uses: ./.github/workflows/test.yml
-    with:
-      # 发版产物用哪个 SDK 编，门禁就用哪个 SDK 查；留空则吃仓库钉点。
-      flutter-version: ${{ github.event.inputs.flutter_version || '' }}
 
   # ───────────────────── GHCR 单镜像（双架构）─────────────────────
   # 一个容器同时跑：
@@ -117,10 +143,7 @@ jobs:
   # 想验证一次镜像改动而不顶掉 GHCR 上的 `latest` 时用它。
   image:
     name: GHCR 镜像（双架构 + 两套冒烟）
-    needs: test
-    if: >-
-      github.event.inputs.release_tag == ''
-      && github.event.inputs.build_image == 'true'
+    needs: [version, test]
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -135,9 +158,13 @@ jobs:
       # 只构建一次，两个架构共用（纯静态资源与架构无关）。必须在 docker build
       # 之前：Dockerfile 的 `COPY web-front/web-dist/ /web/` 不是可选的。
       - name: 构建 Flutter web 产物
+        env:
+          V: ${{ needs.version.outputs.version }}
         run: |
           set -euo pipefail
-          flutter build web --release
+          # 与 APK / IPA / 站点同一个版本号，好让「镜像里这份前端是哪个版本」
+          # 在 App 内的关于页就能看到（package_info 读的就是 build-name）。
+          flutter build web --release --build-name="$V" --build-number="$GITHUB_RUN_NUMBER"
           # 先清空再拷：残留的上一次产物会被一起打进镜像，而 Flutter 的文件名
           # 并非全都带内容哈希，旧文件不会被新文件覆盖掉。
           rm -rf web-front/web-dist
@@ -170,12 +197,15 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE }}
-          # latest 只在默认分支上打，否则一条特性分支的推送会把 latest 抢走，
-          # 而 latest 正是 compose 文件默认拉的那个。sha- 前缀那条是可复现发布
-          # 的锚点：部署文档里让人钉 sha 而不是 latest，靠的就是它。
+          # 三个标签各有用途：
+          #   v<版本>  —— 与 APK / IPA / 站点同号，是「这次发布」的名字
+          #   sha-<7>  —— 可复现发布的锚点（同一个版本重跑一次也能区分）
+          #   latest   —— 只在默认分支上打，否则一条特性分支的运行会把它抢走，
+          #               而 latest 正是 compose 文件默认拉的那个
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ needs.version.outputs.tag }}
             type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
 
       # 先单架构 load 到本地 daemon，才能把容器真跑起来验。
       # context 是仓库根（Dockerfile 要同时拿到 web-front/ 与 backends/ 两棵子树）；
@@ -490,10 +520,7 @@ jobs:
   # 就是个可直接部署的产物，NAS / Nginx / Pages 用同样的设置都能托管。
   site:
     name: 公开站点 → web-build
-    needs: test
-    if: >-
-      github.event.inputs.release_tag == ''
-      && github.event.inputs.build_site == 'true'
+    needs: [version, test]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -502,9 +529,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/flutter-setup
 
-      - run: bash scripts/build-site.sh # → ./dist（落地页在 /，应用在 /app/）
+      # → ./dist（落地页在 /，应用在 /app/）。版本号经环境变量透传给脚本里的
+      # flutter build web，与其余三个产物同号。
+      - run: bash scripts/build-site.sh
+        env:
+          BUILD_NAME: ${{ needs.version.outputs.version }}
+          BUILD_NUMBER: ${{ github.run_number }}
 
       - name: Publish ./dist to web-build branch
+        if: github.event.inputs.publish == 'true'
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -519,10 +552,7 @@ jobs:
   # 都能覆盖安装）；配了 ANDROID_KEYSTORE_BASE64 就升级为生产签名。
   android:
     name: Android APK
-    needs: test
-    if: >-
-      github.event.inputs.release_tag != ''
-      && github.event.inputs.build_android == 'true'
+    needs: [version, test]
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -538,8 +568,6 @@ jobs:
       # android/app/libs/*.aar、签名步只写 android/key.properties，都与 pub get
       # 互不读写。
       - uses: ./.github/actions/flutter-setup
-        with:
-          flutter-version: ${{ github.event.inputs.flutter_version }}
 
       # 内嵌 frpc（组队的 frp 通道）。best-effort：gomobile 编不出来 APK 照样能编，
       # 只是不带 frp（gradle 只在 libs/frpmobile.aar 存在时链接它，桥退化为
@@ -597,14 +625,16 @@ jobs:
       # 存在冲突」。要给应用商店做分包就在本地跑 `--release --split-per-abi`：
       # CI 这里的产物是给侧载用的，一包通吃比体积更重要。
       - name: Build APK (universal)
-        run: flutter build apk --release
+        env:
+          V: ${{ needs.version.outputs.version }}
+        run: flutter build apk --release --build-name="$V" --build-number="$GITHUB_RUN_NUMBER"
 
       - name: Rename APK
         id: find_apk
         run: |
           set -euo pipefail
           ls -lah build/app/outputs/flutter-apk/
-          TAG="${{ github.event.inputs.release_tag }}"
+          TAG="${{ needs.version.outputs.tag }}"
           cp build/app/outputs/flutter-apk/app-release.apk \
              "explore_journal-${TAG}-android-universal.apk"
           ls -lah explore_journal-${TAG}-android-universal.apk
@@ -623,10 +653,7 @@ jobs:
   # 配了 IOS_CERTIFICATE_BASE64 就产出生产签名的 IPA。
   ios:
     name: iOS IPA
-    needs: test
-    if: >-
-      github.event.inputs.release_tag != ''
-      && github.event.inputs.build_ios == 'true'
+    needs: [version, test]
     runs-on: macos-14
     timeout-minutes: 60
     steps:
@@ -636,8 +663,6 @@ jobs:
       # ios/frpmobile/，与 pub get 互不读写；pod install 仍留在原位 —— 它必须
       # 同时晚于 pub get 与 gomobile，见下。
       - uses: ./.github/actions/flutter-setup
-        with:
-          flutter-version: ${{ github.event.inputs.flutter_version }}
 
       # 内嵌 frpc。best-effort，同 Android：Podfile 只在 xcframework 存在时 vendor
       # 它，AppDelegate 的桥有 `#if canImport` 守卫。必须早于 pod install，
@@ -710,12 +735,15 @@ jobs:
 
       - name: Build IPA (unsigned)
         if: steps.detect.outputs.signed == 'false'
+        env:
+          V: ${{ needs.version.outputs.version }}
         # 产出 build/ios/iphoneos/Runner.app（无签名）。把 .app 塞进 Payload/ 再
         # 打成 zip，结果就是 .ipa 的形状，侧载器（AltStore / Sideloadly）能在安装
         # 时重签 —— 这是没有 Apple 开发者证书时唯一合法的出包方式。
         run: |
           set -euo pipefail
-          flutter build ios --release --no-codesign
+          flutter build ios --release --no-codesign \
+            --build-name="$V" --build-number="$GITHUB_RUN_NUMBER"
 
           APP=build/ios/iphoneos/Runner.app
           # ── 打包前先体检 ──────────────────────────────────────────────
@@ -736,7 +764,7 @@ jobs:
 
           mkdir -p Payload
           cp -R "$APP" Payload/
-          TAG="${{ github.event.inputs.release_tag }}"
+          TAG="${{ needs.version.outputs.tag }}"
           # -y 保留 framework 里的符号链接，而不是把目标内容拷成副本。
           zip -qry "explore_journal-${TAG}-ios-unsigned.ipa" Payload
           ls -lah explore_journal-${TAG}-ios-unsigned.ipa
@@ -752,6 +780,7 @@ jobs:
         env:
           EXPORT_METHOD: ${{ secrets.IOS_EXPORT_METHOD || 'development' }}
           TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+          V: ${{ needs.version.outputs.version }}
         run: |
           set -euo pipefail
           # ExportOptions.plist 与 secret 里的 method/team 对齐。automatic 签名让
@@ -767,8 +796,9 @@ jobs:
             <key>uploadSymbols</key><false/>
           </dict></plist>
           EOF
-          flutter build ipa --release --export-options-plist=/tmp/ExportOptions.plist
-          TAG="${{ github.event.inputs.release_tag }}"
+          flutter build ipa --release --export-options-plist=/tmp/ExportOptions.plist \
+            --build-name="$V" --build-number="$GITHUB_RUN_NUMBER"
+          TAG="${{ needs.version.outputs.tag }}"
           cp build/ios/ipa/*.ipa "explore_journal-${TAG}-ios.ipa"
           ls -lah explore_journal-${TAG}-ios.ipa
           SZ=$(stat -f%z "explore_journal-${TAG}-ios.ipa")
@@ -789,11 +819,14 @@ jobs:
   # ───────────────────── 发布 GitHub Release ─────────────────────
   release:
     name: GitHub Release
-    needs: [android, ios]
-    # 只要有一个平台成功就发：另一个被取消勾选（skipped）或编失败时，用户仍然
-    # 拿得到编出来的那个。
+    # 也 needs 镜像与站点：说明里要如实写出这次发布的四个产物各自成没成，
+    # 所以得等它们有结论。但**不要求**它们成功 —— 见下面的 if。
+    needs: [version, image, site, android, ios]
+    # 只要有一个移动端产物成功就发：另一个编失败时，用户仍然拿得到编出来的那个。
+    # 镜像或站点失败不拦发版，但会在说明里写明「这次没发出去」。
     if: >-
       always()
+      && github.event.inputs.publish == 'true'
       && (needs.android.result == 'success' || needs.ios.result == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -821,19 +854,32 @@ jobs:
 
       - name: Compose release notes
         env:
-          TAG: ${{ github.event.inputs.release_tag }}
+          TAG: ${{ needs.version.outputs.tag }}
+          VERSION: ${{ needs.version.outputs.version }}
           SHA: ${{ github.sha }}
-          FLUTTER_VERSION: ${{ github.event.inputs.flutter_version }}
+          IMAGE_RESULT: ${{ needs.image.result }}
+          SITE_RESULT: ${{ needs.site.result }}
         # 说明文字靠翻 `artifacts/` 里的文件名拼出来，而**不是**再读一遍
         # `secrets.*` 上下文：GitHub 的表达式解析器在很多位置拒绝解析 secrets
         # （`run:` 块用 ${{ }} 内插正文就是其中之一，会报 "Unrecognized
         # named-value: secrets"）。看文件名是零副作用地判断签名状态的办法。
         run: |
           set -euo pipefail
+          # 每次发布是四个产物同一个版本号，所以说明开头先把四个一起列出来 ——
+          # 「线上这个镜像对应哪个 APK」应当一眼可答。镜像与站点的成败取自
+          # needs.*.result，不猜。
+          mark() { case "$1" in success) echo '✅';; skipped) echo '⏭️ 跳过';; *) echo "❌ $1";; esac; }
           {
             echo "# Explore Journal ${TAG}"
             echo
-            echo "Manually-built release. Artifacts attached below."
+            echo "版本号取自 \`CHANGELOG.md\`，本次发布的四个产物同号（\`${VERSION}\`）。"
+            echo
+            echo "| 产物 | 标识 | 状态 |"
+            echo "|---|---|---|"
+            echo "| Docker 镜像 | \`ghcr.io/${GITHUB_REPOSITORY}/app:${TAG}\` | $(mark "$IMAGE_RESULT") |"
+            echo "| 公开站点 | \`web-build\` 分支 | $(mark "$SITE_RESULT") |"
+            echo "| Android APK | 见下 | $(ls artifacts/*.apk >/dev/null 2>&1 && echo '✅' || echo '❌') |"
+            echo "| iOS IPA | 见下 | $(ls artifacts/*.ipa >/dev/null 2>&1 && echo '✅' || echo '❌') |"
             echo
 
             if ls artifacts/explore_journal-*-android-universal.apk >/dev/null 2>&1; then
@@ -866,7 +912,7 @@ jobs:
 
             echo "---"
             echo
-            echo "Built from \`${SHA}\` on Flutter \`${FLUTTER_VERSION:-仓库钉点（.github/actions/flutter-setup）}\`."
+            echo "Built from \`${SHA}\` on the Flutter SDK pinned in \`.github/actions/flutter-setup\`."
             echo "See \`docs/publishing.md\` for store-submission guidance."
           } > /tmp/notes.md
           cat /tmp/notes.md
@@ -874,8 +920,8 @@ jobs:
       - name: Create / update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.release_tag }}
-          name: ${{ github.event.inputs.release_tag }}
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: ${{ needs.version.outputs.tag }}
           body_path: /tmp/notes.md
           prerelease: ${{ github.event.inputs.prerelease == 'true' }}
           # 追加资产：同一个 tag 重跑时不会因为文件已存在而失败。
