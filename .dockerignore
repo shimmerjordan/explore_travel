@@ -1,0 +1,29 @@
+# 合并成单镜像之后，构建上下文是**整个仓库**（合并前是 web-front/ 与 backends/
+# 两个小目录）。仓库里躺着 build/ 4.5 GB、web-front/target/ 1.6 GB、.dart_tool、
+# node_modules —— 不排除的话每次 `docker build` 都要先把几个 G 传给 daemon。
+#
+# 策略是先全部排除，再逐条放行 Dockerfile 真正 COPY 的路径。白名单比黑名单可靠：
+# 以后谁在仓库里加了个大目录，默认不会悄悄进上下文。
+*
+
+# ── web-front（Rust + 控制台页面 + Flutter web 产物）────────────────────────
+!web-front/Cargo.toml
+!web-front/Cargo.lock
+!web-front/src
+!web-front/assets
+# CI 在 Docker 之外 flutter build web，再把产物拷进这里；仓库里只有 .gitkeep。
+!web-front/web-dist
+
+# ── 后端（零 npm 依赖，拷进去就能跑）──────────────────────────────────────
+!backends/server
+!backends/package.json
+
+# ── 容器自己的编排文件 ──────────────────────────────────────────────────────
+!deploy/entrypoint.sh
+!deploy/supervisord.conf
+
+# 放行目录之后仍要把里面的构建产物挖掉（!web-front/src 会把整棵子树带进来）。
+web-front/target
+web-front/web-dist/**/*.map
+**/node_modules
+**/.DS_Store

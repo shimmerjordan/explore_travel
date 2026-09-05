@@ -12,10 +12,21 @@ Explore Journal 的排行榜与组队（位置共享 / 聊天 / 对讲 / 音乐�
 | 排行榜 | HTTP JSON | `/entries` `/monthly/{yyyy-MM}` `/index` | `EJ_MODULE_LEADERBOARD` |
 | 组队中继 | WebSocket | `/group/v1/ws` | `EJ_MODULE_GROUP` |
 
-> **另有一个独立服务 `web-front`（端口 48080）**，用于「在浏览器里回看足迹」：
-> 它托管 web 产物、保管一份加密的配置、并替浏览器读 WebDAV。它与本文说的
-> `ej-backend`（48081）**没有任何关系**，可以只装一个。部署见
-> [web-display-deploy.md](web-display-deploy.md) 与 [web-front/README.md](../web-front/README.md)。
+> **另有一个服务 `web-front`（端口 48080）**，用于「在浏览器里回看足迹」：
+> 它托管 web 产物、保管一份加密的配置、并替浏览器读 WebDAV。功能上与本文说的
+> `ej-backend`（48081）**没有任何关系**。
+>
+> **2026-09-05 起两者合并进同一个镜像同一个容器**（仓库根的 `Dockerfile`，
+> supervisord 带起两个进程，各自仍以 UID 1000 / 65532 运行、各写自己的数据
+> 目录）。想两个一起要，用仓库根的 `docker-compose.yml` /
+> `docker-compose.ghcr.yml` 一条命令起完，端口仍是 48080 + 48081。
+>
+> **只想要本文这一个**（例如 ECS 上只跑排行榜与中继）：本目录下这套流程仍然
+> 有效——`backends/docker-compose.yml` 保留着，起出来就是一个只有后端的容器。
+> 合并镜像里另一个服务闲着也几乎不占资源（Rust 常驻十几 MB），两条路都行。
+>
+> web-front 的部署见 [web-display-deploy.md](web-display-deploy.md) 与
+> [web-front/README.md](../web-front/README.md)。
 
 资源占用极小：常驻内存 ~40 MB、空闲 CPU≈0、闲时每成员带宽 ~10 B/s，
 最低配 ECS（1核1G 甚至更小）即可长期运行。
@@ -130,7 +141,7 @@ docker compose --profile cloudflare up -d
 ## 四、运维
 
 ```bash
-docker compose logs -f backend        # 日志
+docker compose logs -f backend        # 日志（合并镜像里两个服务的日志都在 ej-app 一个容器里）
 curl -s localhost:48081/api/status     # 在线房间/人数/转发计数/内存
 docker compose pull && docker compose up -d --build   # 升级
 docker run --rm -v ej-backend_ej-data:/data alpine \

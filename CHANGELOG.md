@@ -5,6 +5,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 
 ## [Unreleased] — 2026-09-05
 
+### 部署
+
+- **`web-front` 与 `ej-backend` 合并成一个镜像一个容器**（仓库根 `Dockerfile` + `deploy/supervisord.conf`）。合并前是两个镜像、两条流水线、两次 `pull`，而它们本来就要一起发布一起部署，版本还可能对不上。对外端口不变（48080 / 48081）。
+
+  两个进程仍**各自降权到合并前的 UID**（web-front 65532 / backend 1000），各写自己的数据目录——前端被攻破也读不到排行榜库。这层隔离比 distroless 的「无 shell」更值得留：合并必然要引入 shell 与进程管理器，那层收益本来就保不住。代价是镜像从 25.8 MB 涨到 283 MB。
+
+  **容器内数据目录变了**：原先两个服务各自把 `/data` 当自己的根，现在分住 `/data/web` 与 `/data/backend`，宿主挂载点不变。`deploy/entrypoint.sh` 会在首次启动时把旧布局搬进子目录——幂等（判据是文件位置而非标记文件，所以手工恢复备份也不会骗过它）、目标已存在时不覆盖而是留下旧文件并在日志里说明。**升级前请备份 `/data`。** 合并前 bind mount 需要手工 `chown 65532` 那一步不再需要：每次启动都会纠正两个子目录的属主。
+
+- 两条镜像流水线合并成 `.github/workflows/image.yml`：`cargo test` + `npm test` + Flutter 门禁 → 交叉编译双架构 → 对**两个架构各跑两套**容器级验证（web-front 的完整 API 冒烟 + 后端的 Docker E2E）→ 验证旧数据布局的迁移 → 推双架构 manifest。比合并前多的那一步是迁移验证：没有它，用户升级时静默丢数据没有任何拦阻。
+- 新增根 `.dockerignore`（白名单）。合并后构建上下文变成整个仓库，而仓库里躺着 6.1 GB 的 `build/` 与 `web-front/target/`；不加的话每次构建都要先把它们传给 daemon。实测上下文 1.6 KB。
+- `backends/scripts/docker-e2e.sh` 加 `SKIP_BUILD=1`，好让它跑在外部已构建的合并镜像上（两套既有冒烟因此一行没改就能复用）。
+- 旧的四个 compose 文件保留并标注「仅供回退与单独调试」。只想在 ECS 上跑后端的话，`backends/docker-compose.yml` 那条路仍然有效。
+
 ### 新增
 
 - **录制通知上加了「停止记录」按钮**。此前要停止记录必须先打开应用；现在下拉通知栏直接停。开机 / 应用更新后由系统自恢复的那次录制也会补上按钮（那条路走的是服务已在跑的早退分支，不经过 `startService`）。

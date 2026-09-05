@@ -41,25 +41,38 @@
 
 ## 在 NAS 上用现成镜像部署（推荐）
 
-CI 每次推 `main` 都会在容器级 smoke 通过之后，把双架构（amd64 + arm64）镜像推到
-GHCR。NAS 上不需要源码、不需要编译器：
+> **2026-09-05 起，本服务与 `ej-backend` 合并进同一个镜像同一个容器**（仓库根的
+> `Dockerfile` + `deploy/supervisord.conf`，两个进程仍各自以 UID 65532 / 1000
+> 运行、各写自己的数据目录）。对外端口没变（48080 / 48081）。
+> **部署请用仓库根的 `docker-compose.ghcr.yml`**，不要用本目录下那份——它只保留
+> 作回退与单独调试用。
+>
+> 从两个容器升级过来时，容器内数据目录从 `/data` 变成了 `/data/web`，第一次启动
+> 会自动迁移（幂等、目标已存在时不覆盖）。**迁移前备份数据目录。**
+
+CI 每次推 `main` 都会在两套容器级冒烟（本服务的完整 API + 后端的 E2E）都通过
+之后，把双架构（amd64 + arm64）镜像推到 GHCR。NAS 上不需要源码、不需要编译器：
 
 ```bash
-sudo mkdir -p /volume1/docker/web-front/data && cd /volume1/docker/web-front
-# 把本目录的 docker-compose.ghcr.yml 拿过来，然后：
+sudo mkdir -p /volume1/docker/explore-journal/data && cd /volume1/docker/explore-journal
+# 把仓库根的 docker-compose.ghcr.yml 拿过来，然后：
 cat > .env <<'EOF'
-EJ_DATA_PATH=/volume1/docker/web-front/data
+EJ_DATA_PATH=/volume1/docker/explore-journal/data
 EOF
-sudo chown -R 65532:65532 /volume1/docker/web-front/data   # 容器以 UID 65532 运行
 sudo docker compose up -d
 curl localhost:48080/healthz          # {"status":"ok"}
+curl localhost:48081/healthz          # ok
 # 浏览器打开 http://<NAS>:48080/ 看数据，/admin 是运维看板
 ```
 
+合并前那句 `sudo chown -R 65532:65532 …` **不再需要**：entrypoint 每次启动都会
+纠正两个子目录的属主，bind mount 也零配置可用。
+
 **不需要任何必填的环境变量**——早先那个必填的 JWT secret 已经不存在了。
 
-「web-front 镜像（GHCR）」这条 workflow 的**运行摘要**会把同样的步骤、compose
-文件内容、以及那次提交的确切镜像 tag 一起打出来，从那里复制就是真正的一键部署。
+「应用镜像（GHCR）」这条 workflow 的**运行摘要**会把同样的步骤、compose 文件
+内容、从两个容器升级过来的操作顺序、以及那次提交的确切镜像 tag 一起打出来，
+从那里复制就是真正的一键部署。
 
 ### 端口为什么是 48080
 

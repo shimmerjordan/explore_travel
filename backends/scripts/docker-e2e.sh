@@ -23,8 +23,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
-say "build image $IMG"
-docker build -q -t "$IMG" . >/dev/null
+# SKIP_BUILD=1 让这套用例跑在一个**外部已经构建好**的镜像上——合并成单镜像
+# （根 Dockerfile：web-front + 本服务）之后，CI 与本地都是先构建那个合并镜像，
+# 再把这里和 web-front 的冒烟脚本分别指过来，而不是各自再 build 一次。
+if [ "${SKIP_BUILD:-0}" = 1 ]; then
+  say "reuse prebuilt image $IMG"
+else
+  say "build image $IMG"
+  docker build -q -t "$IMG" . >/dev/null
+fi
 
 wait_healthy() {
   for _ in $(seq 1 100); do

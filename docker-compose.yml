@@ -1,0 +1,69 @@
+# explore_journal 自托管：一个容器同时提供
+#   · web-front（只读展示版 + 零知识配置保险箱 + WebDAV 只读代理）→ 48080
+#   · ej-backend（社区排行榜 + 组队中继）                        → 48081
+#
+#   docker compose up -d --build
+#
+# 合并前是 web-front / ej-backend 两个镜像两个容器（各自的 compose 文件仍在
+# web-front/ 与 backends/ 下，标注为回退用）。对外端口没变，反代与防火墙不用动。
+# **升级注意**：容器内数据目录改成了 /data/web 与 /data/backend，宿主挂载点不变，
+# 第一次启动会自动迁移旧布局（见 deploy/entrypoint.sh）。迁移前建议备份 /data。
+#
+# 端口都用高位：家庭宽带运营商普遍封禁入方向的 80 / 443 / 8080，**别把这三个
+# 端口配回来**，否则家里/NAS 部署从公网完全连不上。Cloudflare Tunnel 走出方向
+# 443，不受入方向封禁影响 —— 家宽想被公网访问，它是最省事的一条路。
+
+services:
+  app:
+    build: .
+    image: explore-journal-app:latest
+    container_name: ej-app
+    restart: unless-stopped
+    ports:
+      - "${EJ_WEB_PORT:-48080}:48080"
+      - "${EJ_BACKEND_PORT:-48081}:48081"
+    volumes:
+      # 一个挂载点装两份数据（容器内分 web/ 与 backend/ 两个子目录，属主不同）。
+      #
+      #   unset（默认）→ 名为 ejdata 的 Docker 命名卷。零宿主配置。
+      #
+      #   设成绝对路径 → bind mount，数据落在你自己的目录里（NAS 上通常这么选，
+      #     好让它落在大盘上、被 NAS 自己的备份任务带走）：
+      #
+      #       EJ_DATA_PATH=/volume1/docker/explore-journal/data
+      #
+      #     bind mount 不继承镜像里的属主，但**不需要**你手工 chown：entrypoint
+      #     每次启动都会把两个子目录的属主纠正过来。
+      #
+      # 只用本地文件系统 —— 别指向 NFS/SMB：网络挂载上 POSIX 锁不可靠，有把
+      # 磁盘上的文件写坏的风险。
+      - "${EJ_DATA_PATH:-ejdata}:/data"
+    environment:
+      # ── web-front ────────────────────────────────────────────────────────
+      # 读代理（给私有图床 / 不带 CORS 的站点用），默认关。
+      EJ_PROXY_ENABLED: "${EJ_PROXY_ENABLED:-false}"
+      EJ_PROXY_ALLOW_HOSTS: "${EJ_PROXY_ALLOW_HOSTS:-}"
+      EJ_TOKEN_TTL_SECS: "${EJ_TOKEN_TTL_SECS:-3600}"
+      # 经 frp / Cloudflare / 任何反代暴露时**必须**设为 1，否则所有访客共享同一
+      # 个限流桶（限流按客户端 IP 分桶，不开这个的话看到的 IP 永远是反代自己）。
+      # 直接暴露端口时保持 0。
+      EJ_TRUST_PROXY: "${EJ_TRUST_PROXY:-0}"
+      # 静态产物目录。镜像里已经带了一份；挂一个同名目录可以覆盖它（例如临时换
+      # 一个前端版本而不重建镜像）。
+      EJ_WEB_ROOT: "${EJ_WEB_ROOT:-/web}"
+      # 指标采样间隔（秒，上限 86400）。落盘每 10 个采样点一次，调小它会让机械盘
+      # 更频繁地转。
+      EJ_METRICS_INTERVAL_SECS: "${EJ_METRICS_INTERVAL_SECS:-60}"
+      # 工作线程数。服务是 thread-per-request 的，见 web-front/README 的威胁模型
+      # 一节：无论调多大都要置于带读写超时的反代之后。
+      EJ_WORKERS: "${EJ_WORKERS:-8}"
+      # ── ej-backend ───────────────────────────────────────────────────────
+      # 同上：经反代暴露就得开，否则限流按反代的 IP 分桶等于没有限流。
+      TRUST_PROXY: "${TRUST_PROXY:-1}"
+      LB_WRITE_TOKEN: "${LB_WRITE_TOKEN:-}"
+      GROUP_TOKEN: "${GROUP_TOKEN:-}"
+      GROUP_MAX_ROOM_SIZE: "${GROUP_MAX_ROOM_SIZE:-}"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+
+volumes:
+  ejdata:

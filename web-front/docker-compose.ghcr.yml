@@ -1,3 +1,11 @@
+# ⚠️ 已被根目录的合并镜像取代（2026-09-05）。
+# 现在 web-front 与 ej-backend 跑在**同一个容器**里（根 Dockerfile +
+# deploy/supervisord.conf），部署用仓库根的 docker-compose.yml /
+# docker-compose.ghcr.yml。对外端口没变（48080 / 48081）。
+#
+# 这个文件保留下来只为两件事：① 回退——合并镜像出问题时还能起回两个独立容器；
+# ② 单独调试其中一个服务。日常部署别用它，两边同时起会抢端口。
+#
 # web-front — deploy from the prebuilt GHCR image (no source checkout, no build).
 #
 # This is the file the CI run summary hands you for a NAS deployment. It is

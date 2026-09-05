@@ -1,0 +1,40 @@
+# NAS 上直接用 GHCR 上的成品镜像（不在本地构建）。
+# 一个容器同时提供 web-front（48080）与 ej-backend（48081）。
+#
+#   docker compose pull && docker compose up -d
+#
+# 合并前是两个容器两个镜像；对外端口没变。容器内数据目录变成 /data/web 与
+# /data/backend，宿主挂载点不变，第一次启动会自动迁移旧布局。**迁移前备份 /data。**
+
+services:
+  app:
+    # 默认 latest；想钉死某次构建就在 .env 里写
+    #   EJ_APP_IMAGE=ghcr.io/shimmerjordan/explore_travel/app:sha-<7位>
+    image: ${EJ_APP_IMAGE:-ghcr.io/shimmerjordan/explore_travel/app:latest}
+    container_name: ej-app
+    restart: unless-stopped
+    ports:
+      - "${EJ_WEB_PORT:-48080}:48080"
+      - "${EJ_BACKEND_PORT:-48081}:48081"
+    volumes:
+      # 一个挂载点装两份数据。设成绝对路径走 bind mount（NAS 上的常规选择）：
+      #   EJ_DATA_PATH=/volume1/docker/explore-journal/data
+      # 不需要手工 chown —— entrypoint 每次启动都会把两个子目录的属主纠正过来。
+      # 只用本地文件系统，别指向 NFS/SMB（POSIX 锁不可靠，有写坏文件的风险）。
+      - "${EJ_DATA_PATH:-ejdata}:/data"
+    environment:
+      # 经 frp / Cloudflare / 任何反代暴露时这两个都要开，否则限流按反代的 IP
+      # 分桶等于没有限流。直接暴露端口时 EJ_TRUST_PROXY 保持 0。
+      EJ_TRUST_PROXY: "${EJ_TRUST_PROXY:-0}"
+      TRUST_PROXY: "${TRUST_PROXY:-1}"
+      # 读代理（给私有图床 / 不带 CORS 的站点用），默认关。
+      EJ_PROXY_ENABLED: "${EJ_PROXY_ENABLED:-false}"
+      EJ_PROXY_ALLOW_HOSTS: "${EJ_PROXY_ALLOW_HOSTS:-}"
+      EJ_WORKERS: "${EJ_WORKERS:-8}"
+      # 排行榜写入 / 组队中继的令牌，留空 = 不鉴权（仅限内网自用）。
+      LB_WRITE_TOKEN: "${LB_WRITE_TOKEN:-}"
+      GROUP_TOKEN: "${GROUP_TOKEN:-}"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+
+volumes:
+  ejdata:
