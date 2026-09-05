@@ -20,6 +20,14 @@ void backgroundCallback() {
   FlutterForegroundTask.setTaskHandler(_LocationTaskHandler());
 }
 
+/// 通知上「停止记录」按钮的 id。按下时后台 isolate 先给主 isolate 发一条
+/// [kStoppedFromNotification] 命令再停服，好让 UI 走与手动停止完全相同的收尾。
+const String kStopRecordingButtonId = 'stop_recording';
+
+/// 后台 → 主 isolate 的控制命令（与位置样本走同一条 sendDataToMain 通道，
+/// 靠 `cmd` 键区分：样本没有 `cmd`，命令没有 lat/lng）。
+const String kStoppedFromNotification = 'stopped_from_notification';
+
 class _LocationTaskHandler extends TaskHandler {
   StreamSubscription<Position>? _sub;
   RecordingMode _mode = RecordingMode.balanced;
@@ -212,6 +220,27 @@ class _LocationTaskHandler extends TaskHandler {
     }
   }
 
+  /// 通知上的按钮。**跑在后台 isolate 里**——这里拿不到 Riverpod 容器，
+  /// 所以不能直接调 `RecordingController.stop()`。做法是：先把标志位清掉
+  /// （万一进程随后就被杀，下次冷启动的 `wasRecording()` 才不会误恢复），
+  /// 再给主 isolate 发一条命令让它走正常收尾，最后停服。
+  ///
+  /// 发命令必须在 `stopService()` 之前：停服会拆掉这条通道。
+  @override
+  void onNotificationButtonPressed(String id) {
+    if (id != kStopRecordingButtonId) return;
+    _stopFromNotification();
+  }
+
+  Future<void> _stopFromNotification() async {
+    await FlutterForegroundTask.saveData(
+        key: _kRecordingFlagKey, value: false);
+    FlutterForegroundTask.sendDataToMain({'cmd': kStoppedFromNotification});
+    await _sub?.cancel();
+    _sub = null;
+    await FlutterForegroundTask.stopService();
+  }
+
   Future<void> _activePoll() async {
     if (_polling) return;
     _polling = true;
@@ -274,8 +303,6 @@ class _LocationTaskHandler extends TaskHandler {
     }
   }
 
-  @override
-  void onNotificationButtonPressed(String id) {}
   @override
   void onNotificationPressed() {
     FlutterForegroundTask.launchApp('/map');
@@ -363,17 +390,36 @@ class BackgroundLocation {
     if (await FlutterForegroundTask.isRunningService) {
       FlutterForegroundTask.sendDataToTask(
           {'cmd': 'setMode', 'mode': mode.index});
+      // 服务已在跑（开机自恢复、应用被替换后自恢复，或本次是改录制模式）——
+      // 那次是 OS 拉起的，走的不是下面的 startService，通知上没有按钮。
+      // update 路径对按钮是条件写入，所以这里正是把它补齐的钩子；不补的话
+      // 那整段会话都只能开应用才停得下来。
+      await FlutterForegroundTask.updateService(
+        notificationTitle: 'Explore Journal 正在记录',
+        notificationText: '${mode.label} 模式 · 点击返回应用',
+        notificationButtons: _notificationButtons,
+      );
       return;
     }
     await FlutterForegroundTask.startService(
       notificationTitle: 'Explore Journal 正在记录',
       notificationText: '${mode.label} 模式 · 点击返回应用',
+      notificationButtons: _notificationButtons,
       callback: backgroundCallback,
     );
     // After start, push initial mode.
     FlutterForegroundTask.sendDataToTask(
         {'cmd': 'setMode', 'mode': mode.index});
   }
+
+  /// 通知上的操作按钮。不加它，停止记录就必须先打开应用。
+  ///
+  /// 注：每分钟刷新文案的那处 `updateService` **不必**重传——Android 侧的
+  /// 更新路径对按钮字段是条件写入（省略即保留原按钮）。但**服务已在跑**的
+  /// 那条早退路径必须显式补一次，见 [start]。
+  static const List<NotificationButton> _notificationButtons = [
+    NotificationButton(id: kStopRecordingButtonId, text: '停止记录'),
+  ];
 
   static Future<void> stop() async {
     if (!supported) return;
@@ -405,8 +451,12 @@ class BackgroundLocation {
   /// record start/stop cycle leaked one callback. (The old ReceivePort
   /// round-trip is also gone: the callback already fires on the main
   /// isolate, so a controller forwards directly.)
+  /// [onCommand] 收后台发来的控制命令（`{'cmd': ...}`）。位置样本与命令共用
+  /// 同一条通道，但 `_enqueueSample` 会静默丢掉没有 lat/lng 的 Map，所以命令
+  /// 必须在这里就分流出去，不能混在样本回调里。
   static StreamSubscription<Map<String, dynamic>> listen(
-      void Function(Map<String, dynamic>) onSample) {
+      void Function(Map<String, dynamic>) onSample,
+      {void Function(String cmd)? onCommand}) {
     late final StreamController<Map<String, dynamic>> ctrl;
     void forward(Object data) {
       if (data is Map) {
@@ -422,6 +472,13 @@ class BackgroundLocation {
       onListen: () => FlutterForegroundTask.addTaskDataCallback(forward),
       onCancel: () => FlutterForegroundTask.removeTaskDataCallback(forward),
     );
-    return ctrl.stream.listen(onSample);
+    return ctrl.stream.listen((m) {
+      final cmd = m['cmd'];
+      if (cmd is String) {
+        onCommand?.call(cmd);
+        return;
+      }
+      onSample(m);
+    });
   }
 }
