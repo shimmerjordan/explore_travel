@@ -28,6 +28,8 @@ import '../../services/playback/replay_model.dart';
 import '../../services/playback/replay_video_exporter.dart';
 import '../common/failure.dart';
 import '../common/pixel.dart';
+import '../../services/stats/summary_card_builder.dart';
+import '../stats/summary_card_screen.dart';
 
 /// 回放总结：以"一次有效记录（开始→停止，≥10 个点，单图层）"为单位的列表，
 /// 顶部年/月筛选。点击进入单次回放；勾选多条后可**合并回放**——各条轨迹
@@ -693,12 +695,15 @@ class _PlayerScreenState extends ConsumerState<_PlayerScreen>
     return null;
   }
 
+  /// 标题：单段用起始时刻，多段说"N 段合并回放"。AppBar 与总结卡共用同一句。
+  String get _title => widget.sessions.length > 1
+      ? '${widget.sessions.length} 段合并回放'
+      : DateFormat('yyyy-MM-dd HH:mm').format(_tl.realStart);
+
   @override
   Widget build(BuildContext context) {
     final s = ref.watch(settingsProvider);
-    final title = widget.sessions.length > 1
-        ? '${widget.sessions.length} 段合并回放'
-        : DateFormat('yyyy-MM-dd HH:mm').format(_tl.realStart);
+    final title = _title;
     return Scaffold(
       extendBodyBehindAppBar: true,
       appBar: AppBar(
@@ -746,6 +751,11 @@ class _PlayerScreenState extends ConsumerState<_PlayerScreen>
                 ? Icons.bubble_chart
                 : Icons.bubble_chart_outlined),
             onPressed: () => setState(() => _showJournals = !_showJournals),
+          ),
+          IconButton(
+            tooltip: '生成总结卡',
+            icon: const Icon(Icons.auto_awesome_rounded),
+            onPressed: _exporting ? null : _openSummaryCard,
           ),
           IconButton(
             tooltip: '导出视频',
@@ -1165,6 +1175,39 @@ class _PlayerScreenState extends ConsumerState<_PlayerScreen>
   }
 
   // ── video export ──────────────────────────────────────────────────────
+
+  /// 这段回放（单段或合并记录）的总结卡。范围取所有段的首尾，点直接用已经
+  /// 加载好的 sessions——与回放画出来的是同一批点。
+  Future<void> _openSummaryCard() async {
+    final pts = <SummaryPoint>[
+      for (final s in widget.sessions)
+        for (final p in s.points) (lat: p.lat, lng: p.lng, time: p.time),
+    ];
+    if (pts.isEmpty) {
+      _toast('这段记录没有可用的轨迹点');
+      return;
+    }
+    var from = pts.first.time, to = pts.first.time;
+    for (final p in pts) {
+      if (p.time.isBefore(from)) from = p.time;
+      if (p.time.isAfter(to)) to = p.time;
+    }
+    final db = ref.read(dbProvider);
+    final visits = await db.visitsBetween(from, to);
+    final places = await db.allPlaces();
+    if (!mounted) return;
+    await openSummaryCard(
+      context,
+      SummaryCardBuilder.trip(
+        title: _title,
+        from: from,
+        to: to,
+        points: pts,
+        places: SummaryCardBuilder.placesFrom(visits, places,
+            from: from, to: to),
+      ),
+    );
+  }
 
   Future<void> _exportVideo() async {
     if (!QuickVideoEncoderSink.supported) {

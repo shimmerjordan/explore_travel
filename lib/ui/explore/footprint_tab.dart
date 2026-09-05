@@ -12,8 +12,10 @@ import '../../app/providers.dart';
 import '../../data/db/database.dart';
 import '../../services/stats/footprint_stats.dart';
 import '../../services/stats/footprint_summary.dart';
+import '../../services/stats/summary_card_builder.dart';
 import '../common/empty_state.dart';
 import '../common/pixel.dart';
+import '../stats/summary_card_screen.dart';
 
 /// 「足迹」— the numbers layer over the explore progress page: distance,
 /// recorded days & streaks, an activity calendar, hour-of-day rhythm, the
@@ -113,6 +115,31 @@ class _FootprintTabState extends ConsumerState<FootprintTab> {
     } catch (_) {}
   }
 
+  /// 装配年度总结卡。轨迹点单独取一次（只要目标年份的），其余数字直接复用
+  /// 页面上已经算好的 [FootprintSummary]，保证卡片与页面对得上。
+  Future<void> _openYearCard(_Data d, int year) async {
+    final db = ref.read(dbProvider);
+    final layers = await db.allLayers();
+    final from = DateTime(year);
+    final to = DateTime(year + 1).subtract(const Duration(microseconds: 1));
+    final pts = await db.cleanPoints(layers.map((l) => l.id).toList());
+    final inYear = <SummaryPoint>[
+      for (final p in pts)
+        if (!p.time.isBefore(from) && !p.time.isAfter(to))
+          (lat: p.lat, lng: p.lng, time: p.time),
+    ];
+    if (!mounted) return;
+    final card = SummaryCardBuilder.year(
+      year: year,
+      summary: d.summary,
+      pointsInYear: inYear,
+      places: SummaryCardBuilder.placesFrom(d.visits, d.places,
+          from: from, to: to),
+    );
+    if (!mounted) return;
+    await openSummaryCard(context, card);
+  }
+
   @override
   Widget build(BuildContext context) {
     final refresh = ref.watch(visitsRefreshProvider);
@@ -179,8 +206,21 @@ class _FootprintTabState extends ConsumerState<FootprintTab> {
       padding: const EdgeInsets.fromLTRB(20, 16, 20, 40),
       children: [
         // ── Hero: distance ──
-        Text(formatKm(s.totalMeters),
-            style: PixelText.display.copyWith(color: cs.onSurface)),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: Text(formatKm(s.totalMeters),
+                  style: PixelText.display.copyWith(color: cs.onSurface)),
+            ),
+            if (d != null)
+              IconButton(
+                tooltip: '生成 ${now.year} 年总结卡',
+                icon: const Icon(Icons.auto_awesome_rounded),
+                onPressed: () => _openYearCard(d, now.year),
+              ),
+          ],
+        ),
         label('走过的路 · 今年 ${formatKm(s.metersInYear(now.year))} · '
             '本月 ${formatKm(s.metersInMonth(now.year, now.month))}'
             '${s.longestDay != null ? ' · 最长一天 ${formatKm(s.longestDay!.value)}（${s.longestDay!.key}）' : ''}'),
