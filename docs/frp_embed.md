@@ -4,7 +4,7 @@
 
 **已经全部接好并提交**：Dart 侧、Android（`FrpBridge.kt` + `MainActivity` 注册 + gradle 条件依赖）、
 iOS（`AppDelegate.swift` 内联 `#if canImport` 桥 + Podfile 条件 vendoring + podspec）、以及
-CI（`.github/workflows/release.yml` 里的 gomobile 构建步骤）。**唯一不能在当前环境跑的是
+CI（`.github/workflows/build.yml` 的 android / ios job 里的 gomobile 构建步骤）。**唯一不能在当前环境跑的是
 `gomobile bind` 本身**（需要 Go + Android NDK；iOS 还需要 macOS + Xcode），所以它在 CI 里跑。
 
 设计上是**优雅降级**：原生侧通过反射（Android）/ `#if canImport`（iOS）引用 frpc，
@@ -80,7 +80,7 @@ gomobile bind -target=ios -o ../../ios/frpmobile/Frpmobile.xcframework .
 ```
 注意 iOS QUIC/KCP 打洞走 UDP，确认没有被额外的网络扩展拦截。
 
-## 4. CI（已接好，`.github/workflows/release.yml`）
+## 4. CI（已接好，`.github/workflows/build.yml` 的 android / ios job）
 
 android / ios 两个 job 都已加 `actions/setup-go@v5` + gomobile 构建步骤（android 自动探测
 `$ANDROID_HOME/ndk/*`），在 Flutter build / pod install 之前运行。两步均 `continue-on-error: true`：

@@ -247,9 +247,9 @@ NAS），而且那一次会在服务端日志里留下一条 `AUDIT:` 记录。
 
 ---
 
-## I. 宣传站是另一条流水线
+## I. 宣传站是另一个 job
 
-`.github/workflows/deploy-web.yml` 产出的是**合并站点**（宣传落地页在 `/`、应用在
-`/app/`），推到 `web-build` 分支供 Vercel / Cloudflare Pages 部署。它与这里说的
-web-front 镜像**不是**同一个东西，也无法共用一次构建（base-href 不同），镜像里根本
-没有落地页。两者可以并存。
+`.github/workflows/build.yml` 的 `site` job 产出的是**合并站点**（宣传落地页在 `/`、
+应用在 `/app/`），推到 `web-build` 分支供 Vercel / Cloudflare Pages 部署。它与同一条
+流水线里 `image` job 产出的镜像**不是**同一个东西，也无法共用一次构建（base-href
+不同），镜像里根本没有落地页。两者可以并存。

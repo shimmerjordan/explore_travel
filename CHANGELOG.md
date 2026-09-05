@@ -13,10 +13,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 
   **容器内数据目录变了**：原先两个服务各自把 `/data` 当自己的根，现在分住 `/data/web` 与 `/data/backend`，宿主挂载点不变。`deploy/entrypoint.sh` 会在首次启动时把旧布局搬进子目录——幂等（判据是文件位置而非标记文件，所以手工恢复备份也不会骗过它）、目标已存在时不覆盖而是留下旧文件并在日志里说明。**升级前请备份 `/data`。** 合并前 bind mount 需要手工 `chown 65532` 那一步不再需要：每次启动都会纠正两个子目录的属主。
 
-- 两条镜像流水线合并成 `.github/workflows/image.yml`：`cargo test` + `npm test` + Flutter 门禁 → 交叉编译双架构 → 对**两个架构各跑两套**容器级验证（web-front 的完整 API 冒烟 + 后端的 Docker E2E）→ 验证旧数据布局的迁移 → 推双架构 manifest。比合并前多的那一步是迁移验证：没有它，用户升级时静默丢数据没有任何拦阻。
+- 两条镜像流水线合并成一个 job（现为 `build.yml` 的 `image`）：交叉编译双架构 → 对**两个架构各跑两套**容器级验证（web-front 的完整 API 冒烟 + 后端的 Docker E2E）→ 验证旧数据布局的迁移 → 推双架构 manifest。比合并前多的那一步是迁移验证：没有它，用户升级时静默丢数据没有任何拦阻。
 - 新增根 `.dockerignore`（白名单）。合并后构建上下文变成整个仓库，而仓库里躺着 6.1 GB 的 `build/` 与 `web-front/target/`；不加的话每次构建都要先把它们传给 daemon。实测上下文 1.6 KB。
 - `backends/scripts/docker-e2e.sh` 加 `SKIP_BUILD=1`，好让它跑在外部已构建的合并镜像上（两套既有冒烟因此一行没改就能复用）。
 - 旧的四个 compose 文件保留并标注「仅供回退与单独调试」。只想在 ECS 上跑后端的话，`backends/docker-compose.yml` 那条路仍然有效。
+
+### CI
+
+- **四条流水线合并成两条**：`test.yml`（所有测试）与 `build.yml`（所有产出物）。原先是 `flutter-check` / `deploy-web` / `image` / `release` 四条，一次 push 亮三条，得点进三个地方才知道成没成。
+
+  合并解决的不只是条数，还有两个真问题：① `analyze` + `test` 有四份复制，改一处漏三处；② **跨 workflow 没有依赖关系**，两条并行的流水线互不等待——`flutter-check` 红了照样能把镜像推上 GHCR、把站点发到公网。现在 `build.yml` 的第一个 job 就是 `uses: ./.github/workflows/test.yml`，镜像 / 站点 / 发版包全部 `needs: test`，「测试红了就不发布」是真的依赖关系。测试只定义在 `test.yml` 一处（Flutter analyze + 约 500 个 test、后端 `node --test`、web-front `cargo test`）。
+
+- 新增 `changes` job：workflow 级 `paths` 粗筛之后，再用真实 diff 细筛到 job 级。所以只改 `test/**` 不会去编 30 分钟的镜像，只改 `website/**` 不会重建镜像。算不出 diff 时（手动触发 / 首推 / 强推）一律按「全部改动」处理——宁可多编一次，也不能因为 diff 没算对而漏掉一次发布。
+- 手动发版入口从「Release (manual)」搬到「构建与发布」的 `Run workflow`：**`release_tag` 留空 = 只重建镜像与站点**，填了 tag = 只出 APK / IPA 并发版。concurrency group 带上 tag，所以一次发版构建不会被随后的普通 push 取消。
+- Flutter 版本钉点仍只有一处（`.github/actions/flutter-setup`），但默认值改成空串：调用方常要把一个「可能为空」的 workflow 输入直接透传进来，默认值若是版本号，透传空串反而会把版本号覆盖成空。空值归一化改在 composite 内部做。
+- 删掉 `image-build-setup` composite。它当初的理由是「两条镜像流水线唯一真正重复的那一段」，合并后只剩一个调用方，纯粹是一层间接。
 
 ### 新增
 

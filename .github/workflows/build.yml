@@ -1,0 +1,954 @@
+name: 构建与发布
+
+# ════════════════════════════════════════════════════════════════════════
+# 本仓库只有两条流水线：这一条负责**所有产出物**，test.yml 负责**所有测试**。
+#
+#   test（调用 test.yml）── 三种语言的门禁，下面每一个 job 都 needs 它
+#     ├─ image    GHCR 单镜像：web-front(48080) + ej-backend(48081) 双架构
+#     ├─ site     公开站点 → web-build 分支 → Vercel / Cloudflare Pages
+#     ├─ android  APK（仅手动发版）
+#     ├─ ios      IPA（仅手动发版）
+#     └─ release  把 APK / IPA 挂到 GitHub Release（仅手动发版）
+#
+# 合并前是 4 条流水线（flutter-check / deploy-web / image / release）。代价有三个：
+#   · analyze + test 有 4 份复制，改一处漏三处；
+#   · 跨 workflow 没有依赖关系，测试红了照样能把镜像推上 GHCR、把站点发到公网；
+#   · 一次 push 亮 3 条流水线，得点进 3 个地方才知道这次到底成没成。
+# 现在一次 push 只有一条运行记录，第一个 job 是测试，红了后面全不动。
+#
+# ── 触发与跳过 ──────────────────────────────────────────────────────────
+# workflow 级 paths 是三类产出物输入的并集（粗筛）；job 级再由 `changes` 用真实
+# diff 细筛，所以只改 test/ 不会去编 30 分钟的镜像，只改 website/ 不会重建镜像。
+# 算不出 diff 时（手动触发 / 首推 / 强推）一律按「全都要构建」处理 —— 宁可多编
+# 一次，也不能因为 diff 没算对而漏掉一次发布。
+#
+# ── 手动发版 ────────────────────────────────────────────────────────────
+# Actions 页 → 构建与发布 → Run workflow：
+#   · release_tag 留空 → 只重建镜像与站点（等价于一次普通 push）
+#   · release_tag 填 v0.2.0 → 只出 APK / IPA 并发版，不动镜像与站点
+#
+# 可选 secrets（不配也能跑，产出降级为可侧载的包）：
+#   ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD
+#   ANDROID_KEY_ALIAS / ANDROID_KEY_PASSWORD
+#   IOS_CERTIFICATE_BASE64 / IOS_CERTIFICATE_PASSWORD
+#   IOS_PROVISIONING_PROFILE_BASE64 / IOS_TEAM_ID / IOS_EXPORT_METHOD
+# ════════════════════════════════════════════════════════════════════════
+
+on:
+  push:
+    branches: [main]
+    paths: &paths
+      # ── 镜像的输入 ────────────────────────────────────────────────────
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'deploy/**'
+      - 'web-front/**'
+      - 'backends/**'
+      # pubspec 里声明打进 App 的那三个 docs 也是 Flutter 构建的输入。少了它们，
+      # 只改内置文档时镜像不重建，镜像里带的还是旧前端，而且没有任何信号。
+      - 'docs/leaderboard-server-api.md'
+      - 'docs/self-host-server-deploy.md'
+      - 'docs/self-host-client-config.md'
+      # ── 站点的输入 ────────────────────────────────────────────────────
+      - 'website/**'
+      - 'scripts/build-site.sh'
+      # ── 三者共用的 Flutter 输入 ───────────────────────────────────────
+      - 'lib/**'
+      - 'web/**'
+      - 'assets/**'   # 字体 / 贴图也是 Flutter 构建的输入
+      - 'pubspec.yaml'
+      - 'pubspec.lock'
+      # ── 只影响测试的输入 ──────────────────────────────────────────────
+      - 'test/**'
+      - 'analysis_options.yaml'
+      # ── 流水线自身 ────────────────────────────────────────────────────
+      - '.github/workflows/build.yml'
+      - '.github/workflows/test.yml'
+      - '.github/actions/flutter-setup/**'   # Flutter 版本钉在那里
+  pull_request:
+    paths: *paths
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: '发版 tag（如 v0.2.0）。留空 = 只重建镜像与站点，不发版。'
+        required: false
+        default: ''
+      prerelease:
+        description: '标记为预发布？'
+        type: boolean
+        default: true
+      build_android:
+        description: '构建 Android APK？'
+        type: boolean
+        default: true
+      build_ios:
+        description: '构建 iOS IPA？'
+        type: boolean
+        default: true
+      flutter_version:
+        description: 'Flutter SDK 版本。留空 = 用仓库钉点（.github/actions/flutter-setup）。'
+        required: false
+        default: ''
+
+# group 里带上 release_tag：一次发版构建不该被随后的普通 push 取消。
+# push 与「留空的手动触发」落在同一个 ci 组里，后来的取消先前的。
+#
+# 下面所有判断都写成「先看 event_name，再看 inputs」两段式，而不是直接比
+# `inputs.release_tag == ''`：非 workflow_dispatch 的事件里 inputs 是 null，
+# 要靠 GitHub 把 null 与空串都强转成 0 才能相等 —— 能用但太隐晦，两段式一眼可读。
+concurrency:
+  group: build-${{ github.ref }}-${{ github.event.inputs.release_tag || 'ci' }}
+  cancel-in-progress: >-
+    ${{ github.event_name != 'workflow_dispatch'
+        || github.event.inputs.release_tag == '' }}
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}/app
+
+jobs:
+  # ───────────────────────── 改动范围 ─────────────────────────
+  changes:
+    name: 判定改动范围
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      image: ${{ steps.f.outputs.image }}
+      site: ${{ steps.f.outputs.site }}
+    steps:
+      # fetch-depth: 0 才能对 base 做 diff。本仓库全史 36 MB，代价可以忽略。
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: f
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          FILES=''
+          case "$EVENT" in
+            pull_request)
+              FILES=$(git diff --name-only "$BASE" HEAD || true) ;;
+            push)
+              # 强推与分支首推时 before 是全 0 或已不可达，此时算不出 diff。
+              if [ -n "${BEFORE:-}" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ] \
+                 && git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+                FILES=$(git diff --name-only "$BEFORE" HEAD || true)
+              fi ;;
+          esac
+
+          if [ -z "$FILES" ]; then
+            echo "::notice::无法确定改动范围（手动触发 / 首推 / 强推），按「全部改动」处理"
+            printf 'image=true\nsite=true\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "── 本次改动 ──"; printf '%s\n' "$FILES" | sed 's/^/  /'
+
+          # 注意 `^web/` 不会命中 `web-front/`（web 后面紧跟的是 -，不是 /）。
+          IMAGE_RE='^(Dockerfile$|\.dockerignore$|deploy/|web-front/|backends/|lib/|web/|assets/|pubspec\.(yaml|lock)$|docs/(leaderboard-server-api|self-host-server-deploy|self-host-client-config)\.md$|\.github/(workflows/(build|test)\.yml$|actions/flutter-setup/))'
+          SITE_RE='^(website/|scripts/build-site\.sh$|lib/|web/|assets/|pubspec\.(yaml|lock)$|\.github/(workflows/(build|test)\.yml$|actions/flutter-setup/))'
+
+          hit() { printf '%s\n' "$FILES" | grep -Eq "$1" && echo true || echo false; }
+          IMG=$(hit "$IMAGE_RE"); SITE=$(hit "$SITE_RE")
+          echo "── 结论 ── 镜像：$IMG · 站点：$SITE"
+          printf 'image=%s\nsite=%s\n' "$IMG" "$SITE" >> "$GITHUB_OUTPUT"
+
+  # ───────────────────────── 门禁 ─────────────────────────
+  # 三种语言的测试定义在 test.yml 里（唯一一处）。下面每个 job 都 needs 它，
+  # 所以「测试红了就不发布」是真的依赖关系，不是两条流水线各自跑各自的。
+  test:
+    name: 测试
+    uses: ./.github/workflows/test.yml
+    with:
+      # 发版产物用哪个 SDK 编，门禁就用哪个 SDK 查；留空则吃仓库钉点。
+      flutter-version: ${{ github.event.inputs.flutter_version || '' }}
+
+  # ───────────────────── GHCR 单镜像（双架构）─────────────────────
+  # 一个容器同时跑：
+  #   · web-front（Rust，48080）—— admin 登录 + 加密配置保管 + 运维看板
+  #     + Flutter web 静态托管 + 只读 WebDAV 代理
+  #   · ej-backend（Node，48081）—— 社区排行榜 + 组队中继
+  # 由 supervisord 带起，两个进程各自降权到合并前的 UID（65532 / 1000）。
+  #
+  # 为什么是交叉编译而不是 QEMU 模拟编译：在 QEMU 下编译 Rust 单架构就要 40 分钟
+  # 以上（ring 还要现编 C 与汇编），交叉编译在原生速度下几分钟完事。见根 Dockerfile。
+  #
+  # PR 只验证不推送；只有 main 上的 push 才会发布 latest。
+  image:
+    name: GHCR 镜像（双架构 + 两套冒烟）
+    needs: [changes, test]
+    if: >-
+      needs.changes.outputs.image == 'true'
+      && (github.event_name != 'workflow_dispatch'
+          || github.event.inputs.release_tag == '')
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write # 推 GHCR 需要
+    steps:
+      - uses: actions/checkout@v4
+
+      # Flutter 版本钉在 .github/actions/flutter-setup 里，连 pub get 一起做。
+      - uses: ./.github/actions/flutter-setup
+
+      # 只构建一次，两个架构共用（纯静态资源与架构无关）。必须在 docker build
+      # 之前：Dockerfile 的 `COPY web-front/web-dist/ /web/` 不是可选的。
+      - name: 构建 Flutter web 产物
+        run: |
+          set -euo pipefail
+          flutter build web --release
+          # 先清空再拷：残留的上一次产物会被一起打进镜像，而 Flutter 的文件名
+          # 并非全都带内容哈希，旧文件不会被新文件覆盖掉。
+          rm -rf web-front/web-dist
+          mkdir -p web-front/web-dist
+          cp -r build/web/. web-front/web-dist/
+          # 产物必须全局可读：COPY 保留宿主权限位，0600 的文件在镜像里对
+          # nonroot 不可读（见根 Dockerfile 里 /web 那段注释）。
+          chmod -R a+rX web-front/web-dist
+          echo "产物大小：$(du -sh web-front/web-dist | cut -f1)"
+          test -f web-front/web-dist/index.html || {
+            echo "::error::web-dist 里没有 index.html —— 镜像会退化成只有说明页"; exit 1; }
+
+      # QEMU 只用于「跑」arm64 的容器做冒烟，不用于编译。
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        # fork 来的 PR 拿不到 packages:write，登录会直接失败。
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 计算镜像标签
+        id: meta
+        if: github.event_name != 'pull_request'
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          # latest 只在默认分支上打，否则一条特性分支的推送会把 latest 抢走，
+          # 而 latest 正是 compose 文件默认拉的那个。sha- 前缀那条是可复现发布
+          # 的锚点：部署文档里让人钉 sha 而不是 latest，靠的就是它。
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=sha-
+
+      # 先单架构 load 到本地 daemon，才能把容器真跑起来验。
+      # context 是仓库根（Dockerfile 要同时拿到 web-front/ 与 backends/ 两棵子树）；
+      # 上下文体积由 .dockerignore 的白名单控制。
+      - name: 编译 amd64（加载到本地）
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: ej-app:smoke-amd64
+          cache-from: type=gha,scope=app-amd64
+          cache-to: type=gha,scope=app-amd64,mode=max
+
+      # 两套冒烟都指向同一个合并镜像。它们各自的 docker run 只挂 /data 并覆盖
+      # 环境变量，entrypoint 会补建两个子目录 —— 所以脚本本身不用改，只需要
+      # 让它们别再自己 build（web-front 那套默认就不 build，后端那套用 SKIP_BUILD=1）。
+      - name: 冒烟 amd64 · web-front 完整 API
+        working-directory: web-front
+        run: IMAGE=ej-app:smoke-amd64 ./scripts/docker-smoke.sh
+
+      - name: 冒烟 amd64 · 后端容器级 E2E
+        working-directory: backends
+        run: SKIP_BUILD=1 E2E_IMAGE=ej-app:smoke-amd64 ./scripts/docker-e2e.sh
+
+      - name: 编译 arm64（加载到本地）
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/arm64
+          load: true
+          tags: ej-app:smoke-arm64
+          cache-from: type=gha,scope=app-arm64
+          cache-to: type=gha,scope=app-arm64,mode=max
+
+      # arm64 也跑完整套，不只是启动探测：ring 有 aarch64 专用汇编、Argon2
+      # 有架构相关实现路径、bundled SQLite 是交叉编译出来的 C 代码 —— 这些
+      # 「能链接」不等于「算得对」，只有真正打一遍 API 才能发现。
+      # 曾经这里降级成 LEVEL=boot，理由是 Argon2 在模拟下太慢；实测（qemu-aarch64
+      # 跑同一个交叉编译产物）注册 0.115 s、单次 Argon2 验证 0.096 s，理由不成立。
+      - name: 冒烟 arm64 · web-front 完整 API + 架构核对
+        working-directory: web-front
+        run: IMAGE=ej-app:smoke-arm64 PLATFORM=linux/arm64 ./scripts/docker-smoke.sh
+
+      - name: 冒烟 arm64 · 后端容器级 E2E
+        working-directory: backends
+        run: SKIP_BUILD=1 E2E_IMAGE=ej-app:smoke-arm64 ./scripts/docker-e2e.sh
+
+      # 升级路径。合并成单镜像之前两个服务各自把 /data 当自己的根，现在分住
+      # /data/web 与 /data/backend，entrypoint 要把旧布局搬过去。这一步造一份
+      # 旧布局再启动，验证搬对了、重复启动不重复搬、目标已存在时不覆盖。
+      # **没有这条，用户升级时静默丢数据的风险没有任何拦阻。**
+      - name: 验证旧数据布局的迁移
+        run: |
+          set -euo pipefail
+          VOL=ej-mig-ci
+          docker volume rm "$VOL" >/dev/null 2>&1 || true
+          docker volume create "$VOL" >/dev/null
+          docker run --rm -v "$VOL:/d" alpine sh -c '
+            printf "{}" > /d/admin.json
+            printf "{}" > /d/config.json
+            printf "[{\"peerId\":\"pre-merge\"}]" > /d/leaderboard.json'
+          docker run -d --name ej-mig-ci -v "$VOL:/data" ej-app:smoke-amd64 >/dev/null
+          for _ in $(seq 1 60); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' ej-mig-ci)" = healthy ] && break
+            sleep 1
+          done
+          docker logs ej-mig-ci 2>&1 | grep -q '发现合并前的数据布局' \
+            || { echo "::error::迁移没有触发"; docker logs ej-mig-ci; exit 1; }
+          docker exec ej-mig-ci test -f /data/web/admin.json
+          docker exec ej-mig-ci test -f /data/backend/leaderboard.json
+          docker exec ej-mig-ci sh -c 'grep -q pre-merge /data/backend/leaderboard.json' \
+            || { echo "::error::迁移后内容不对"; exit 1; }
+          # 重启不该再搬一次（判据是文件位置，不是标记文件，所以天然幂等）
+          BEFORE=$(docker exec ej-mig-ci cat /data/backend/leaderboard.json)
+          docker restart ej-mig-ci >/dev/null; sleep 6
+          AFTER=$(docker exec ej-mig-ci cat /data/backend/leaderboard.json)
+          [ "$BEFORE" = "$AFTER" ] || { echo "::error::重启后数据变了"; exit 1; }
+          # 目标已存在时不覆盖，旧文件原地留着让人自己看
+          docker exec ej-mig-ci sh -c 'printf "{}" > /data/leaderboard.json'
+          docker restart ej-mig-ci >/dev/null; sleep 6
+          docker logs ej-mig-ci 2>&1 | tail -20 | grep -q '跳过 leaderboard.json' \
+            || { echo "::error::目标已存在时没有跳过，可能覆盖了数据"; exit 1; }
+          docker rm -f ej-mig-ci >/dev/null
+          docker volume rm "$VOL" >/dev/null
+          echo "迁移、幂等、不覆盖 三项均通过"
+
+      - name: 推送双架构 manifest
+        id: push
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: |
+            type=gha,scope=app-amd64
+            type=gha,scope=app-arm64
+
+      # 运行摘要页是点进一次运行后落地的地方。没有它就只是一片绿勾，
+      # 看不出发布了什么、怎么部署。
+      #
+      # 缩进说明：下面所有内容都在块标量的基准缩进上，YAML 会把它剥掉，
+      # heredoc 正文到达 shell 时在第 0 列 —— 这样 markdown 才不会被渲染
+      # 成代码块。别给这些行重新加缩进。
+      - name: 写入运行摘要
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+          IS_PR: ${{ github.event_name == 'pull_request' }}
+        run: |
+          S="$GITHUB_STEP_SUMMARY"
+
+          if [ "$JOB_STATUS" = success ]; then
+            if [ "$IS_PR" = true ]; then
+              echo "## ✅ 应用镜像验证通过（PR 不发布）" >> "$S"
+            else
+              echo "## ✅ 应用镜像已发布到 GHCR" >> "$S"
+            fi
+          else
+            {
+              echo "## ❌ 镜像构建失败（状态：$JOB_STATUS）"
+              echo ""
+              echo "排查：展开上面失败的那一步；两套冒烟失败都会自动打印容器日志。"
+              echo "本机复现："
+              echo '```bash'
+              echo "docker build -t ej-app:test ."
+              echo "cd web-front && IMAGE=ej-app:test ./scripts/docker-smoke.sh"
+              echo "cd backends && SKIP_BUILD=1 E2E_IMAGE=ej-app:test ./scripts/docker-e2e.sh"
+              echo '```'
+            } >> "$S"
+          fi
+
+          cat >> "$S" <<'HEADER'
+
+          **发布对象**：一个镜像两个服务 —— `web-front`（Rust，48080：单 admin 登录 + 加密配置保管 + 运维看板 + Flutter web 静态托管 + 只读 WebDAV 代理）与 `ej-backend`（Node，48081：社区排行榜 + 组队中继），由 supervisord 带起，两个进程分别以 UID 65532 / 1000 运行，各自只写得动自己的数据目录。镜像里带着本次构建的 web 产物。
+
+          HEADER
+
+          {
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| 架构 | \`linux/amd64\` + \`linux/arm64\`（同一个 manifest，pull 时自动选） |"
+            echo "| 摘要 digest | \`${DIGEST:-—（PR 不推送）}\` |"
+            echo "| 提交 | \`${GITHUB_SHA:0:7}\` |"
+            echo "| 基础镜像 | \`node:22-bookworm-slim\` + supervisor |"
+            echo "| 对外端口 | 48080（web）· 48081（backend） |"
+          } >> "$S"
+
+          if [ -n "$TAGS" ]; then
+            {
+              echo ""
+              echo "**本次标签**"
+              echo ""
+              echo '```'
+              echo "$TAGS"
+              echo '```'
+            } >> "$S"
+          fi
+
+          cat >> "$S" <<'VERIFIED'
+
+          ### 本次验证了什么
+
+          测试（Flutter analyze + 约 500 个 flutter test、后端 node --test、web-front cargo test）由本次运行的 `测试` job 统一跑，红了这个 job 根本不会启动。镜像侧额外做的是：
+
+          - **web-front 完整 API 冒烟 · amd64 与 arm64 各一遍** —— 默认口令能登录且自报 `is_default_password` → 未鉴权时配置/指标/导出全部 401 → 配置往返字节一致 → 导出默认脱敏而 `secrets=1` 才出明文 → 看板页免 session 可取 → 无 web 产物时根路径给说明页、带扩展名的路径给 JSON 404 → **改密后用新口令仍能读出配置（验证重加密真的发生了）** → `docker restart` 后会话消失而口令与密文都还在 → 代理关闭时连功能存在都不暴露、打开后写动词 405 且穿越 403
+          - **后端容器级 E2E · amd64 与 arm64 各一遍** —— 开放模式与令牌强制模式各跑一轮完整 API、数据正确性、中继、重启持久化
+          - **升级路径** —— 造一份合并前的数据布局，验证首次启动把它搬进 `/data/web` 与 `/data/backend`、内容完好、重启不重复搬、目标已存在时不覆盖
+          - **为什么 arm64 也要打全套** —— ring 有 aarch64 专用汇编、Argon2 有架构相关路径，「能链接」不等于「算得对」；同时核对镜像架构确为 `arm64`，防止交叉编译静默产出宿主架构的产物
+
+          VERIFIED
+
+          if [ "$IS_PR" = true ]; then
+            cat >> "$S" <<'PRNOTE'
+          ### 本次不发布
+
+          PR 只做验证。合并到 `main` 后会自动推 `latest` 与 `sha-<7位>` 两个标签。
+
+          PRNOTE
+            exit 0
+          fi
+
+          cat >> "$S" <<HOWTO
+
+          ### 从两个容器升级到这一个
+
+          原先跑着 \`web-front\` 与 \`ej-backend\` 两个容器的话，按这个顺序换：
+
+          \`\`\`bash
+          # ① 先备份两份数据（迁移会移动文件，虽然是幂等的，但备份不要省）
+          sudo tar czf ej-backup-\$(date +%F).tgz -C /volume1/docker/web-front/data . \\
+                                                  -C /volume1/docker/ej-backend/data .
+
+          # ② 停掉旧的两个
+          sudo docker compose -f web-front/docker-compose.ghcr.yml down
+          sudo docker compose -f backends/docker-compose.ghcr.yml down
+
+          # ③ 把两份数据并到同一个目录下（保持各自原来的文件名，别建子目录 ——
+          #    子目录由容器第一次启动时自己建，属主也由它设）
+          sudo mkdir -p /volume1/docker/explore-journal/data
+          sudo cp -a /volume1/docker/web-front/data/.  /volume1/docker/explore-journal/data/
+          sudo cp -a /volume1/docker/ej-backend/data/. /volume1/docker/explore-journal/data/
+          \`\`\`
+
+          两份数据的文件名不冲突（web 侧是 \`admin.json\` / \`config.json\` / \`metrics.json\`，后端侧是 \`leaderboard.json\`），所以可以直接并到一个目录里。
+
+          ### 在 NAS 上部署
+
+          **① 建目录并写 compose**
+
+          \`\`\`bash
+          sudo mkdir -p /volume1/docker/explore-journal/data && cd /volume1/docker/explore-journal
+          \`\`\`
+
+          HOWTO
+
+          {
+            echo '```bash'
+            echo "cat > docker-compose.yml <<'YAML'"
+            cat docker-compose.ghcr.yml
+            echo 'YAML'
+            echo '```'
+          } >> "$S"
+
+          cat >> "$S" <<HOWTO2
+
+          **② 指定数据位置**（没有任何必填的密钥）
+
+          \`\`\`bash
+          printf 'EJ_DATA_PATH=/volume1/docker/explore-journal/data\\n' > .env
+          \`\`\`
+
+          合并前需要手工 \`chown 65532\` 那一步**不用了**：entrypoint 每次启动都会把两个子目录的属主纠正过来，bind mount 也零配置可用。
+
+          **③ 起服务并自检**
+
+          \`\`\`bash
+          sudo docker compose up -d
+          curl localhost:48080/healthz          # → {"status":"ok"}
+          curl localhost:48081/healthz          # → ok
+          sudo docker compose logs | grep entrypoint   # 看数据目录与迁移结果
+          \`\`\`
+
+          **④ 立刻改掉默认口令**
+
+          浏览器打开 \`http://<NAS>:48080/admin\`，用 \`admin\` / \`admin\` 登录——顶部会挂一条红色横幅，改密表单就内联在里面。**任何能连到这个端口的人都能用默认口令登录并读走你全部云凭据。**
+
+          之后在手机 App 的 **备份 → 「Web 前端 · 配置推送」** 里把配置推上来，浏览器打开 \`http://<NAS>:48080/\` 就能看数据了。
+
+          ### 之后的运维
+
+          \`\`\`bash
+          # 升级
+          sudo docker compose pull && sudo docker compose up -d
+
+          # 钉到本次这个版本（可复现、可回滚）
+          echo 'EJ_APP_IMAGE=${IMAGE}:sha-${GITHUB_SHA:0:7}' >> .env && sudo docker compose up -d
+
+          # 只重启其中一个服务（不动另一个）
+          sudo docker exec ej-app supervisorctl -c /etc/supervisor/conf.d/supervisord.conf restart backend
+
+          # 备份（两个子目录一起）
+          sudo tar czf ej-backup-\$(date +%F).tgz -C /volume1/docker/explore-journal/data .
+
+          # WebDAV 用户需要打开只读代理（浏览器无法直连 WebDAV）
+          # 在 compose 的 environment 里加 EJ_PROXY_ENABLED: "1"
+          \`\`\`
+
+          ### 几个容易踩的点
+
+          - **端口**：\`48080\` / \`48081\` 是刻意选的高端口。家宽运营商封 \`80\` / \`443\` / \`8080\` 的入方向，配到那三个上从公网连不上。
+          - **数据别放网络盘**：\`EJ_DATA_PATH\` 必须指向 NAS 本地文件系统。落盘用「写临时文件 → fsync → 原子改名 → fsync 目录」，NFS/SMB 对这套语义不可靠。
+          - **忘记 admin 口令 = 已存的配置永久读不出来**。配置是用口令派生的密钥加密的，没有恢复通道。出路是从手机端重推一份覆盖它。
+          - **地理定位与 PWA 安装需要安全上下文**：用 \`http://<局域网IP>:48080\` 打开时浏览器不给这些能力。在 NAS 本机用 \`localhost\`，或前面套个带证书的反代。
+          - **必须置于带超时的反代之后**：web 侧是 thread-per-request 的，8 个慢速连接就能把全部 worker 占死。反代需要**同时**有读超时与响应写超时（或做响应缓冲）。
+          - **经反代暴露时两个 TRUST_PROXY 都要开**（\`EJ_TRUST_PROXY=1\` 与 \`TRUST_PROXY=1\`），否则两个服务的限流都按反代自己的 IP 分桶，等于没有限流。
+          - **OneDrive 重定向 URI**：Azure 应用注册里要加 SPA 平台的 \`http://<NAS>:48080/auth.html\`。
+          - **镜像可见性**：本仓库是公开的，经 Actions 用 \`GITHUB_TOKEN\` 推送的包会关联到仓库并随之公开，NAS 上**不需要** \`docker login\`。万一 \`pull\` 报 \`denied\`/\`unauthorized\`，说明那个包是 private，两条路：① NAS 上 \`docker login ghcr.io -u <你的用户名>\`，密码填带 \`read:packages\` 的 PAT；② 包页 → 齿轮 **Package settings** → **页面最底部的 Danger Zone** → **Change visibility**。注意公开后**不能再改回私有**。
+          HOWTO2
+
+      - name: 失败时打印容器日志
+        if: failure()
+        run: |
+          docker ps -a
+          for n in $(docker ps -aq); do
+            echo "── $(docker inspect -f '{{.Name}}' "$n")"
+            docker logs "$n" 2>&1 | tail -60
+          done
+
+  # ───────────────────── 公开站点 → web-build 分支 ─────────────────────
+  # 这个 job 与上面的镜像**不是**重复的，别因为两边都跑 `flutter build web`
+  # 就把它删掉：
+  #
+  #   · 这里产出的是**合并站点**（scripts/build-site.sh）：宣传落地页在 `/`、
+  #     Flutter 应用在 `/app/`，base-href 是 `/app/`。推到 `web-build` 分支，
+  #     由 Vercel / Cloudflare Pages 直接部署，面向公网访客。
+  #   · 镜像里那份是**纯应用**，base-href 是 `/`，由 NAS 上的服务端托管，
+  #     面向已经有 admin 口令的自己。
+  #
+  # 两份产物的 base-href 不同，所以物理上无法共用一次构建；而镜像里根本没有
+  # `website/` 的落地页。删掉这个 job 等于静默废掉宣传站的部署。
+  #
+  # 用 build 分支而不是平台 CLI/token 推送：Vercel 的原生 Git 集成免费给预览
+  # URL、回滚与部署面板，也不用在 GitHub 里存 Vercel token；`web-build` 本身
+  # 就是个可直接部署的产物，NAS / Nginx / Pages 用同样的设置都能托管。
+  site:
+    name: 公开站点 → web-build
+    needs: [changes, test]
+    if: >-
+      needs.changes.outputs.site == 'true'
+      && github.event_name != 'pull_request'
+      && (github.event_name != 'workflow_dispatch'
+          || github.event.inputs.release_tag == '')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write # 推 web-build 分支
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/flutter-setup
+
+      - run: bash scripts/build-site.sh # → ./dist（落地页在 /，应用在 /app/）
+
+      - name: Publish ./dist to web-build branch
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./dist
+          publish_branch: web-build
+          # 单提交孤儿分支：每次推送都提交构建产物，不这样做仓库会被历史撑爆。
+          force_orphan: true
+          commit_message: 'build: web from ${{ github.sha }}'
+
+  # ───────────────────────── Android APK ─────────────────────────
+  # 零配置即可跑：不配 secrets 时用仓库里那把固定的侧载密钥签名（所以历次构建
+  # 都能覆盖安装）；配了 ANDROID_KEYSTORE_BASE64 就升级为生产签名。
+  android:
+    name: Android APK
+    needs: test
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      && github.event.inputs.release_tag != ''
+      && github.event.inputs.build_android == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: '17'
+
+      # composite 顺带做了 flutter pub get。提前是安全的：中间的 gomobile 只写
+      # android/app/libs/*.aar、签名步只写 android/key.properties，都与 pub get
+      # 互不读写。
+      - uses: ./.github/actions/flutter-setup
+        with:
+          flutter-version: ${{ github.event.inputs.flutter_version }}
+
+      # 内嵌 frpc（组队的 frp 通道）。best-effort：gomobile 编不出来 APK 照样能编，
+      # 只是不带 frp（gradle 只在 libs/frpmobile.aar 存在时链接它，桥退化为
+      # 「unsupported」）。所以 frp 工具链打嗝从不阻塞发版。
+      - name: Set up Go (embedded frpc)
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - name: Build embedded frpc (Android AAR)
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          NDK_DIR=$(ls -d "$ANDROID_HOME"/ndk/* 2>/dev/null | sort -V | tail -1 || true)
+          if [ -n "$NDK_DIR" ]; then export ANDROID_NDK_HOME="$NDK_DIR"; fi
+          echo "Using NDK: ${ANDROID_NDK_HOME:-<none>}"
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          gomobile init
+          cd native/frpmobile
+          go mod tidy
+          # `gomobile bind` 需要 golang.org/x/mobile 在模块图里，但 frp.go 不 import
+          # 它，`go mod tidy` 会把它剥掉。显式加回来（用模块形式，避免 `.../bind`
+          # 的宿主构建约束报错）。必须在 tidy 之后，否则又被剥掉。
+          go get golang.org/x/mobile@latest
+          mkdir -p ../../android/app/libs
+          gomobile bind -target=android -androidapi 23 -o ../../android/app/libs/frpmobile.aar .
+          ls -lah ../../android/app/libs/ || true
+
+      # 不能把 `secrets.X != ''` 直接写进 step 级 `if:` —— GitHub 的表达式解析器
+      # 拒绝在那个位置解析 secrets 上下文。所以检查放进脚本里：env 为空就早退。
+      - name: Configure Android signing (optional)
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KEYSTORE_B64:-}" ]; then
+            echo "::notice::No ANDROID_KEYSTORE_BASE64 secret — release APK will be signed with the committed stable sideload key (android/keystore/explore-release.jks), so 覆盖安装 works across builds."
+            exit 0
+          fi
+          mkdir -p android/app
+          echo "$KEYSTORE_B64" | base64 -d > android/app/upload.keystore
+          cat > android/key.properties <<EOF
+          storePassword=$STORE_PASS
+          keyPassword=$KEY_PASS
+          keyAlias=$KEY_ALIAS
+          storeFile=upload.keystore
+          EOF
+          echo "::notice::Upload keystore wired — release APK will be production-signed."
+
+      # 通用 APK —— 一个包同时含 armv7 / arm64 / x86_64。大（约 70-100 MB）但装得上
+      # 每台设备，也绕开了 split-per-abi 与已装包签名不同导致的「软件包与现有软件包
+      # 存在冲突」。要给应用商店做分包就在本地跑 `--release --split-per-abi`：
+      # CI 这里的产物是给侧载用的，一包通吃比体积更重要。
+      - name: Build APK (universal)
+        run: flutter build apk --release
+
+      - name: Rename APK
+        id: find_apk
+        run: |
+          set -euo pipefail
+          ls -lah build/app/outputs/flutter-apk/
+          TAG="${{ github.event.inputs.release_tag }}"
+          cp build/app/outputs/flutter-apk/app-release.apk \
+             "explore_journal-${TAG}-android-universal.apk"
+          ls -lah explore_journal-${TAG}-android-universal.apk
+          echo "name=explore_journal-${TAG}-android" >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apks
+          path: ./explore_journal-*-android-universal.apk
+          if-no-files-found: error
+          retention-days: 14
+
+  # ─────────────────────────── iOS IPA ───────────────────────────
+  # 不配 secrets 时产出未签名 IPA（用 AltStore / Sideloadly / TrollStore 侧载）；
+  # 配了 IOS_CERTIFICATE_BASE64 就产出生产签名的 IPA。
+  ios:
+    name: iOS IPA
+    needs: test
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      && github.event.inputs.release_tag != ''
+      && github.event.inputs.build_ios == 'true'
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # composite 顺带做了 flutter pub get。提前是安全的：gomobile 只写
+      # ios/frpmobile/，与 pub get 互不读写；pod install 仍留在原位 —— 它必须
+      # 同时晚于 pub get 与 gomobile，见下。
+      - uses: ./.github/actions/flutter-setup
+        with:
+          flutter-version: ${{ github.event.inputs.flutter_version }}
+
+      # 内嵌 frpc。best-effort，同 Android：Podfile 只在 xcframework 存在时 vendor
+      # 它，AppDelegate 的桥有 `#if canImport` 守卫。必须早于 pod install，
+      # CocoaPods 才能把它捡起来。
+      - name: Set up Go (embedded frpc)
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - name: Build embedded frpc (iOS XCFramework)
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          gomobile init
+          cd native/frpmobile
+          go mod tidy
+          go get golang.org/x/mobile@latest
+          gomobile bind -target=ios -o ../../ios/frpmobile/Frpmobile.xcframework .
+          ls -lah ../../ios/frpmobile/ || true
+
+      # Podfile 读 ios/Flutter/Generated.xcconfig 与 .flutter-plugins-dependencies，
+      # 两者都由 pub get 生成（上面的 composite 已做）；xcframework 是否 vendor 也在
+      # 这时判定，所以这一步必须晚于 gomobile 那步 —— 别把它往上挪。
+      - name: iOS pod install
+        run: cd ios && pod install --repo-update
+
+      # 同 Android 那段：step 级 `if:` 里不能引用 secrets。用一个 detect 步把
+      # 「secret 在不在」变成普通的 step output，后面的步骤 gate 在它上面。
+      - name: Detect iOS signing assets
+        id: detect
+        env:
+          CERT_B64: ${{ secrets.IOS_CERTIFICATE_BASE64 }}
+        run: |
+          if [ -n "${CERT_B64:-}" ]; then
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::iOS signing secrets present — will build a signed IPA."
+          else
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No IOS_CERTIFICATE_BASE64 — will build an unsigned IPA (sideload-only)."
+          fi
+
+      # 证书装进临时 keychain，profile 放到标准的 Library/MobileDevice 路径下，
+      # 这样 `flutter build ipa` / xcodebuild 才找得到。
+      - name: Install code-signing assets
+        if: steps.detect.outputs.signed == 'true'
+        env:
+          CERT_B64: ${{ secrets.IOS_CERTIFICATE_BASE64 }}
+          CERT_PASS: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          PROFILE_B64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN=runner.keychain
+          KEYCHAIN_PASS=$(uuidgen)
+          security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN"
+          security default-keychain -s "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN"
+          security set-keychain-settings -lut 7200 "$KEYCHAIN"
+
+          echo "$CERT_B64" | base64 -d > cert.p12
+          security import cert.p12 -k "$KEYCHAIN" -P "$CERT_PASS" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k "$KEYCHAIN_PASS" "$KEYCHAIN"
+          rm cert.p12
+
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          echo "$PROFILE_B64" | base64 -d \
+            > "$HOME/Library/MobileDevice/Provisioning Profiles/build.mobileprovision"
+
+      - name: Build IPA (unsigned)
+        if: steps.detect.outputs.signed == 'false'
+        # 产出 build/ios/iphoneos/Runner.app（无签名）。把 .app 塞进 Payload/ 再
+        # 打成 zip，结果就是 .ipa 的形状，侧载器（AltStore / Sideloadly）能在安装
+        # 时重签 —— 这是没有 Apple 开发者证书时唯一合法的出包方式。
+        run: |
+          set -euo pipefail
+          flutter build ios --release --no-codesign
+
+          APP=build/ios/iphoneos/Runner.app
+          # ── 打包前先体检 ──────────────────────────────────────────────
+          # 正确的 release .app 里应该嵌着 Flutter 引擎、Dart AOT（App.framework）
+          # 以及每个插件的 framework。CocoaPods 没集成上（比如 Podfile 丢了）时
+          # 应用照样编得出来，但会是个又小又坏的 IPA。宁可在这里大声失败。
+          echo "── Runner.app size ──"; du -sh "$APP"
+          echo "── Frameworks/ ──"
+          ls -lah "$APP/Frameworks" || { echo "::error::Runner.app has NO Frameworks/ directory — CocoaPods did not integrate (check ios/Podfile)."; exit 1; }
+          test -e "$APP/Frameworks/Flutter.framework/Flutter" || { echo "::error::Flutter.framework engine binary missing from the bundle."; exit 1; }
+          test -e "$APP/Frameworks/App.framework/App" || { echo "::error::App.framework (Dart AOT) missing from the bundle."; exit 1; }
+          FW_COUNT=$(ls "$APP/Frameworks" | wc -l | tr -d ' ')
+          echo "Embedded frameworks: $FW_COUNT"
+          if [ "$FW_COUNT" -lt 5 ]; then
+            echo "::error::Only $FW_COUNT frameworks embedded — plugin pods are missing. Expected the engine + Dart + ~8 plugin frameworks."
+            exit 1
+          fi
+
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          TAG="${{ github.event.inputs.release_tag }}"
+          # -y 保留 framework 里的符号链接，而不是把目标内容拷成副本。
+          zip -qry "explore_journal-${TAG}-ios-unsigned.ipa" Payload
+          ls -lah explore_journal-${TAG}-ios-unsigned.ipa
+          SZ=$(stat -f%z "explore_journal-${TAG}-ios-unsigned.ipa")
+          echo "IPA size: $((SZ / 1024 / 1024)) MB"
+          if [ "$SZ" -lt 15000000 ]; then
+            echo "::error::IPA is under 15 MB — that's far too small for this app and means native frameworks are missing."
+            exit 1
+          fi
+
+      - name: Build IPA (signed)
+        if: steps.detect.outputs.signed == 'true'
+        env:
+          EXPORT_METHOD: ${{ secrets.IOS_EXPORT_METHOD || 'development' }}
+          TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          # ExportOptions.plist 与 secret 里的 method/team 对齐。automatic 签名让
+          # 流水线对「实际用了哪张证书 + 哪个 profile」保持诚实。
+          cat > /tmp/ExportOptions.plist <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>${EXPORT_METHOD}</string>
+            <key>teamID</key><string>${TEAM_ID}</string>
+            <key>signingStyle</key><string>automatic</string>
+            <key>stripSwiftSymbols</key><true/>
+            <key>uploadSymbols</key><false/>
+          </dict></plist>
+          EOF
+          flutter build ipa --release --export-options-plist=/tmp/ExportOptions.plist
+          TAG="${{ github.event.inputs.release_tag }}"
+          cp build/ios/ipa/*.ipa "explore_journal-${TAG}-ios.ipa"
+          ls -lah explore_journal-${TAG}-ios.ipa
+          SZ=$(stat -f%z "explore_journal-${TAG}-ios.ipa")
+          echo "IPA size: $((SZ / 1024 / 1024)) MB"
+          if [ "$SZ" -lt 15000000 ]; then
+            echo "::error::Signed IPA under 15 MB — native frameworks likely missing (check ios/Podfile)."
+            exit 1
+          fi
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-ipa
+          path: ./explore_journal-*-ios*.ipa
+          if-no-files-found: error
+          retention-days: 14
+
+  # ───────────────────── 发布 GitHub Release ─────────────────────
+  release:
+    name: GitHub Release
+    needs: [android, ios]
+    # 只要有一个平台成功就发：另一个被取消勾选（skipped）或编失败时，用户仍然
+    # 拿得到编出来的那个。
+    if: >-
+      always()
+      && (needs.android.result == 'success' || needs.ios.result == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # 建 Release 需要
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Android APKs
+        if: needs.android.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: android-apks
+          path: artifacts
+
+      - name: Download iOS IPA
+        if: needs.ios.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: ios-ipa
+          path: artifacts
+
+      - name: List artifacts
+        run: ls -lah artifacts/
+
+      - name: Compose release notes
+        env:
+          TAG: ${{ github.event.inputs.release_tag }}
+          SHA: ${{ github.sha }}
+          FLUTTER_VERSION: ${{ github.event.inputs.flutter_version }}
+        # 说明文字靠翻 `artifacts/` 里的文件名拼出来，而**不是**再读一遍
+        # `secrets.*` 上下文：GitHub 的表达式解析器在很多位置拒绝解析 secrets
+        # （`run:` 块用 ${{ }} 内插正文就是其中之一，会报 "Unrecognized
+        # named-value: secrets"）。看文件名是零副作用地判断签名状态的办法。
+        run: |
+          set -euo pipefail
+          {
+            echo "# Explore Journal ${TAG}"
+            echo
+            echo "Manually-built release. Artifacts attached below."
+            echo
+
+            if ls artifacts/explore_journal-*-android-universal.apk >/dev/null 2>&1; then
+              echo "## Android"
+              for f in artifacts/explore_journal-*-android-universal.apk; do
+                bn=$(basename "$f")
+                echo "- \`$bn\` — universal build, installs on every Android device (armv7 / arm64 / x86_64 all included)"
+              done
+              echo
+              echo "_Signing: your own upload key if you set \`ANDROID_KEYSTORE_BASE64\`, otherwise the committed stable sideload key — either way every build signs identically, so 覆盖安装（in-place upgrade）works._"
+              echo
+              echo "> **覆盖安装：** 现在所有 CI / 本地 release 包都用同一个固定密钥签名，可以直接覆盖升级、无需卸载。**仅有一次例外**：如果你机器上还装着本次改动之前的旧包（用的是临时 debug 密钥），那一次需要先卸载旧版再装新版；之后历次升级都不用再卸载了。"
+              echo
+            fi
+
+            if ls artifacts/explore_journal-*-ios*.ipa >/dev/null 2>&1; then
+              echo "## iOS"
+              for f in artifacts/explore_journal-*-ios*.ipa; do
+                bn=$(basename "$f")
+                echo "- \`$bn\`"
+              done
+              echo
+              if ls artifacts/explore_journal-*-ios-unsigned.ipa >/dev/null 2>&1; then
+                echo "_Unsigned build — install via AltStore / Sideloadly / TrollStore. NOT submittable to App Store as-is._"
+              else
+                echo "_Production-signed build. Check ExportOptions for the method (development / ad-hoc / app-store)._"
+              fi
+              echo
+            fi
+
+            echo "---"
+            echo
+            echo "Built from \`${SHA}\` on Flutter \`${FLUTTER_VERSION:-仓库钉点（.github/actions/flutter-setup）}\`."
+            echo "See \`docs/publishing.md\` for store-submission guidance."
+          } > /tmp/notes.md
+          cat /tmp/notes.md
+
+      - name: Create / update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release_tag }}
+          name: ${{ github.event.inputs.release_tag }}
+          body_path: /tmp/notes.md
+          prerelease: ${{ github.event.inputs.prerelease == 'true' }}
+          # 追加资产：同一个 tag 重跑时不会因为文件已存在而失败。
+          fail_on_unmatched_files: false
+          files: |
+            artifacts/*.apk
+            artifacts/*.ipa

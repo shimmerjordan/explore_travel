@@ -1,0 +1,75 @@
+name: 测试
+
+# ════════════════════════════════════════════════════════════════════════
+# 全仓库唯一的测试定义：三种语言的门禁一次跑完。
+#
+#   · Flutter —— flutter analyze --fatal-infos + 全量 flutter test（约 500 个）
+#   · Node    —— backends/ 的排行榜与组队中继（规范化 JSON、Ed25519 验签、限流）
+#   · Rust    —— web-front/ 的 SSRF 谓词、Argon2 域分离、密文信封、路径穿越
+#
+# 为什么不自己挂 push / pull_request：它由 build.yml 在每次 push / PR 上作为第一个
+# job 调用（`uses: ./.github/workflows/test.yml`），下游的镜像 / 站点 / 发版包全部
+# `needs: test`。如果这里再挂一遍 push，同一次提交就要把整套测试跑两遍。
+#
+# 这么排的收益有两条，缺一不可：
+#   ① 测试只定义一处。以前 4 条流水线里有 4 份 analyze + test 的复制，改一处漏三处。
+#   ② 「测试红了就不发布」是真的。跨 workflow 没有依赖关系，两条并行的流水线互不
+#      等待 —— 以前 flutter-check 红了照样能把镜像推上 GHCR。
+#
+# workflow_dispatch 留着是为了能单独手动跑一遍（Actions 页 → 测试 → Run workflow），
+# 以及让这条流水线在侧边栏里可见。
+# ════════════════════════════════════════════════════════════════════════
+
+on:
+  workflow_call:
+    inputs:
+      flutter-version:
+        description: 留空 = 用 .github/actions/flutter-setup 里的钉点（唯一钉点）
+        type: string
+        required: false
+        default: ''
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: analyze + flutter/node/rust test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # 先跑最便宜的：后端零 npm 依赖，装个 node 就能跑，十几秒出结果。
+      # 快的排前面 = 常见错误更早失败，不用等 Flutter SDK 下载完。
+      - uses: actions/setup-node@v4
+        with:
+          # 与镜像运行时同版本（根 Dockerfile 的 node:22-bookworm-slim）。
+          node-version: 22
+
+      - name: Node · backends 单元与集成测试
+        working-directory: backends
+        run: npm test
+
+      # Flutter 版本钉在 .github/actions/flutter-setup 里（连 pub get 一起做）。
+      # 只有手动发版会传 flutter-version 覆盖它，保证「查的」和「发的」是同一套 SDK。
+      - uses: ./.github/actions/flutter-setup
+        with:
+          flutter-version: ${{ inputs.flutter-version }}
+
+      # --fatal-infos：info 级别（多半是 lint 建议）也算失败。宁可门禁严一点，
+      # 也别让「只是 info」慢慢攒成没人敢看的几百条。
+      - name: Flutter · analyze
+        run: flutter analyze --fatal-infos
+
+      # expanded 逐条打印用例名：失败时能直接在日志里定位到是哪一个；默认的
+      # compact 输出靠原地刷新一行，在 CI 日志里什么都看不见。
+      # test/tool/gen_app_icon_test.dart 会往 build/ 下写几张 PNG，是预期行为。
+      - name: Flutter · test
+        run: flutter test --reporter expanded
+
+      # Rust 放最后：ring 与 argon2 要现编，冷缓存下是这里最慢的一步。
+      - name: Rust · web-front 单元测试
+        working-directory: web-front
+        run: cargo test --locked

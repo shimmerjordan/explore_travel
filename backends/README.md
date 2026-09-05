@@ -138,14 +138,15 @@ ssh user@ecs 'cd /opt/ej-backend && docker compose up -d --build'
 数组里加一行；路由按 `/<module>/v1/…` 命名空间（排行榜因协议文档要求
 保留根路径）。
 
-CI：`.github/workflows/image.yml`（Actions 页显示为「**应用镜像（GHCR）**」）。
+CI：`.github/workflows/build.yml` 的 `image` job（Actions 页显示为「**构建与发布**」）。
 **2026-09-05 起本服务与 `web-front` 合并进同一个镜像同一个容器**——两个进程由
 supervisord 带起，仍各自以 UID 1000 / 65532 运行、各写自己的数据目录，对外端口
 不变（48081 / 48080）。原先的 `backend.yml` 与 `web-front.yml` 两条流水线已合并
-成一条：跑 `npm test` + `cargo test` + Flutter 门禁，交叉编译双架构，对两个架构
-**各跑两套**容器级验证（本服务的完整 Docker E2E + web-front 的完整 API 冒烟），
-再加一步验证从旧数据布局升级的迁移，全过之后才把双架构 manifest 推到 GHCR
-（`ghcr.io/<owner>/<repo>/app`）。没有任何未经真容器验证的镜像会进 registry。
+成一个 job：`npm test` + `cargo test` + Flutter 门禁由 `test.yml` 统一跑（红了这个
+job 不启动），随后交叉编译双架构，对两个架构**各跑两套**容器级验证（本服务的完整
+Docker E2E + web-front 的完整 API 冒烟），再加一步验证从旧数据布局升级的迁移，
+全过之后才把双架构 manifest 推到 GHCR（`ghcr.io/<owner>/<repo>/app`）。没有任何
+未经真容器验证的镜像会进 registry。
 PR 只验证不发布。摘要页会列出镜像标签、digest、验证项、升级顺序与部署命令。
 
 部署用仓库根的 `docker-compose.ghcr.yml`；本目录下那份只保留作回退与单独调试。

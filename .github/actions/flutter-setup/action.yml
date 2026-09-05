@@ -1,9 +1,8 @@
 name: Flutter SDK 安装（版本的唯一钉点）
 description: >-
   subosito/flutter-action + flutter pub get。Flutter 版本号**只在这里**钉一次。
-  以前 deploy-web / web-front / release 三条流水线各自硬编码同一个版本号，靠一行
-  「与 xx 保持一致」的注释互相提醒 —— 注释不会让 CI 变红，漂了也没人知道。
-  现在升级 Flutter 只改这里的 default（release 的手动输入可临时覆盖）。
+  以前每条流水线各自硬编码同一个版本号，靠一行「与 xx 保持一致」的注释互相提醒 ——
+  注释不会让 CI 变红，漂了也没人知道。现在升级 Flutter 只改下面那个 PIN。
 
 # 为什么必须钉版本，不能只写 channel: stable（钉点在哪，理由就放在哪）：
 #
@@ -20,10 +19,13 @@ description: >-
 inputs:
   flutter-version:
     description: >-
-      Flutter SDK 版本。默认值就是全仓库的钉点；只有 release 的手动输入会覆盖它，
-      其余流水线一律不传、吃默认。
+      指定 SDK 版本。**留空 = 用下面的钉点**，这也是除手动发版以外所有调用方的用法。
+      默认值刻意是空串而不是版本号：调用方常常要把一个「可能为空」的
+      workflow 输入直接透传进来（发版时可临时指定 SDK），如果这里的默认值是版本号，
+      透传空串会覆盖掉默认值、把版本号变成空 —— 所以空值归一化放在下面那步里做，
+      钉点始终只有一处。
     required: false
-    default: '3.32.1'
+    default: ''
   pub-get:
     description: >-
       装完 SDK 是否顺手 flutter pub get。几乎总是要的；留个开关给必须自己控制
@@ -31,13 +33,29 @@ inputs:
     required: false
     default: 'true'
 
+outputs:
+  version:
+    description: 实际使用的 SDK 版本（调用方传了就是它，没传就是钉点）
+    value: ${{ steps.pin.outputs.version }}
+
 runs:
   using: composite
   steps:
+    # ↓↓↓ 全仓库唯一的 Flutter 版本钉点 ↓↓↓
+    - name: 解析 SDK 版本
+      id: pin
+      shell: bash
+      env:
+        REQUESTED: ${{ inputs.flutter-version }}
+      run: |
+        PIN='3.32.1'
+        echo "version=${REQUESTED:-$PIN}" >> "$GITHUB_OUTPUT"
+        echo "Flutter SDK: ${REQUESTED:-$PIN}$([ -n "$REQUESTED" ] && echo '（调用方指定）' || echo '（仓库钉点）')"
+
     - uses: subosito/flutter-action@v2
       with:
         channel: stable
-        flutter-version: ${{ inputs.flutter-version }}
+        flutter-version: ${{ steps.pin.outputs.version }}
         # 缓存 SDK 本体，省下每次几百 MB 的下载。缓存 key 含版本号，改钉点自动失效。
         cache: true
 

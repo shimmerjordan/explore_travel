@@ -5,7 +5,7 @@
 # The landing's "打开 Web 回忆版 / Open the web app" button links to /app/.
 #
 # Output: ./dist  — deploy this directory to any static host (Vercel / Cloudflare
-# Pages / Nginx / NAS web server). Used by .github/workflows/deploy-web.yml.
+# Pages / Nginx / NAS web server). Used by the `site` job in .github/workflows/build.yml.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
