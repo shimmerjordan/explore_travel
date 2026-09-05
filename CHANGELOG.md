@@ -24,8 +24,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 
   合并解决的不只是条数，还有两个真问题：① `analyze` + `test` 有四份复制，改一处漏三处；② **跨 workflow 没有依赖关系**，两条并行的流水线互不等待——`flutter-check` 红了照样能把镜像推上 GHCR、把站点发到公网。现在 `build.yml` 的第一个 job 就是 `uses: ./.github/workflows/test.yml`，镜像 / 站点 / 发版包全部 `needs: test`，「测试红了就不发布」是真的依赖关系。测试只定义在 `test.yml` 一处（Flutter analyze + 约 500 个 test、后端 `node --test`、web-front `cargo test`）。
 
-- 新增 `changes` job：workflow 级 `paths` 粗筛之后，再用真实 diff 细筛到 job 级。所以只改 `test/**` 不会去编 30 分钟的镜像，只改 `website/**` 不会重建镜像。算不出 diff 时（手动触发 / 首推 / 强推）一律按「全部改动」处理——宁可多编一次，也不能因为 diff 没算对而漏掉一次发布。
-- 手动发版入口从「Release (manual)」搬到「构建与发布」的 `Run workflow`：**`release_tag` 留空 = 只重建镜像与站点**，填了 tag = 只出 APK / IPA 并发版。concurrency group 带上 tag，所以一次发版构建不会被随后的普通 push 取消。
+- **门禁自动化，发布手动化**：push 只触发 `test.yml`；`build.yml` 改成**只能手动触发**。它的每个 job 都对外产生副作用而且都很贵——`image` 约 40 分钟且成功即把 GHCR 上的 `latest` 顶掉（NAS 上 compose 拉的就是它），`site` 强制重写 `web-build` 分支、Vercel 随即换掉公开站点，`release` 建 GitHub Release。这些该由人决定「现在发」，而不是由「我推了一行代码」决定。push 回答「代码是好的吗」，手动触发回答「现在要发出去吗」。
+
+  手动触发仍然绕不过门禁：第一个 job 就是 `uses: ./.github/workflows/test.yml`，与 push 上跑的是同一份定义。
+
+- 手动触发的勾选框取代了原先按 diff 细筛的 `changes` job（手动触发本来就没有 diff 可算）：`build_image` / `build_site` 分别控制发不发镜像与站点，`publish` 取消勾选 = 编译与四套冒烟照常全跑但不推 GHCR（想验证镜像改动而不顶掉 `latest` 时用它）。发版入口从「Release (manual)」搬到这里：`release_tag` 填了才出 APK / IPA，此时不动镜像与站点。
+- `test.yml` 加一步 `flutter build web --release`。`flutter test` 跑在 Dart VM 上、不经过 dart2js，web 端独有的编译失败它一个都看不见——`flutter-setup` 里记的那次 `flutter_quill` 事故正是 analyze 与 test 全绿、web 编不出来。合并前 `deploy-web.yml` 每次 push 都会编一次 web，顺带做了这个门禁；发布改成手动之后那份覆盖没了，所以显式补回自动侧。
+- `backends/scripts/docker-e2e.sh` 的启动等待从 20 秒放宽到 150 秒（`E2E_BOOT_TIMEOUT` 可覆盖），并每 10 秒打一行进度。CI 的 arm64 冒烟连续两次挂在这一步，而**同一个容器**在 `web-front` 那套冒烟里却过了——唯一的差别就是它等 60 秒。合并成单镜像后启动要做的事更多（entrypoint 建目录 / 改属主 / 迁旧数据 → supervisord 拉起两个进程），QEMU 下慢一个数量级。本机原生 1-2 秒就绪，所以放宽是纯保险。
+- `test.yml` 的触发用 `paths-ignore` 而不是 `paths` 白名单：门禁的安全方向是「拿不准就跑」——白名单漏掉一个新目录等于那部分代码静默地没有门禁，黑名单漏掉一个纯文档目录只是白跑一次。concurrency group 按 event 区分，所以一次手动发布的门禁不会把同一个 ref 上正在跑的 push 门禁顶掉（**不能**用 `event_name == 'workflow_call'` 判断「是不是被调用」：被调用时看到的是调用方的 event）。
 - Flutter 版本钉点仍只有一处（`.github/actions/flutter-setup`），但默认值改成空串：调用方常要把一个「可能为空」的 workflow 输入直接透传进来，默认值若是版本号，透传空串反而会把版本号覆盖成空。空值归一化改在 composite 内部做。
 - 删掉 `image-build-setup` composite。它当初的理由是「两条镜像流水线唯一真正重复的那一段」，合并后只剩一个调用方，纯粹是一层间接。
 

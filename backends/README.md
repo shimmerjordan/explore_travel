@@ -138,7 +138,8 @@ ssh user@ecs 'cd /opt/ej-backend && docker compose up -d --build'
 数组里加一行；路由按 `/<module>/v1/…` 命名空间（排行榜因协议文档要求
 保留根路径）。
 
-CI：`.github/workflows/build.yml` 的 `image` job（Actions 页显示为「**构建与发布**」）。
+CI：`.github/workflows/build.yml` 的 `image` job（Actions 页显示为「**构建与发布**」，
+**只能手动触发**；每次 push 自动跑的是 `test.yml`）。
 **2026-09-05 起本服务与 `web-front` 合并进同一个镜像同一个容器**——两个进程由
 supervisord 带起，仍各自以 UID 1000 / 65532 运行、各写自己的数据目录，对外端口
 不变（48081 / 48080）。原先的 `backend.yml` 与 `web-front.yml` 两条流水线已合并

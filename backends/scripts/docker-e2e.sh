@@ -33,12 +33,34 @@ else
   docker build -q -t "$IMG" . >/dev/null
 fi
 
+# 启动等待预算。原值是 100 × 0.2s = 20 秒，在 QEMU 下不够：CI 的 arm64 冒烟
+# 2026-09-05 与 09-06 两次都恰好挂在这一步，而**同一个容器**在 web-front 那套
+# 冒烟里却过了 —— 唯一的差别就是它等 150 × 0.4s = 60 秒。合并成单镜像之后启动
+# 要做的事更多（entrypoint 建目录 / 改属主 / 迁旧数据 → supervisord 拉起 Rust
+# 与 Node 两个进程），模拟执行下慢一个数量级。
+#
+# 本机原生启动 1-2 秒就绪，所以放宽上限是纯保险、不影响本地速度：轮询 0.2 秒
+# 一次的粒度没变，就绪即返回。
+BOOT_TIMEOUT=${E2E_BOOT_TIMEOUT:-150}
+
 wait_healthy() {
-  for _ in $(seq 1 100); do
-    if curl -fsS "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; then return 0; fi
+  local tries=$(( BOOT_TIMEOUT * 5 ))   # 每次 sleep 0.2s
+  local i=0
+  while [ "$i" -lt "$tries" ]; do
+    if curl -fsS "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; then
+      if [ "$i" -gt 25 ]; then echo "  (容器就绪，等了 $(( i / 5 )) 秒)"; fi
+      return 0
+    fi
+    i=$(( i + 1 ))
+    # 每 10 秒打一行：CI 日志上要能看出是在等，而不是卡死了。
+    if [ $(( i % 50 )) -eq 0 ]; then
+      echo "  等待容器就绪… $(( i / 5 ))s / ${BOOT_TIMEOUT}s"
+    fi
     sleep 0.2
   done
-  echo "container never became healthy"; docker logs "$NAME" | tail -20; return 1
+  echo "container never became healthy after ${BOOT_TIMEOUT}s"
+  docker logs "$NAME" 2>&1 | tail -40
+  return 1
 }
 
 say "round 1: open mode (full API + data correctness + relay + docker-restart persistence)"
@@ -65,13 +87,15 @@ E2E_BASE_URL="http://127.0.0.1:$PORT" \
 E2E_LB_TOKEN=e2e-lb-secret E2E_GROUP_TOKEN=e2e-group-secret \
   node --test --test-force-exit test/docker-e2e.test.js
 
-say "docker healthcheck turns healthy"
-for _ in $(seq 1 60); do
+# 同样放宽。镜像的 HEALTHCHECK 是 --interval=30s，而且要**同时**探两个服务
+# （web-front 48080 + 本服务 48081），所以探测点落在 30 / 60 / 90… 秒；QEMU 下
+# 前一两次很可能还没就绪，原来的 60 秒上限只够两次探测。
+for _ in $(seq 1 "$BOOT_TIMEOUT"); do
   H=$(docker inspect -f '{{.State.Health.Status}}' "$NAME")
   [ "$H" = healthy ] && break
   sleep 1
 done
-[ "$H" = healthy ] || { echo "healthcheck stuck at: $H"; exit 1; }
+[ "$H" = healthy ] || { echo "healthcheck stuck at: $H"; docker logs "$NAME" 2>&1 | tail -40; exit 1; }
 echo "healthcheck: $H"
 
 say "ALL DOCKER E2E PASSED"

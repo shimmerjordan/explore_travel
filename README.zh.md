@@ -171,9 +171,10 @@ docker compose up -d          # 默认监听 :48080
 ### 部署 Web 版
 
 `scripts/build-site.sh` 会拼出一个静态站——落地页在 `/`、Flutter App 在 `/app/`——输出到
-`./dist`。CI（[`.github/workflows/build.yml`](.github/workflows/build.yml) 的 `site` job）在每次
-推送 `main` 时构建，并把产物发布到 `web-build` 分支，由 Vercel / Cloudflare Pages 直接部署
-（宿主端无需 Flutter SDK）。
+`./dist`。[`.github/workflows/build.yml`](.github/workflows/build.yml) 的 `site` job 负责构建并把
+产物发布到 `web-build` 分支，由 Vercel / Cloudflare Pages 直接部署（宿主端无需 Flutter SDK）。
+这条流水线**只能手动触发**（Actions 页 → 构建与发布 → Run workflow），所以一次 push 不会
+悄悄把公开站点换掉。
 
 📖 **完整部署与测试教程：** [docs/web-display-deploy.md](docs/web-display-deploy.md)
 

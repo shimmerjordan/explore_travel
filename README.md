@@ -230,9 +230,11 @@ banner with an inline change-password form until it is.
 ### Deploying the web build
 
 `scripts/build-site.sh` assembles one static site — promo landing at `/`, the Flutter app at
-`/app/` — into `./dist`. CI ([`.github/workflows/build.yml`](.github/workflows/build.yml), the
-`site` job) builds it on every push to `main` and publishes the output to a `web-build` branch,
-which Vercel / Cloudflare Pages deploy directly (no Flutter SDK needed on the host).
+`/app/` — into `./dist`. The `site` job in
+[`.github/workflows/build.yml`](.github/workflows/build.yml) builds it and publishes the output
+to a `web-build` branch, which Vercel / Cloudflare Pages deploy directly (no Flutter SDK needed
+on the host). That workflow is **manual only** — Actions → 构建与发布 → Run workflow — so a push
+never silently redeploys the public site.
 
 📖 **Full deploy & test walkthrough:** [docs/web-display-deploy.md](docs/web-display-deploy.md)
 

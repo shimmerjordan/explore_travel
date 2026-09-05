@@ -14,18 +14,27 @@ name: 构建与发布
 #   · analyze + test 有 4 份复制，改一处漏三处；
 #   · 跨 workflow 没有依赖关系，测试红了照样能把镜像推上 GHCR、把站点发到公网；
 #   · 一次 push 亮 3 条流水线，得点进 3 个地方才知道这次到底成没成。
-# 现在一次 push 只有一条运行记录，第一个 job 是测试，红了后面全不动。
 #
-# ── 触发与跳过 ──────────────────────────────────────────────────────────
-# workflow 级 paths 是三类产出物输入的并集（粗筛）；job 级再由 `changes` 用真实
-# diff 细筛，所以只改 test/ 不会去编 30 分钟的镜像，只改 website/ 不会重建镜像。
-# 算不出 diff 时（手动触发 / 首推 / 强推）一律按「全都要构建」处理 —— 宁可多编
-# 一次，也不能因为 diff 没算对而漏掉一次发布。
+# ── 这条流水线只能手动触发 ──────────────────────────────────────────────
+# **push 不会触发它。** 每次 push 自动跑的只有 test.yml。理由是这里的每一个 job
+# 都是「对外发生副作用」的动作，而且都很贵：
+#   · image  —— 交叉编译两个架构 + 在 QEMU 下跑四套容器冒烟，约 40 分钟，
+#                成功即把 GHCR 上的 `latest` 顶掉（NAS 上 compose 拉的就是它）
+#   · site   —— 强制重写 web-build 分支，Vercel 随即把公开站点换掉
+#   · release —— 建 / 更新 GitHub Release
+# 这些该由人决定「现在发」，而不是由「我推了一行代码」决定。所以门禁自动化、
+# 发布手动化：push 只回答「代码是好的吗」，这条流水线回答「现在要发出去吗」。
 #
-# ── 手动发版 ────────────────────────────────────────────────────────────
-# Actions 页 → 构建与发布 → Run workflow：
-#   · release_tag 留空 → 只重建镜像与站点（等价于一次普通 push）
-#   · release_tag 填 v0.2.0 → 只出 APK / IPA 并发版，不动镜像与站点
+# 也因此这里不再需要 workflow 级 paths 与按 diff 细筛的 changes job —— 手动触发
+# 本来就没有 diff 可算，改由下面的勾选框直接表达意图。
+#
+# ── 怎么用 ──────────────────────────────────────────────────────────────
+# Actions 页 → 构建与发布 → Run workflow。第一个 job 一定是测试（调用 test.yml，
+# 与 push 上跑的是同一份定义），红了后面全不动 —— 手动发布也绕不过门禁。
+#
+#   发镜像与站点     release_tag 留空，按需勾 build_image / build_site
+#   只验证不发布     publish 取消勾选（编 + 冒烟全跑，不推 GHCR）
+#   出 APK / IPA     release_tag 填 v0.2.0（此时不动镜像与站点）
 #
 # 可选 secrets（不配也能跑，产出降级为可侧载的包）：
 #   ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD
@@ -35,54 +44,34 @@ name: 构建与发布
 # ════════════════════════════════════════════════════════════════════════
 
 on:
-  push:
-    branches: [main]
-    paths: &paths
-      # ── 镜像的输入 ────────────────────────────────────────────────────
-      - 'Dockerfile'
-      - '.dockerignore'
-      - 'deploy/**'
-      - 'web-front/**'
-      - 'backends/**'
-      # pubspec 里声明打进 App 的那三个 docs 也是 Flutter 构建的输入。少了它们，
-      # 只改内置文档时镜像不重建，镜像里带的还是旧前端，而且没有任何信号。
-      - 'docs/leaderboard-server-api.md'
-      - 'docs/self-host-server-deploy.md'
-      - 'docs/self-host-client-config.md'
-      # ── 站点的输入 ────────────────────────────────────────────────────
-      - 'website/**'
-      - 'scripts/build-site.sh'
-      # ── 三者共用的 Flutter 输入 ───────────────────────────────────────
-      - 'lib/**'
-      - 'web/**'
-      - 'assets/**'   # 字体 / 贴图也是 Flutter 构建的输入
-      - 'pubspec.yaml'
-      - 'pubspec.lock'
-      # ── 只影响测试的输入 ──────────────────────────────────────────────
-      - 'test/**'
-      - 'analysis_options.yaml'
-      # ── 流水线自身 ────────────────────────────────────────────────────
-      - '.github/workflows/build.yml'
-      - '.github/workflows/test.yml'
-      - '.github/actions/flutter-setup/**'   # Flutter 版本钉在那里
-  pull_request:
-    paths: *paths
   workflow_dispatch:
     inputs:
       release_tag:
-        description: '发版 tag（如 v0.2.0）。留空 = 只重建镜像与站点，不发版。'
+        description: '发版 tag（如 v0.2.0）。留空 = 发镜像 / 站点；填了 = 只出 APK / IPA 并发版。'
         required: false
         default: ''
+      build_image:
+        description: '构建并发布 GHCR 镜像？（约 40 分钟）'
+        type: boolean
+        default: true
+      build_site:
+        description: '重新发布公开站点（web-build 分支 → Vercel）？'
+        type: boolean
+        default: true
+      publish:
+        description: '真的推 GHCR？取消勾选 = 只编译 + 跑四套冒烟，不推。'
+        type: boolean
+        default: true
       prerelease:
-        description: '标记为预发布？'
+        description: '发版时标记为预发布？'
         type: boolean
         default: true
       build_android:
-        description: '构建 Android APK？'
+        description: '发版时构建 Android APK？'
         type: boolean
         default: true
       build_ios:
-        description: '构建 iOS IPA？'
+        description: '发版时构建 iOS IPA？'
         type: boolean
         default: true
       flutter_version:
@@ -90,17 +79,12 @@ on:
         required: false
         default: ''
 
-# group 里带上 release_tag：一次发版构建不该被随后的普通 push 取消。
-# push 与「留空的手动触发」落在同一个 ci 组里，后来的取消先前的。
-#
-# 下面所有判断都写成「先看 event_name，再看 inputs」两段式，而不是直接比
-# `inputs.release_tag == ''`：非 workflow_dispatch 的事件里 inputs 是 null，
-# 要靠 GitHub 把 null 与空串都强转成 0 才能相等 —— 能用但太隐晦，两段式一眼可读。
+# group 里带上 release_tag：一次发版构建不该被随后的一次「重发镜像」取消，两者
+# 落在不同的组里。同一类的第二次触发会取消第一次（手动触发通常是「我按错了，
+# 重来一次」）—— 但发版例外，跑到一半的发版不该被顶掉。
 concurrency:
-  group: build-${{ github.ref }}-${{ github.event.inputs.release_tag || 'ci' }}
-  cancel-in-progress: >-
-    ${{ github.event_name != 'workflow_dispatch'
-        || github.event.inputs.release_tag == '' }}
+  group: build-${{ github.ref }}-${{ github.event.inputs.release_tag || 'artifacts' }}
+  cancel-in-progress: ${{ github.event.inputs.release_tag == '' }}
 
 permissions:
   contents: read
@@ -109,56 +93,6 @@ env:
   IMAGE: ghcr.io/${{ github.repository }}/app
 
 jobs:
-  # ───────────────────────── 改动范围 ─────────────────────────
-  changes:
-    name: 判定改动范围
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      image: ${{ steps.f.outputs.image }}
-      site: ${{ steps.f.outputs.site }}
-    steps:
-      # fetch-depth: 0 才能对 base 做 diff。本仓库全史 36 MB，代价可以忽略。
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - id: f
-        env:
-          EVENT: ${{ github.event_name }}
-          BASE: ${{ github.event.pull_request.base.sha }}
-          BEFORE: ${{ github.event.before }}
-        run: |
-          set -euo pipefail
-          FILES=''
-          case "$EVENT" in
-            pull_request)
-              FILES=$(git diff --name-only "$BASE" HEAD || true) ;;
-            push)
-              # 强推与分支首推时 before 是全 0 或已不可达，此时算不出 diff。
-              if [ -n "${BEFORE:-}" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ] \
-                 && git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
-                FILES=$(git diff --name-only "$BEFORE" HEAD || true)
-              fi ;;
-          esac
-
-          if [ -z "$FILES" ]; then
-            echo "::notice::无法确定改动范围（手动触发 / 首推 / 强推），按「全部改动」处理"
-            printf 'image=true\nsite=true\n' >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "── 本次改动 ──"; printf '%s\n' "$FILES" | sed 's/^/  /'
-
-          # 注意 `^web/` 不会命中 `web-front/`（web 后面紧跟的是 -，不是 /）。
-          IMAGE_RE='^(Dockerfile$|\.dockerignore$|deploy/|web-front/|backends/|lib/|web/|assets/|pubspec\.(yaml|lock)$|docs/(leaderboard-server-api|self-host-server-deploy|self-host-client-config)\.md$|\.github/(workflows/(build|test)\.yml$|actions/flutter-setup/))'
-          SITE_RE='^(website/|scripts/build-site\.sh$|lib/|web/|assets/|pubspec\.(yaml|lock)$|\.github/(workflows/(build|test)\.yml$|actions/flutter-setup/))'
-
-          hit() { printf '%s\n' "$FILES" | grep -Eq "$1" && echo true || echo false; }
-          IMG=$(hit "$IMAGE_RE"); SITE=$(hit "$SITE_RE")
-          echo "── 结论 ── 镜像：$IMG · 站点：$SITE"
-          printf 'image=%s\nsite=%s\n' "$IMG" "$SITE" >> "$GITHUB_OUTPUT"
-
   # ───────────────────────── 门禁 ─────────────────────────
   # 三种语言的测试定义在 test.yml 里（唯一一处）。下面每个 job 都 needs 它，
   # 所以「测试红了就不发布」是真的依赖关系，不是两条流水线各自跑各自的。
@@ -179,14 +113,14 @@ jobs:
   # 为什么是交叉编译而不是 QEMU 模拟编译：在 QEMU 下编译 Rust 单架构就要 40 分钟
   # 以上（ring 还要现编 C 与汇编），交叉编译在原生速度下几分钟完事。见根 Dockerfile。
   #
-  # PR 只验证不推送；只有 main 上的 push 才会发布 latest。
+  # `publish` 取消勾选时，编译与四套冒烟照常全跑，只是不登录、不算标签、不推送 ——
+  # 想验证一次镜像改动而不顶掉 GHCR 上的 `latest` 时用它。
   image:
     name: GHCR 镜像（双架构 + 两套冒烟）
-    needs: [changes, test]
+    needs: test
     if: >-
-      needs.changes.outputs.image == 'true'
-      && (github.event_name != 'workflow_dispatch'
-          || github.event.inputs.release_tag == '')
+      github.event.inputs.release_tag == ''
+      && github.event.inputs.build_image == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -223,8 +157,7 @@ jobs:
       - uses: docker/setup-buildx-action@v3
 
       - name: 登录 GHCR
-        # fork 来的 PR 拿不到 packages:write，登录会直接失败。
-        if: github.event_name != 'pull_request'
+        if: github.event.inputs.publish == 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -233,7 +166,7 @@ jobs:
 
       - name: 计算镜像标签
         id: meta
-        if: github.event_name != 'pull_request'
+        if: github.event.inputs.publish == 'true'
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE }}
@@ -332,7 +265,7 @@ jobs:
 
       - name: 推送双架构 manifest
         id: push
-        if: github.event_name != 'pull_request'
+        if: github.event.inputs.publish == 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -356,13 +289,14 @@ jobs:
           JOB_STATUS: ${{ job.status }}
           TAGS: ${{ steps.meta.outputs.tags }}
           DIGEST: ${{ steps.push.outputs.digest }}
-          IS_PR: ${{ github.event_name == 'pull_request' }}
+          # publish 取消勾选 = 只验证不推送。摘要按这个分叉，别让人以为发出去了。
+          VERIFY_ONLY: ${{ github.event.inputs.publish != 'true' }}
         run: |
           S="$GITHUB_STEP_SUMMARY"
 
           if [ "$JOB_STATUS" = success ]; then
-            if [ "$IS_PR" = true ]; then
-              echo "## ✅ 应用镜像验证通过（PR 不发布）" >> "$S"
+            if [ "$VERIFY_ONLY" = true ]; then
+              echo "## ✅ 应用镜像验证通过（本次只验证，未推送）" >> "$S"
             else
               echo "## ✅ 应用镜像已发布到 GHCR" >> "$S"
             fi
@@ -420,11 +354,12 @@ jobs:
 
           VERIFIED
 
-          if [ "$IS_PR" = true ]; then
+          if [ "$VERIFY_ONLY" = true ]; then
             cat >> "$S" <<'PRNOTE'
           ### 本次不发布
 
-          PR 只做验证。合并到 `main` 后会自动推 `latest` 与 `sha-<7位>` 两个标签。
+          `publish` 没有勾选，所以只编译 + 跑冒烟，没有推送。同一次运行重新勾上
+          `publish` 再跑一遍即可发布（buildx 的 gha 缓存已经热了，会快很多）。
 
           PRNOTE
             exit 0
@@ -555,12 +490,10 @@ jobs:
   # 就是个可直接部署的产物，NAS / Nginx / Pages 用同样的设置都能托管。
   site:
     name: 公开站点 → web-build
-    needs: [changes, test]
+    needs: test
     if: >-
-      needs.changes.outputs.site == 'true'
-      && github.event_name != 'pull_request'
-      && (github.event_name != 'workflow_dispatch'
-          || github.event.inputs.release_tag == '')
+      github.event.inputs.release_tag == ''
+      && github.event.inputs.build_site == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -588,8 +521,7 @@ jobs:
     name: Android APK
     needs: test
     if: >-
-      github.event_name == 'workflow_dispatch'
-      && github.event.inputs.release_tag != ''
+      github.event.inputs.release_tag != ''
       && github.event.inputs.build_android == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 40
@@ -693,8 +625,7 @@ jobs:
     name: iOS IPA
     needs: test
     if: >-
-      github.event_name == 'workflow_dispatch'
-      && github.event.inputs.release_tag != ''
+      github.event.inputs.release_tag != ''
       && github.event.inputs.build_ios == 'true'
     runs-on: macos-14
     timeout-minutes: 60
