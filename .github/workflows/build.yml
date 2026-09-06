@@ -73,6 +73,14 @@ on:
         description: 'GitHub Release 标记为预发布？'
         type: boolean
         default: true
+      on_conflict:
+        description: '这个版本号已经发过了怎么办'
+        type: choice
+        options:
+          - pre          # 自动加 -pre.N 发一个新的（默认，不动已发布的东西）
+          - overwrite    # 覆盖：tag 移到当前 commit，Release 与镜像 tag 一并顶掉
+          - fail         # 直接失败
+        default: pre
 
 # 一次发布跑到一半不该被顶掉，所以不取消进行中的运行 —— 第二次触发排队等着。
 concurrency:
@@ -96,8 +104,14 @@ jobs:
     outputs:
       version: ${{ steps.v.outputs.version }}
       tag: ${{ steps.v.outputs.tag }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+      overwrite: ${{ steps.v.outputs.overwrite }}
     steps:
       - uses: actions/checkout@v4
+        # fetch-depth: 0 —— resolve-version.sh 要读已有 tag 才能判断这个版本号
+        # 发没发过。默认的浅克隆一个 tag 都看不到, 判定会永远认为"没发过"。
+        with:
+          fetch-depth: 0
       - id: v
         env:
           OVERRIDE: ${{ github.event.inputs.version }}
@@ -111,7 +125,15 @@ jobs:
             V="$FROM_CHANGELOG"
             echo "::notice::版本取自 CHANGELOG.md：$V"
           fi
-          printf 'version=%s\ntag=v%s\n' "$V" "$V" >> "$GITHUB_OUTPUT"
+          # 版本号已经发过时怎么办 —— 与 repo_git / photo-ar / cc-trans 共用
+          # 同一份 scripts/resolve-version.sh, 保证四个仓库行为一致。
+          RV="$(./scripts/resolve-version.sh "$V" "${{ github.event.inputs.on_conflict }}")"
+          V="$(printf '%s\n' "$RV" | sed -n 's/^version=//p')"
+          VTAG="$(printf '%s\n' "$RV" | sed -n 's/^vtag=//p')"
+          PRE="$(printf '%s\n' "$RV" | sed -n 's/^prerelease=//p')"
+          OW="$(printf '%s\n' "$RV" | sed -n 's/^overwrite=//p')"
+          printf 'version=%s\ntag=%s\nprerelease=%s\noverwrite=%s\n' \
+            "$V" "$VTAG" "$PRE" "$OW" >> "$GITHUB_OUTPUT"
           {
             echo "## 发布 v$V"
             echo ""
@@ -923,13 +945,26 @@ jobs:
           } > /tmp/notes.md
           cat /tmp/notes.md
 
+      - name: "覆盖模式：把 tag 移到当前 commit"
+        # action-gh-release 遇到已存在的 tag 只更新 Release，**不会移动 tag** ——
+        # 那样资产是新的、tag 还指着旧 commit，对不上。
+        if: needs.version.outputs.overwrite == 'true'
+        env:
+          VTAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git tag -f "${VTAG}" "${GITHUB_SHA}"
+          git push -f origin "refs/tags/${VTAG}"
+          echo "已把 ${VTAG} 移到 ${GITHUB_SHA}"
+
       - name: Create / update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.version.outputs.tag }}
           name: ${{ needs.version.outputs.tag }}
           body_path: /tmp/notes.md
-          prerelease: ${{ github.event.inputs.prerelease == 'true' }}
+          # -pre.N 一律算预发布：重跑一次发布不该把 latest / 正式版标记抢走。
+          prerelease: ${{ needs.version.outputs.prerelease == 'true' || github.event.inputs.prerelease == 'true' }}
           # 追加资产：同一个 tag 重跑时不会因为文件已存在而失败。
           fail_on_unmatched_files: false
           files: |
