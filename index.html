@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="zh" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Explore Journal · 探索旅程</title>
+  <meta name="description" content="自托管、无后端的旅行探索 App。点亮地图迷雾、AI 行程规划、好友实时共享、WebDAV 备份。受 Fog of World 启发。" />
+  <link rel="icon" type="image/png" href="assets/favicon.png" />
+  <link rel="preconnect" href="https://player.bilibili.com" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- ───────────────────────── Nav ───────────────────────── -->
+  <header class="nav" id="nav">
+    <a class="nav__brand" href="#top">
+      <img src="assets/logo.png" alt="Explore Journal" class="nav__logo" />
+      <span class="nav__name">Explore&nbsp;Journal</span>
+    </a>
+    <nav class="nav__links" aria-label="primary">
+      <a href="#features" data-nav="features"></a>
+      <a href="#videos" data-nav="videos"></a>
+      <a href="#screenshots" data-nav="screenshots"></a>
+      <a href="#compare" data-nav="compare"></a>
+      <a href="#download" data-nav="download"></a>
+    </nav>
+    <div class="nav__actions">
+      <a class="btn btn--ghost btn--sm" id="navGithub" target="_blank" rel="noopener">GitHub</a>
+      <button class="lang-toggle" id="langToggle" type="button" aria-label="切换语言 / Switch language"></button>
+    </div>
+  </header>
+
+  <main id="top">
+    <!-- ───────────────────────── Hero ───────────────────────── -->
+    <section class="hero">
+      <div class="hero__bg" id="heroBg" aria-hidden="true"></div>
+      <div class="hero__inner">
+        <span class="hero__badge" id="heroBadge"></span>
+        <h1 class="hero__title" id="heroTitle"></h1>
+        <p class="hero__subtitle" id="heroSubtitle"></p>
+        <p class="hero__desc" id="heroDesc"></p>
+        <div class="hero__cta">
+          <a class="btn btn--primary" id="heroApp"></a>
+          <a class="btn btn--ghost" id="heroPrimary"></a>
+          <a class="btn btn--ghost" id="heroSecondary" target="_blank" rel="noopener"></a>
+          <a class="btn btn--link" id="heroVideo" href="#videos"></a>
+        </div>
+      </div>
+    </section>
+
+    <!-- ───────────────────────── Features ───────────────────────── -->
+    <section class="section" id="features">
+      <div class="section__head">
+        <h2 class="section__title" data-title="features"></h2>
+        <p class="section__sub" data-sub="features"></p>
+      </div>
+      <div class="grid" id="featureGrid"></div>
+    </section>
+
+    <!-- ───────────────────────── Videos ───────────────────────── -->
+    <section class="section section--alt" id="videos">
+      <div class="section__head">
+        <h2 class="section__title" data-title="videos"></h2>
+        <p class="section__sub" data-sub="videos"></p>
+      </div>
+      <div class="videos" id="videoGrid"></div>
+    </section>
+
+    <!-- ───────────────────────── Screenshots ───────────────────────── -->
+    <section class="section" id="screenshots">
+      <div class="section__head">
+        <h2 class="section__title" data-title="screenshots"></h2>
+        <p class="section__sub" data-sub="screenshots"></p>
+      </div>
+      <div class="shots" id="shotGrid"></div>
+    </section>
+
+    <!-- ───────────────────────── Compare ───────────────────────── -->
+    <section class="section section--alt" id="compare">
+      <div class="section__head">
+        <h2 class="section__title" data-title="compare"></h2>
+        <p class="section__sub" data-sub="compare"></p>
+      </div>
+      <div class="compare" id="compareGrid"></div>
+    </section>
+
+    <!-- ───────────────────────── Download ───────────────────────── -->
+    <section class="section section--download" id="download">
+      <div class="section__head">
+        <h2 class="section__title" data-title="download"></h2>
+        <p class="section__sub" data-sub="download"></p>
+      </div>
+      <div class="dl">
+        <div class="dl__card">
+          <div class="dl__icon">🤖</div>
+          <h3 class="dl__title" id="dlAndroid"></h3>
+          <p class="dl__note" id="dlAndroidNote"></p>
+        </div>
+        <div class="dl__card">
+          <div class="dl__icon"></div>
+          <h3 class="dl__title" id="dlIos"></h3>
+          <p class="dl__note" id="dlIosNote"></p>
+        </div>
+      </div>
+      <a class="btn btn--primary btn--lg" id="dlReleases" target="_blank" rel="noopener"></a>
+      <p class="dl__tip" id="dlTip"></p>
+    </section>
+  </main>
+
+  <!-- ───────────────────────── Footer ───────────────────────── -->
+  <footer class="footer">
+    <img src="assets/logo.png" alt="" class="footer__logo" />
+    <p class="footer__tagline" id="footTagline"></p>
+    <p class="footer__line" id="footMadeWith"></p>
+    <p class="footer__line footer__muted" id="footLicense"></p>
+    <p class="footer__line footer__muted">
+      <a id="footRepo" target="_blank" rel="noopener">GitHub</a>
+      · <span id="footInspired"></span>
+    </p>
+  </footer>
+
+  <script src="config.js"></script>
+  <script src="i18n.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
