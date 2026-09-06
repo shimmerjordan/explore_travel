@@ -1,0 +1,86 @@
+# explore_journal 统一镜像 —— NAS 部署（一个容器两个服务）
+#
+#   · web-front  48080  浏览器回看足迹 + 配置保管 + 运维看板 + 静态托管
+#   · ej-backend 48081  社区排行榜 + 组队云中继
+#
+# 这份刻意**不使用任何 `${变量}`**，所以能整段粘进 QNAP Container Station /
+# 群晖 Container Manager 的「创建应用程序」YAML 框 —— 那些图形界面不做
+# `${VAR:-默认值}` 插值，粘一份带变量的进去会直接以 `invalid reference format`
+# 失败（它把整串变量当成镜像名了）。命令行 + .env 的用法请用仓库根的
+# docker-compose.ghcr.yml。
+#
+# ── 只挂一个目录 ────────────────────────────────────────────────────────
+# 合并前是两个容器各挂一个 /data。现在**只挂一个**，容器内自己分成两个子目录、
+# 属主不同：
+#
+#   宿主 /share/Web/ej_data/app/  →  容器 /data
+#                        ├─ web/      →  /data/web      （UID 65532）
+#                        └─ backend/  →  /data/backend  （UID 1000）
+#
+# 前端被攻破也读不到排行榜库 —— 这层隔离是合并时刻意保留的。
+#
+# **不要设 EJ_DATA_DIR / DATA_DIR。** 镜像里已经是 /data/web 与 /data/backend；
+# 照抄合并前那份 compose 里的 `EJ_DATA_DIR: "/data"` 会让 web-front 直接往 /data
+# 根上写，下次启动 entrypoint 又会把它当「合并前的旧布局」搬进 web/，白折腾一趟。
+#
+# 合并前那句 `sudo chown -R 65532:65532 …` **不再需要**：entrypoint 每次启动都会
+# 补建两个子目录并纠正属主，bind mount 也零配置可用。
+
+services:
+  app:
+    # 多架构 manifest（amd64 + arm64），docker 自动选对应架构。
+    # 想要可复现、可回滚就钉版本，别用 latest：
+    #   image: ghcr.io/shimmerjordan/explore_travel/app:v0.2.0
+    #   image: ghcr.io/shimmerjordan/explore_travel/app:sha-1a2b3c4
+    image: ghcr.io/shimmerjordan/explore_travel/app:latest
+    container_name: ej-app
+    restart: unless-stopped
+    # 左侧宿主端口可改，但**绝不要用 80 / 443 / 8080**：家宽运营商封这三个的
+    # 入方向，配上去从公网完全连不上。
+    ports:
+      - "48080:48080"
+      - "48081:48081"
+    volumes:
+      # 一个挂载点装两份数据。只能是本机文件系统，别指向 NFS/SMB：落盘用
+      # 「写临时文件 → fsync → 原子改名 → fsync 目录」，网络文件系统对这套
+      # 语义不可靠，有把磁盘上的文件写坏的风险。
+      #
+      # 这里是 QNAP 上共享文件夹 `Web` 的真实路径（`/share/<共享文件夹名>/…`）。
+      # 群晖一般是 `/volume1/docker/…`，换机器记得改。
+      - "/share/Web/ej_data/app:/data"
+    environment:
+      # ── web-front（48080）────────────────────────────────────────────
+      # 读代理（给私有图床 / 不带 CORS 的站点用）。用 WebDAV 就得开成 "1"：
+      # 浏览器没法直连 WebDAV（几乎没有 WebDAV 服务端发 CORS 头）。
+      EJ_PROXY_ENABLED: "false"
+      EJ_PROXY_ALLOW_HOSTS: ""
+      EJ_TOKEN_TTL_SECS: "3600"
+      EJ_WEB_ROOT: "/web"
+      EJ_METRICS_INTERVAL_SECS: "60"
+      EJ_WORKERS: "8"
+      # ── ej-backend（48081）──────────────────────────────────────────
+      # 留空 = 排行榜公开可写 / 组队中继公开可连。填上后要把同样的值填进 App：
+      # 排行榜页「配置社区服务器」填 LB_WRITE_TOKEN，组队设置「中继令牌」填
+      # GROUP_TOKEN。生成：openssl rand -hex 24
+      LB_WRITE_TOKEN: ""
+      GROUP_TOKEN: ""
+      LOG_LEVEL: "info"
+      # ── 两个服务都要的那一对 ────────────────────────────────────────
+      # 限流是**按客户端 IP 分桶**的，而两个服务各有一个开关，**必须一起设**：
+      #
+      #   经 frp / Cloudflare / 任何反代暴露  →  两个都 "1"
+      #   直接暴露端口（局域网或路由器映射）  →  两个都 "0"
+      #
+      # 设错任一方向都等于没有限流：设 0 而实际在反代后面，服务看到的来源永远
+      # 是反代自己，所有访客共享一个桶（一个人试几次口令就把别人也挡在外面）；
+      # 设 1 而实际没有反代，转发头是调用方随手写的，每个来访者都能自选分桶，
+      # 登录那条 10 次/分钟的爆破防护形同虚设。
+      #
+      # ⚠ 合并前这两个值在你的两份 compose 里是**不一致**的（front 0 / backend 1）。
+      #   按你实际的暴露方式把下面两行改成同一个值。
+      EJ_TRUST_PROXY: "1"
+      TRUST_PROXY: "1"
+    # 镜像自带 HEALTHCHECK，**同时**探两个服务的 /healthz，`docker ps` 直接看得到。
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }

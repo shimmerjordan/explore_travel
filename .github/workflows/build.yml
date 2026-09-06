@@ -322,6 +322,8 @@ jobs:
           JOB_STATUS: ${{ job.status }}
           TAGS: ${{ steps.meta.outputs.tags }}
           DIGEST: ${{ steps.push.outputs.digest }}
+          VERSION: ${{ needs.version.outputs.version }}
+          VTAG: ${{ needs.version.outputs.tag }}
           # publish 取消勾选 = 只验证不推送。摘要按这个分叉，别让人以为发出去了。
           VERIFY_ONLY: ${{ github.event.inputs.publish != 'true' }}
         run: |
@@ -402,55 +404,54 @@ jobs:
 
           ### 从两个容器升级到这一个
 
-          原先跑着 \`web-front\` 与 \`ej-backend\` 两个容器的话，按这个顺序换：
+          原先跑着 \`web-front\` 与 \`ej-backend\` 两个容器的话，按这个顺序换。统一镜像**只挂一个** \`/data\`，容器内自己分 \`web/\` 与 \`backend/\` 两个子目录（属主分别是 65532 / 1000），所以旧的两个数据目录要先并成那个形状：
 
           \`\`\`bash
-          # ① 先备份两份数据（迁移会移动文件，虽然是幂等的，但备份不要省）
-          sudo tar czf ej-backup-\$(date +%F).tgz -C /volume1/docker/web-front/data . \\
-                                                  -C /volume1/docker/ej-backend/data .
+          cd /share/Web/ej_data          # 换成你放数据的那层父目录
+
+          # ① 备份（下面只是改名，但备份不要省）
+          sudo tar czf ej-backup-\$(date +%F).tgz front backend
 
           # ② 停掉旧的两个
-          sudo docker compose -f web-front/docker-compose.ghcr.yml down
-          sudo docker compose -f backends/docker-compose.ghcr.yml down
+          sudo docker rm -f web-front ej-backend
 
-          # ③ 把两份数据并到同一个目录下（保持各自原来的文件名，别建子目录 ——
-          #    子目录由容器第一次启动时自己建，属主也由它设）
-          sudo mkdir -p /volume1/docker/explore-journal/data
-          sudo cp -a /volume1/docker/web-front/data/.  /volume1/docker/explore-journal/data/
-          sudo cp -a /volume1/docker/ej-backend/data/. /volume1/docker/explore-journal/data/
+          # ③ 搬成统一镜像期望的布局。mv 保留属主，**不需要再 chown**
+          sudo mkdir -p app
+          sudo mv front   app/web
+          sudo mv backend app/backend
           \`\`\`
 
-          两份数据的文件名不冲突（web 侧是 \`admin.json\` / \`config.json\` / \`metrics.json\`，后端侧是 \`leaderboard.json\`），所以可以直接并到一个目录里。
+          目录名对上之后就不会触发 entrypoint 的迁移逻辑——文件已经在它期望的位置了。启动日志里应当看到 \`web-front → /data/web (65532) · backend → /data/backend (1000)\`，而**不该**出现「发现合并前的数据布局」；出现了说明第 ③ 步没搬对。
+
+          （旧数据本来就直接躺在 \`/data\` 根上、没分过子目录的话，把它整个挂进来即可，entrypoint 第一次启动会把 \`admin.json\` / \`config.json\` / \`metrics.json\` 搬进 \`web/\`、\`leaderboard.json\` 搬进 \`backend/\`，幂等且目标已存在时不覆盖。）
 
           ### 在 NAS 上部署
 
-          **① 建目录并写 compose**
+          **① 写 compose**
 
-          \`\`\`bash
-          sudo mkdir -p /volume1/docker/explore-journal/data && cd /volume1/docker/explore-journal
-          \`\`\`
+          下面这份就是仓库里的 \`deploy/docker-compose.nas.yml\`，刻意**一个 \`\${变量}\` 都不含**——可以整段粘进 QNAP Container Station / 群晖 Container Manager 的「创建应用程序」YAML 框（那些界面不做插值，粘带变量的进去会以 \`invalid reference format\` 失败）。命令行 + \`.env\` 的用法请用仓库根的 \`docker-compose.ghcr.yml\`。
+
+          **注意 compose 文件本身别放进 \`app/\`**，否则它会出现在容器的 \`/data\` 里。放它的上一层。
 
           HOWTO
 
           {
             echo '```bash'
-            echo "cat > docker-compose.yml <<'YAML'"
-            cat docker-compose.ghcr.yml
+            echo "cd /share/Web/ej_data && cat > docker-compose.yml <<'YAML'"
+            cat deploy/docker-compose.nas.yml
             echo 'YAML'
             echo '```'
           } >> "$S"
 
           cat >> "$S" <<HOWTO2
 
-          **② 指定数据位置**（没有任何必填的密钥）
+          镜像那行默认是 \`:latest\`，**每次发布都会自动指向最新一次成功构建**，所以 NAS 上 \`compose pull\` 就能升级，不用改文件。想钉死本次这个版本（可复现、可回滚）就把它换成：
 
-          \`\`\`bash
-          printf 'EJ_DATA_PATH=/volume1/docker/explore-journal/data\\n' > .env
+          \`\`\`yaml
+              image: ${IMAGE}:${VTAG}
           \`\`\`
 
-          合并前需要手工 \`chown 65532\` 那一步**不用了**：entrypoint 每次启动都会把两个子目录的属主纠正过来，bind mount 也零配置可用。
-
-          **③ 起服务并自检**
+          **② 起服务并自检**
 
           \`\`\`bash
           sudo docker compose up -d
@@ -459,7 +460,7 @@ jobs:
           sudo docker compose logs | grep entrypoint   # 看数据目录与迁移结果
           \`\`\`
 
-          **④ 立刻改掉默认口令**
+          **③ 立刻改掉默认口令**
 
           浏览器打开 \`http://<NAS>:48080/admin\`，用 \`admin\` / \`admin\` 登录——顶部会挂一条红色横幅，改密表单就内联在里面。**任何能连到这个端口的人都能用默认口令登录并读走你全部云凭据。**
 
@@ -468,26 +469,28 @@ jobs:
           ### 之后的运维
 
           \`\`\`bash
-          # 升级
+          # 升级到最新一次发布（compose 里写的是 :latest，每次发布自动指过来）
           sudo docker compose pull && sudo docker compose up -d
 
-          # 钉到本次这个版本（可复现、可回滚）
-          echo 'EJ_APP_IMAGE=${IMAGE}:sha-${GITHUB_SHA:0:7}' >> .env && sudo docker compose up -d
+          # 钉版本 / 回滚：把 compose 里 image 那行的 :latest 换成 :${VTAG}
+          # 或某个更早的 :v… / :sha-…，再 up -d。这份 compose 不用变量，直接改字面量。
 
           # 只重启其中一个服务（不动另一个）
           sudo docker exec ej-app supervisorctl -c /etc/supervisor/conf.d/supervisord.conf restart backend
 
           # 备份（两个子目录一起）
-          sudo tar czf ej-backup-\$(date +%F).tgz -C /volume1/docker/explore-journal/data .
+          sudo tar czf ej-backup-\$(date +%F).tgz -C /share/Web/ej_data/app .
 
           # WebDAV 用户需要打开只读代理（浏览器无法直连 WebDAV）
-          # 在 compose 的 environment 里加 EJ_PROXY_ENABLED: "1"
+          # 在 compose 的 environment 里把 EJ_PROXY_ENABLED 改成 "1"
           \`\`\`
 
           ### 几个容易踩的点
 
           - **端口**：\`48080\` / \`48081\` 是刻意选的高端口。家宽运营商封 \`80\` / \`443\` / \`8080\` 的入方向，配到那三个上从公网连不上。
-          - **数据别放网络盘**：\`EJ_DATA_PATH\` 必须指向 NAS 本地文件系统。落盘用「写临时文件 → fsync → 原子改名 → fsync 目录」，NFS/SMB 对这套语义不可靠。
+          - **数据别放网络盘**：挂进 \`/data\` 的那个目录必须在 NAS 本地文件系统上。落盘用「写临时文件 → fsync → 原子改名 → fsync 目录」，NFS/SMB 对这套语义不可靠。
+          - **别设 \`EJ_DATA_DIR\` / \`DATA_DIR\`**：镜像里已经是 \`/data/web\` 与 \`/data/backend\`。照抄合并前那份 compose 里的 \`EJ_DATA_DIR: "/data"\` 会让 web-front 往 \`/data\` 根上写，下次启动 entrypoint 又把它当「旧布局」搬一遍。
+          - **旧的 \`web-front\` / \`ej-backend\` 两个包已经不再更新**（流水线合并时就停了）。还拉着它们的 \`:latest\` 的话，看到的永远是合并之前那一版——换成上面这份 compose 里的 \`app\` 包。
           - **忘记 admin 口令 = 已存的配置永久读不出来**。配置是用口令派生的密钥加密的，没有恢复通道。出路是从手机端重推一份覆盖它。
           - **地理定位与 PWA 安装需要安全上下文**：用 \`http://<局域网IP>:48080\` 打开时浏览器不给这些能力。在 NAS 本机用 \`localhost\`，或前面套个带证书的反代。
           - **必须置于带超时的反代之后**：web 侧是 thread-per-request 的，8 个慢速连接就能把全部 worker 占死。反代需要**同时**有读超时与响应写超时（或做响应缓冲）。
